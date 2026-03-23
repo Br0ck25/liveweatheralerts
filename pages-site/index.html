@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live Weather Alerts</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <h1>Live Weather Alerts</h1>
+      <p>Simple, clear weather safety updates for every state. The most urgent alerts are shown first.</p>
+      <div class="hero-meta">
+        <span class="meta-pill">Active alerts: <strong id="totalCount">0</strong></span>
+        <span class="meta-pill">Last synced: <strong id="lastSynced">Loading...</strong></span>
+      </div>
+      <p class="sync-warning" id="syncWarning" hidden></p>
+      <div class="summary-grid">
+        <div class="summary-card warning"><small>Warnings</small><strong id="warningCount">0</strong><small>Take action now</small></div>
+        <div class="summary-card watch"><small>Watches</small><strong id="watchCount">0</strong><small>Be ready</small></div>
+        <div class="summary-card other"><small>Other alerts</small><strong id="otherCount">0</strong><small>Stay aware</small></div>
+      </div>
+      <div class="controls">
+        <label>Search by place or alert type
+          <input id="searchInput" type="search" placeholder="Example: flood, tornado, Pike County" />
+        </label>
+        <label>Show alert level
+          <select id="levelFilter">
+            <option value="all">All levels</option>
+            <option value="warning">Take action now</option>
+            <option value="watch">Be ready</option>
+            <option value="other">Stay aware</option>
+          </select>
+        </label>
+        <label>Choose state
+          <select id="stateFilter"></select>
+        </label>
+        <button type="button" id="clearFilters">Clear filters</button>
+      </div>
+      <div class="quick-filters">
+        <button type="button" class="chip-btn active" data-level="all">Show all</button>
+        <button type="button" class="chip-btn" data-level="warning">Action now</button>
+        <button type="button" class="chip-btn" data-level="watch">Be ready</button>
+        <button type="button" class="chip-btn" data-level="other">Stay aware</button>
+      </div>
+    </section>
+
+    <section class="results-row" aria-live="polite">
+      <p id="resultsCount">Loading alerts...</p>
+      <button type="button" class="refresh-btn" id="refreshPage">Refresh now</button>
+    </section>
+
+    <section class="empty-state" id="globalEmpty" hidden>
+      <h2>No active weather alerts</h2>
+      <p>Check back soon. This page refreshes with the latest updates.</p>
+    </section>
+
+    <section class="alerts-grid" id="alertsGrid"></section>
+    <section class="filter-empty" id="filterEmptyState" hidden>No alerts match your current filter. Try a different search term.</section>
+
+    <p class="footer-note">
+      Source:
+      <a href="https://api.weather.gov/alerts/active" target="_blank" rel="noopener noreferrer">NWS Active Alerts Feed</a>
+    </p>
+  </main>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "live-weather",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-03-10",
+	"observability": {
+		"enabled": true
+	},
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"kv_namespaces": [
+		{
+			"binding": "WEATHER_KV",
+			"id": "e48c86e12b5143a48271034d6289af66"
+		}
+	],
+	"assets": {
+		"directory": "./images",
+		"binding": "ASSETS"
+	},
+	/**
+	 * Cron Triggers
+	 * Polls NWS every 2 minutes using ETags — 304 responses cost almost nothing.
+	 * https://developers.cloudflare.com/workers/configuration/cron-triggers/
+	 */
+	"triggers": {
+		"crons": ["*/2 * * * *"]
+	}
+}

@@ -1,0 +1,14 @@
+# Root ignores
+node_modules/
+**/node_modules/
+.wrangler/
+**/.wrangler/
+.vscode/
+**/.DS_Store
+**/dist/
+**/coverage/
+
+# local env files
+.env
+.env.*
+!.env.example
