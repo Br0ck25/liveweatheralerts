@@ -11,6 +11,8 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 - `convective-outlook/` - kid-friendly SPC outlook page
 - `faq/` - kid-friendly weather FAQ page
 - `tornado-basics/` - evergreen tornado basics page
+- `forecast-maps/` - plain-language national forecast maps guide
+- `alert-methods/` - plain-language warning delivery setup guide
 - `functions/api/convective-outlook.js` - pulls and simplifies SPC Day 1/2/3 outlook pages
 
 ## Required Pages Environment Variable

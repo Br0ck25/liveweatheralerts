@@ -1,0 +1,154 @@
+.methods-hero p {
+  max-width: 78ch;
+}
+
+.methods-section {
+  margin-top: 12px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(16, 38, 59, 0.12);
+  border-radius: 16px;
+  padding: 12px;
+}
+
+.methods-section h2 {
+  margin: 0 0 10px;
+  font-family: "Fredoka", "Trebuchet MS", sans-serif;
+  font-size: 1.24rem;
+}
+
+.checklist-grid,
+.decoder-grid,
+.backup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.check-item,
+.decoder-card,
+.backup-card {
+  border: 1px solid #dce8f3;
+  border-radius: 12px;
+  background: #fafdff;
+  padding: 11px;
+}
+
+.check-item h3,
+.decoder-card h3,
+.backup-card h3 {
+  margin: 0 0 6px;
+  font-size: 1.02rem;
+  color: #143652;
+}
+
+.check-item p,
+.decoder-card p,
+.backup-card p {
+  margin: 0;
+  color: #254861;
+  line-height: 1.42;
+}
+
+.method-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.method-card {
+  border: 1px solid #dce8f3;
+  border-radius: 12px;
+  background: #fafdff;
+  padding: 11px;
+}
+
+.method-card h3 {
+  margin: 0 0 8px;
+  font-size: 1.03rem;
+  color: #143652;
+}
+
+.method-card p {
+  margin: 0 0 8px;
+  color: #254861;
+  line-height: 1.42;
+}
+
+.method-card p:last-of-type {
+  margin-bottom: 10px;
+}
+
+.method-link {
+  display: inline-block;
+  color: #0f4f78;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.method-link:hover,
+.method-link:focus-visible {
+  text-decoration: underline;
+}
+
+.decoder-card.watch {
+  border-top: 5px solid #c96a11;
+}
+
+.decoder-card.warning {
+  border-top: 5px solid #b5271f;
+}
+
+.decoder-card.advisory {
+  border-top: 5px solid #2b6ea0;
+}
+
+.method-details {
+  border: 1px solid #dce8f3;
+  border-radius: 12px;
+  background: #fafdff;
+  overflow: clip;
+}
+
+.method-details summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 12px;
+  font-weight: 900;
+  color: #103450;
+}
+
+.method-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.method-details summary:hover {
+  background: #edf7ff;
+}
+
+.details-copy {
+  padding: 0 12px 12px;
+}
+
+.details-copy p {
+  margin: 0 0 8px;
+  color: #254861;
+  line-height: 1.42;
+}
+
+.details-copy p:last-child {
+  margin-bottom: 0;
+}
+
+@media (max-width: 1080px) {
+  .method-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 860px) {
+  .checklist-grid,
+  .decoder-grid,
+  .backup-grid {
+    grid-template-columns: 1fr;
+  }
+}
