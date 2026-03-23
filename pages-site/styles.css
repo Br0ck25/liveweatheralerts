@@ -37,6 +37,35 @@ body {
   margin: 22px auto 34px;
 }
 
+.site-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.nav-link {
+  display: inline-block;
+  text-decoration: none;
+  color: #0f3453;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(16, 38, 59, 0.14);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-weight: 800;
+  font-size: 0.92rem;
+}
+
+.nav-link:hover {
+  background: #f0f8ff;
+}
+
+.nav-link.active {
+  background: #11314c;
+  color: #fff;
+  border-color: #11314c;
+}
+
 .hero {
   background: linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(255, 246, 228, 0.95) 100%);
   border: 1px solid rgba(16, 38, 59, 0.12);
@@ -175,6 +204,34 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.page-links {
+  margin-top: 12px;
+}
+
+.page-link-card {
+  display: grid;
+  gap: 4px;
+  text-decoration: none;
+  color: #12314b;
+  border: 1px solid #cce0f0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 10px 12px;
+}
+
+.page-link-card strong {
+  font-size: 1rem;
+}
+
+.page-link-card span {
+  color: #34546d;
+  font-size: 0.9rem;
+}
+
+.page-link-card:hover {
+  background: #f5fbff;
 }
 
 .chip-btn {

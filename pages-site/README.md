@@ -8,6 +8,8 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 - `styles.css` - page styling
 - `app.js` - fetches alert JSON and renders cards
 - `functions/api/alerts.js` - Pages Function proxy to the backend Worker
+- `convective-outlook/` - kid-friendly SPC outlook page
+- `functions/api/convective-outlook.js` - pulls and simplifies SPC RSS feed
 
 ## Required Pages Environment Variable
 
@@ -28,3 +30,4 @@ Set this in Cloudflare Pages project settings:
 
 - The frontend calls `/api/alerts` on the same domain.
 - The Pages Function forwards that request to your backend Worker.
+- The convective outlook page calls `/api/convective-outlook`.

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Convective Outlook | Live Weather Alerts</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../styles.css" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="page">
+    <nav class="site-nav" aria-label="Main pages">
+      <a class="nav-link" href="/">Weather Alerts</a>
+      <a class="nav-link active" href="/convective-outlook/">Convective Outlook</a>
+    </nav>
+
+    <section class="hero">
+      <h1>Convective Outlook</h1>
+      <p>This page explains the Storm Prediction Center outlook in kid-friendly words, while still showing how serious it could be.</p>
+      <div class="hero-meta">
+        <span class="meta-pill">Latest update: <strong id="updatedAt">Loading...</strong></span>
+        <span class="meta-pill">Outlooks found: <strong id="outlookCount">0</strong></span>
+      </div>
+      <p class="sync-warning" id="loadWarning" hidden></p>
+    </section>
+
+    <section class="legend-card">
+      <h2>Risk Colors</h2>
+      <p>Brighter colors mean stronger storm danger.</p>
+      <div class="risk-legend">
+        <span class="risk-pill risk-high">High</span>
+        <span class="risk-pill risk-moderate">Moderate</span>
+        <span class="risk-pill risk-enhanced">Enhanced</span>
+        <span class="risk-pill risk-slight">Slight</span>
+        <span class="risk-pill risk-marginal">Marginal</span>
+        <span class="risk-pill risk-none">No Severe</span>
+      </div>
+    </section>
+
+    <section class="outlook-grid" id="outlookGrid"></section>
+    <section class="empty-state" id="outlookEmpty" hidden>
+      <h2>No convective outlook data right now</h2>
+      <p>Please refresh in a minute.</p>
+    </section>
+
+    <p class="footer-note">
+      Source:
+      <a href="https://www.spc.noaa.gov/products/spcrss.xml" target="_blank" rel="noopener noreferrer">SPC RSS Feed</a>
+    </p>
+  </main>
+  <script src="./app.js" defer></script>
+</body>
+</html>
