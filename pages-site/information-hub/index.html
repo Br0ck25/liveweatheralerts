@@ -19,9 +19,7 @@
       <a class="nav-link" href="/">Weather Alerts</a>
       <a class="nav-link active" href="/information-hub/">Information Hub</a>
       <a class="nav-link" href="/convective-outlook/">Convective Outlook</a>
-      <a class="nav-link" href="/faq/">Weather FAQ</a>
       <a class="nav-link" href="/tornado-basics/">Tornado Basics</a>
-      <a class="nav-link" href="/forecast-maps/">Forecast Maps</a>
       <a class="nav-link" href="/alert-methods/">Alert Methods</a>
     </nav>
 
@@ -39,6 +37,7 @@
       <div class="hub-tabs" role="tablist" aria-label="Information Hub sections">
         <button class="hub-tab is-active" id="tab-start" role="tab" aria-selected="true" aria-controls="panel-start" data-panel="start">Start Here</button>
         <button class="hub-tab" id="tab-hazards" role="tab" aria-selected="false" aria-controls="panel-hazards" data-panel="hazards" tabindex="-1">Hazard Library</button>
+        <button class="hub-tab" id="tab-faq" role="tab" aria-selected="false" aria-controls="panel-faq" data-panel="faq" tabindex="-1">Weather FAQ</button>
         <button class="hub-tab" id="tab-alerts" role="tab" aria-selected="false" aria-controls="panel-alerts" data-panel="alerts" tabindex="-1">Alert Methods</button>
         <button class="hub-tab" id="tab-tornado" role="tab" aria-selected="false" aria-controls="panel-tornado" data-panel="tornado" tabindex="-1">Tornado Basics</button>
         <button class="hub-tab" id="tab-maps" role="tab" aria-selected="false" aria-controls="panel-maps" data-panel="maps" tabindex="-1">Forecast Maps</button>
@@ -177,6 +176,29 @@
             <a href="https://www.weather.gov/safety/hurricane" target="_blank" rel="noopener noreferrer">Read official guidance</a>
           </article>
         </div>
+      </section>
+
+      <section class="hub-panel" id="panel-faq" role="tabpanel" aria-labelledby="tab-faq" hidden>
+        <h2>Weather FAQ Quick Answers</h2>
+        <div class="panel-grid">
+          <article class="panel-card">
+            <h3>Watch vs Warning</h3>
+            <p>A watch means severe weather is possible. A warning means severe weather is happening or expected very soon.</p>
+          </article>
+          <article class="panel-card">
+            <h3>What counts as severe thunderstorm weather?</h3>
+            <p>In simple terms: large hail, very strong wind, or tornado potential from thunderstorms.</p>
+          </article>
+          <article class="panel-card">
+            <h3>Why percentages can look small</h3>
+            <p>Even moderate-looking percentages can signal meaningful risk compared to a normal day at one location.</p>
+          </article>
+          <article class="panel-card">
+            <h3>Risk levels</h3>
+            <p>Marginal to High means increasing organized severe storm threat. Higher levels need more planning and faster response.</p>
+          </article>
+        </div>
+        <a class="panel-link" href="/faq/">Open full Weather FAQ page</a>
       </section>
 
       <section class="hub-panel" id="panel-alerts" role="tabpanel" aria-labelledby="tab-alerts" hidden>

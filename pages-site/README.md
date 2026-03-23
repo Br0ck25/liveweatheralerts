@@ -16,6 +16,8 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 - `alert-methods/` - plain-language warning delivery setup guide
 - `functions/api/convective-outlook.js` - pulls and simplifies SPC Day 1/2/3 outlook pages
 
+`FAQ` and `Forecast Maps` are also accessible as tabs in the Information Hub.
+
 ## Required Pages Environment Variable
 
 Set this in Cloudflare Pages project settings:

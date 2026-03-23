@@ -1,7 +1,8 @@
 const tabs = Array.from(document.querySelectorAll('.hub-tab'));
 const panels = Array.from(document.querySelectorAll('.hub-panel'));
 
-function activateTab(tab) {
+function activateTab(tab, options = {}) {
+  const { updateUrl = true } = options;
   const target = tab.dataset.panel;
   if (!target) return;
 
@@ -17,6 +18,16 @@ function activateTab(tab) {
     panel.classList.toggle('is-active', isActive);
     panel.hidden = !isActive;
   });
+
+  if (updateUrl && typeof window !== 'undefined' && typeof history !== 'undefined') {
+    const url = new URL(window.location.href);
+    if (target === 'start') {
+      url.searchParams.delete('tab');
+    } else {
+      url.searchParams.set('tab', target);
+    }
+    history.replaceState(null, '', url.toString());
+  }
 }
 
 tabs.forEach((tab, index) => {
@@ -37,3 +48,8 @@ tabs.forEach((tab, index) => {
     }
   });
 });
+
+const requestedTab = new URLSearchParams(window.location.search).get('tab');
+const defaultTab = tabs.find((tab) => tab.classList.contains('is-active')) || tabs[0];
+const initialTab = tabs.find((tab) => tab.dataset.panel === requestedTab) || defaultTab;
+if (initialTab) activateTab(initialTab, { updateUrl: false });
