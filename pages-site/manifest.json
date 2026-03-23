@@ -1,0 +1,21 @@
+{
+  "name": "Live Weather Alerts",
+  "short_name": "Weather Alerts",
+  "description": "Real-time weather alerts, convective outlook, and safety guidance.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0055aa",
+  "icons": [
+    {
+      "src": "/logo/Live Weather Alerts logo 192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo/Live Weather Alerts logo 32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    }
+  ]
+}
