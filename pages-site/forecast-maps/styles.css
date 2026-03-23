@@ -16,6 +16,11 @@
   font-size: 1.24rem;
 }
 
+.maps-note {
+  margin: 0 0 10px;
+  color: #305069;
+}
+
 .step-grid,
 .rule-grid {
   display: grid;
@@ -59,6 +64,28 @@
   margin: 0 0 8px;
   font-size: 1.04rem;
   color: #143652;
+}
+
+.map-preview {
+  margin: 0 0 8px;
+  border: 1px solid #dce8f3;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #eef6fc;
+}
+
+.map-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.map-preview figcaption {
+  padding: 6px 8px;
+  border-top: 1px solid #dce8f3;
+  background: #fafdff;
+  color: #3a5870;
+  font-size: 0.86rem;
 }
 
 .map-card p {

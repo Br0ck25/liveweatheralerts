@@ -11,12 +11,14 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 - `information-hub/` - tabbed weather learning center and hazard library
 - `convective-outlook/` - plain-language SPC outlook page
 - `faq/` - plain-language weather FAQ page
+- `weather-terms/` - mini-glossary for common weather terms
 - `tornado-basics/` - evergreen tornado basics page
-- `forecast-maps/` - plain-language national forecast maps guide
+- `forecast-maps/` - plain-language national forecast maps guide with embedded live map images
 - `alert-methods/` - plain-language warning delivery setup guide
 - `functions/api/convective-outlook.js` - pulls and simplifies SPC Day 1/2/3 outlook pages
 
 `FAQ` and `Forecast Maps` are also accessible as tabs in the Information Hub.
+Weather Terms are available at `/weather-terms/` and in the Information Hub glossary tab.
 
 ## Required Pages Environment Variable
 
