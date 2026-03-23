@@ -1,0 +1,223 @@
+.hub-hero p {
+  max-width: 76ch;
+}
+
+.hub-shell {
+  margin-top: 12px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(16, 38, 59, 0.12);
+  border-radius: 16px;
+  padding: 12px;
+}
+
+.hub-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.hub-tab {
+  border: 1px solid #a9c1d5;
+  background: #f8fcff;
+  color: #11314c;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-weight: 800;
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+.hub-tab.is-active {
+  background: #11314c;
+  color: #fff;
+  border-color: #11314c;
+}
+
+.hub-tab:focus-visible {
+  outline: 2px solid #2b6ea0;
+  outline-offset: 2px;
+}
+
+.hub-panel h2 {
+  margin: 0 0 10px;
+  font-family: "Fredoka", "Trebuchet MS", sans-serif;
+  font-size: 1.3rem;
+}
+
+.panel-intro {
+  margin: 0 0 10px;
+  color: #31506a;
+}
+
+.plan-grid,
+.panel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.plan-card,
+.panel-card {
+  border: 1px solid #dce8f3;
+  border-radius: 12px;
+  background: #fafdff;
+  padding: 11px;
+}
+
+.plan-card h3,
+.panel-card h3 {
+  margin: 0 0 6px;
+  font-size: 1.02rem;
+  color: #143652;
+}
+
+.plan-card p,
+.panel-card p {
+  margin: 0;
+  color: #264961;
+  line-height: 1.42;
+}
+
+.hazard-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.hazard-card {
+  border: 1px solid #dce8f3;
+  border-radius: 12px;
+  background: #fafdff;
+  padding: 11px;
+}
+
+.hazard-card h3 {
+  margin: 0 0 7px;
+  font-size: 1.02rem;
+  color: #143652;
+}
+
+.hazard-card p {
+  margin: 0 0 8px;
+  color: #264961;
+  line-height: 1.42;
+}
+
+.hazard-card ul {
+  margin: 0 0 9px;
+  padding-left: 18px;
+}
+
+.hazard-card li {
+  margin-bottom: 4px;
+  line-height: 1.35;
+  color: #264961;
+}
+
+.hazard-card a {
+  color: #0f4f78;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.hazard-card a:hover,
+.hazard-card a:focus-visible {
+  text-decoration: underline;
+}
+
+.method-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.method-card {
+  border: 1px solid #dce8f3;
+  border-radius: 12px;
+  background: #fafdff;
+  padding: 11px;
+}
+
+.method-card h3 {
+  margin: 0 0 7px;
+  font-size: 1.02rem;
+  color: #143652;
+}
+
+.method-card p {
+  margin: 0 0 8px;
+  color: #264961;
+  line-height: 1.42;
+}
+
+.method-card p:last-child {
+  margin-bottom: 0;
+}
+
+.panel-link {
+  display: inline-block;
+  margin-top: 10px;
+  color: #0f4f78;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.panel-link:hover,
+.panel-link:focus-visible {
+  text-decoration: underline;
+}
+
+.hub-details {
+  margin-top: 10px;
+  border: 1px solid #dce8f3;
+  border-radius: 12px;
+  background: #fafdff;
+  overflow: clip;
+}
+
+.hub-details summary {
+  cursor: pointer;
+  padding: 11px;
+  font-weight: 900;
+  color: #103450;
+  list-style: none;
+}
+
+.hub-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.hub-details summary:hover {
+  background: #edf7ff;
+}
+
+.details-copy {
+  padding: 0 11px 11px;
+}
+
+.details-copy p {
+  margin: 0 0 8px;
+  color: #264961;
+  line-height: 1.42;
+}
+
+.details-copy p:last-child {
+  margin-bottom: 0;
+}
+
+@media (max-width: 1100px) {
+  .hazard-grid,
+  .method-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 860px) {
+  .plan-grid,
+  .panel-grid,
+  .hazard-grid,
+  .method-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Information Hub | Live Weather Alerts</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../styles.css" />
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/logo/Live Weather Alerts logo 32.png" />
+  <link rel="apple-touch-icon" sizes="192x192" href="/logo/Live Weather Alerts logo 192.png" />
+  <link rel="manifest" href="/manifest.json" />
+</head>
+<body>
+  <main class="page">
+    <nav class="site-nav" aria-label="Main pages">
+      <a class="nav-link" href="/">Weather Alerts</a>
+      <a class="nav-link active" href="/information-hub/">Information Hub</a>
+      <a class="nav-link" href="/convective-outlook/">Convective Outlook</a>
+      <a class="nav-link" href="/faq/">Weather FAQ</a>
+      <a class="nav-link" href="/tornado-basics/">Tornado Basics</a>
+      <a class="nav-link" href="/forecast-maps/">Forecast Maps</a>
+      <a class="nav-link" href="/alert-methods/">Alert Methods</a>
+    </nav>
+
+    <section class="hero hub-hero">
+      <h1>Information Hub</h1>
+      <p>Your one-stop weather learning center. Use the tabs to get practical guidance first. Technical links are optional.</p>
+      <div class="hero-meta">
+        <span class="meta-pill">Built for fast decisions</span>
+        <span class="meta-pill">Plain-language guidance</span>
+        <span class="meta-pill">Official sources optional</span>
+      </div>
+    </section>
+
+    <section class="hub-shell">
+      <div class="hub-tabs" role="tablist" aria-label="Information Hub sections">
+        <button class="hub-tab is-active" id="tab-start" role="tab" aria-selected="true" aria-controls="panel-start" data-panel="start">Start Here</button>
+        <button class="hub-tab" id="tab-hazards" role="tab" aria-selected="false" aria-controls="panel-hazards" data-panel="hazards" tabindex="-1">Hazard Library</button>
+        <button class="hub-tab" id="tab-alerts" role="tab" aria-selected="false" aria-controls="panel-alerts" data-panel="alerts" tabindex="-1">Alert Methods</button>
+        <button class="hub-tab" id="tab-tornado" role="tab" aria-selected="false" aria-controls="panel-tornado" data-panel="tornado" tabindex="-1">Tornado Basics</button>
+        <button class="hub-tab" id="tab-maps" role="tab" aria-selected="false" aria-controls="panel-maps" data-panel="maps" tabindex="-1">Forecast Maps</button>
+      </div>
+
+      <section class="hub-panel is-active" id="panel-start" role="tabpanel" aria-labelledby="tab-start">
+        <h2>Fast Weather Plan</h2>
+        <div class="plan-grid">
+          <article class="plan-card">
+            <h3>Step 1: Check your active alerts</h3>
+            <p>Open the <a href="/">Weather Alerts page</a> first. Warnings mean act now. Watches mean get ready.</p>
+          </article>
+          <article class="plan-card">
+            <h3>Step 2: Check risk for next days</h3>
+            <p>Use <a href="/convective-outlook/">Convective Outlook</a> for broader severe weather setup over Day 1 to Day 3.</p>
+          </article>
+          <article class="plan-card">
+            <h3>Step 3: Review hazard guidance</h3>
+            <p>Use the Hazard Library tab for what each threat means and simple action steps.</p>
+          </article>
+          <article class="plan-card">
+            <h3>Step 4: Confirm alert delivery</h3>
+            <p>Set up multiple methods so warnings reach you even if one system fails.</p>
+          </article>
+        </div>
+        <details class="hub-details">
+          <summary>Technical terms (optional)</summary>
+          <div class="details-copy">
+            <p><strong>Watch:</strong> conditions are favorable for severe weather.</p>
+            <p><strong>Warning:</strong> severe weather is occurring or imminent in a warning area.</p>
+            <p><strong>Outlook:</strong> forecast guidance for potential risk over a future time period.</p>
+          </div>
+        </details>
+      </section>
+
+      <section class="hub-panel" id="panel-hazards" role="tabpanel" aria-labelledby="tab-hazards" hidden>
+        <h2>Hazard Library</h2>
+        <p class="panel-intro">Each card explains the threat in plain language and gives immediate actions.</p>
+        <div class="hazard-grid">
+          <article class="hazard-card">
+            <h3>Thunderstorm</h3>
+            <p>Severe storms can produce large hail, damaging wind, lightning, and flash flooding.</p>
+            <ul>
+              <li>Move indoors when storms approach.</li>
+              <li>Avoid windows during severe warnings.</li>
+              <li>Do not drive through flooded roads.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/thunderstorm" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+
+          <article class="hazard-card">
+            <h3>Tornado</h3>
+            <p>Tornadoes can form quickly and are not always easy to see.</p>
+            <ul>
+              <li>Know your safe place now.</li>
+              <li>Treat tornado warnings as immediate action.</li>
+              <li>Stay away from windows and exterior walls.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/tornado" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+
+          <article class="hazard-card">
+            <h3>Flood</h3>
+            <p>Flooding can happen fast and often impacts roads before people expect it.</p>
+            <ul>
+              <li>Never drive into flooded water.</li>
+              <li>Move to higher ground when flood warnings are issued.</li>
+              <li>Avoid low crossings and creek roads.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/flood" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+
+          <article class="hazard-card">
+            <h3>Lightning</h3>
+            <p>Lightning can strike before heavy rain reaches your location.</p>
+            <ul>
+              <li>When thunder roars, go indoors.</li>
+              <li>Avoid open fields, trees, and water.</li>
+              <li>Wait at least 30 minutes after last thunder.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/lightning" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+
+          <article class="hazard-card">
+            <h3>Heat</h3>
+            <p>Heat illness can develop quickly, especially for older adults, children, and outdoor workers.</p>
+            <ul>
+              <li>Hydrate often and rest in shade or AC.</li>
+              <li>Limit activity during hottest hours.</li>
+              <li>Check on neighbors and family members.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/heat" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+
+          <article class="hazard-card">
+            <h3>Winter Weather</h3>
+            <p>Snow, ice, and wind chill can create dangerous travel and exposure conditions.</p>
+            <ul>
+              <li>Slow down and avoid unnecessary travel.</li>
+              <li>Carry warm layers and emergency supplies.</li>
+              <li>Watch for changing road conditions.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/winter" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+
+          <article class="hazard-card">
+            <h3>Wildfire</h3>
+            <p>Dry fuels, wind, and low humidity can spread fire rapidly.</p>
+            <ul>
+              <li>Follow local burn restrictions.</li>
+              <li>Prepare an evacuation go-bag.</li>
+              <li>Leave early if evacuation orders are issued.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/wildfire" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+
+          <article class="hazard-card">
+            <h3>Rip Current</h3>
+            <p>Rip currents can pull swimmers away from shore quickly.</p>
+            <ul>
+              <li>Swim near lifeguards when possible.</li>
+              <li>If caught, swim parallel to shore.</li>
+              <li>Float and signal for help if tired.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/ripcurrent" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+
+          <article class="hazard-card">
+            <h3>Hurricane</h3>
+            <p>Hurricanes bring wind, surge, inland flooding, and long-duration impacts.</p>
+            <ul>
+              <li>Know your evacuation zone.</li>
+              <li>Stock supplies before conditions worsen.</li>
+              <li>Do not focus only on the center track.</li>
+            </ul>
+            <a href="https://www.weather.gov/safety/hurricane" target="_blank" rel="noopener noreferrer">Read official guidance</a>
+          </article>
+        </div>
+      </section>
+
+      <section class="hub-panel" id="panel-alerts" role="tabpanel" aria-labelledby="tab-alerts" hidden>
+        <h2>Alert Methods You Should Use Together</h2>
+        <div class="method-grid">
+          <article class="method-card">
+            <h3>Wireless Emergency Alerts (WEA)</h3>
+            <p>Fast phone-based warnings for your location. Great when you are away from home.</p>
+            <p>Keep emergency alert settings enabled and test volume settings.</p>
+          </article>
+          <article class="method-card">
+            <h3>NOAA Weather Radio</h3>
+            <p>Reliable backup with warning tones, especially overnight and during network outages.</p>
+            <p>Use battery backup and verify your local station coverage.</p>
+          </article>
+          <article class="method-card">
+            <h3>This Site</h3>
+            <p>Use Live Weather Alerts for plain-language interpretation and quick planning.</p>
+            <p>Best when paired with push alerts so you do not miss urgent warnings.</p>
+          </article>
+        </div>
+        <a class="panel-link" href="/alert-methods/">Open full Alert Methods guide</a>
+      </section>
+
+      <section class="hub-panel" id="panel-tornado" role="tabpanel" aria-labelledby="tab-tornado" hidden>
+        <h2>Tornado Basics In Plain Language</h2>
+        <div class="panel-grid">
+          <article class="panel-card">
+            <h3>Core truth</h3>
+            <p>Tornadoes can form quickly and are not always visibly obvious. Use warnings and alerts, not visuals alone.</p>
+          </article>
+          <article class="panel-card">
+            <h3>Best action</h3>
+            <p>When a tornado warning is issued, move immediately to your safe place and stay there until danger passes.</p>
+          </article>
+          <article class="panel-card">
+            <h3>Common myth</h3>
+            <p>“I can wait to see it.” This delays action and increases risk. Early movement is safer than late movement.</p>
+          </article>
+        </div>
+        <a class="panel-link" href="/tornado-basics/">Open full Tornado Basics page</a>
+      </section>
+
+      <section class="hub-panel" id="panel-maps" role="tabpanel" aria-labelledby="tab-maps" hidden>
+        <h2>Forecast Maps Without The Jargon</h2>
+        <div class="panel-grid">
+          <article class="panel-card">
+            <h3>Temperature</h3>
+            <p>Plan for heat and cold impacts on travel, work, school, and vulnerable people.</p>
+          </article>
+          <article class="panel-card">
+            <h3>Wind</h3>
+            <p>Wind affects fire spread, storm damage potential, and difficult travel conditions.</p>
+          </article>
+          <article class="panel-card">
+            <h3>Rain chance and totals</h3>
+            <p>Use both together. Chance tells if rain is likely; totals help estimate flood potential.</p>
+          </article>
+        </div>
+        <a class="panel-link" href="/forecast-maps/">Open full Forecast Maps guide</a>
+      </section>
+    </section>
+
+    <p class="footer-note">
+      Primary safety sources:
+      <a href="https://www.weather.gov/safety/" target="_blank" rel="noopener noreferrer">NWS Safety</a>,
+      <a href="https://www.weather.gov/informationcenter" target="_blank" rel="noopener noreferrer">NWS Information Center</a>,
+      and
+      <a href="https://www.weather.gov/education/" target="_blank" rel="noopener noreferrer">NWS Education</a>.
+    </p>
+  </main>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>

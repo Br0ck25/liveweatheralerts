@@ -8,8 +8,9 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 - `styles.css` - page styling
 - `app.js` - fetches alert JSON and renders cards
 - `functions/api/alerts.js` - Pages Function proxy to the backend Worker
-- `convective-outlook/` - kid-friendly SPC outlook page
-- `faq/` - kid-friendly weather FAQ page
+- `information-hub/` - tabbed weather learning center and hazard library
+- `convective-outlook/` - plain-language SPC outlook page
+- `faq/` - plain-language weather FAQ page
 - `tornado-basics/` - evergreen tornado basics page
 - `forecast-maps/` - plain-language national forecast maps guide
 - `alert-methods/` - plain-language warning delivery setup guide
