@@ -28,17 +28,7 @@
         <input id="zipInput" name="zip" type="text" inputmode="numeric" pattern="\d{5}" maxlength="5" placeholder="Example: 40475" required />
         <button type="submit" id="zipSubmit">Update</button>
       </form>
-      <button type="button" id="useLocationBtn" class="inline-action-btn">Use my location</button>
-
-      <form id="latLonForm" class="latlon-form" autocomplete="off">
-        <label for="latInput">Latitude</label>
-        <input id="latInput" name="lat" type="text" inputmode="decimal" placeholder="37.1678" />
-
-        <label for="lonInput">Longitude</label>
-        <input id="lonInput" name="lon" type="text" inputmode="decimal" placeholder="-83.3073" />
-
-        <button type="submit" id="latLonSubmit">Use lat/lon</button>
-      </form>
+      <button type="button" id="useLocationBtn" class="location-btn">Use my location</button>
 
       <p class="status-text" id="statusText">Enter a ZIP code to load your local forecast.</p>
       <p class="sync-warning" id="errorText" hidden></p>

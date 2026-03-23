@@ -9,10 +9,6 @@ const dom = {
   zipInput: document.getElementById('zipInput'),
   zipSubmit: document.getElementById('zipSubmit'),
   useLocationBtn: document.getElementById('useLocationBtn'),
-  latLonForm: document.getElementById('latLonForm'),
-  latInput: document.getElementById('latInput'),
-  lonInput: document.getElementById('lonInput'),
-  latLonSubmit: document.getElementById('latLonSubmit'),
   statusText: document.getElementById('statusText'),
   errorText: document.getElementById('errorText'),
   conditionLine: document.getElementById('conditionLine'),
@@ -337,7 +333,7 @@ function wireScrollerButtons() {
 }
 
 async function loadForecast(requestInput) {
-  if (!dom.statusText || !dom.zipSubmit || !dom.latLonSubmit || !dom.useLocationBtn) return;
+  if (!dom.statusText || !dom.zipSubmit || !dom.useLocationBtn) return;
 
   let query = '';
   let saveMode = 'zip';
@@ -368,10 +364,8 @@ async function loadForecast(requestInput) {
   clearError();
   dom.statusText.textContent = 'Loading forecast...';
   dom.zipSubmit.disabled = true;
-  dom.latLonSubmit.disabled = true;
   dom.useLocationBtn.disabled = true;
   dom.zipSubmit.textContent = 'Loading...';
-  dom.latLonSubmit.textContent = 'Loading...';
 
   try {
     const response = await fetch(`/api/forecast?${query}`, {
@@ -418,10 +412,8 @@ async function loadForecast(requestInput) {
   } finally {
     if (requestId === activeRequestId) {
       dom.zipSubmit.disabled = false;
-      dom.latLonSubmit.disabled = false;
       dom.useLocationBtn.disabled = false;
       dom.zipSubmit.textContent = 'Update';
-      dom.latLonSubmit.textContent = 'Use lat/lon';
     }
   }
 }
@@ -441,16 +433,14 @@ function useBrowserLocation() {
     async (position) => {
       const lat = position.coords.latitude;
       const lon = position.coords.longitude;
-      if (dom.latInput) dom.latInput.value = lat.toFixed(6);
-      if (dom.lonInput) dom.lonInput.value = lon.toFixed(6);
       await loadForecast({ mode: 'latlon', lat, lon });
     },
     (error) => {
       if (error.code === 1) {
-        setError('Location permission was denied. You can still use ZIP or lat/lon.');
+        setError('Location permission was denied. You can still use ZIP.');
         return;
       }
-      setError('Could not get location right now. You can still use ZIP or lat/lon.');
+      setError('Could not get location right now. You can still use ZIP.');
     },
     {
       enableHighAccuracy: true,
@@ -470,13 +460,6 @@ if (dom.zipForm && dom.zipInput) {
   dom.zipForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     await loadForecast({ mode: 'zip', zip: dom.zipInput.value });
-  });
-}
-
-if (dom.latLonForm && dom.latInput && dom.lonInput) {
-  dom.latLonForm.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    await loadForecast({ mode: 'latlon', lat: dom.latInput.value, lon: dom.lonInput.value });
   });
 }
 
@@ -506,8 +489,6 @@ if (savedMode === 'latlon') {
   const lat = parseCoordinate(savedLat);
   const lon = parseCoordinate(savedLon);
   if (lat !== null && lon !== null && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
-    if (dom.latInput) dom.latInput.value = String(lat);
-    if (dom.lonInput) dom.lonInput.value = String(lon);
     loadForecast({ mode: 'latlon', lat, lon });
   } else if (/^\d{5}$/.test(savedZip) && dom.zipInput) {
     dom.zipInput.value = savedZip;
