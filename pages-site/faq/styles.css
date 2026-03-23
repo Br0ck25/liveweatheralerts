@@ -1,0 +1,73 @@
+.faq-hero p {
+  max-width: 78ch;
+}
+
+.faq-section {
+  margin-top: 12px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(16, 38, 59, 0.12);
+  border-radius: 16px;
+  padding: 12px;
+}
+
+.faq-section h2 {
+  margin: 0 0 10px;
+  font-family: "Fredoka", "Trebuchet MS", sans-serif;
+  font-size: 1.3rem;
+}
+
+.rule-card {
+  border: 1px solid #d5e8f7;
+  background: #f4fbff;
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.rule-card p {
+  margin: 0;
+  font-size: 1.04rem;
+  line-height: 1.45;
+}
+
+.faq-item {
+  border: 1px solid #dce8f3;
+  border-radius: 12px;
+  background: #fafdff;
+  overflow: clip;
+  margin-bottom: 10px;
+}
+
+.faq-item:last-child {
+  margin-bottom: 0;
+}
+
+.faq-item summary {
+  cursor: pointer;
+  padding: 12px;
+  font-weight: 900;
+  color: #103450;
+  list-style: none;
+  font-size: 1rem;
+}
+
+.faq-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.faq-item summary:hover {
+  background: #edf7ff;
+}
+
+.faq-answer {
+  padding: 0 12px 12px;
+}
+
+.faq-answer p {
+  margin: 0 0 8px;
+  color: #274861;
+  line-height: 1.46;
+}
+
+.faq-answer p:last-child {
+  margin-bottom: 0;
+}
