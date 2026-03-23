@@ -9,7 +9,7 @@ const dom = {
   errorText: document.getElementById('errorText'),
   conditionLine: document.getElementById('conditionLine'),
   conditionText: document.getElementById('conditionText'),
-  currentIcon: document.getElementById('currentIcon'),
+  currentIconGlyph: document.getElementById('currentIconGlyph'),
   currentTemp: document.getElementById('currentTemp'),
   feelsLikeText: document.getElementById('feelsLikeText'),
   highLowText: document.getElementById('highLowText'),
@@ -52,6 +52,12 @@ function formatShortDate(value) {
   });
 }
 
+function formatDayShort(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'day';
+  return date.toLocaleDateString('en-US', { weekday: 'short' }).toLowerCase();
+}
+
 function formatUpdatedAt(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'Unknown update time';
@@ -76,26 +82,47 @@ function clearError() {
   dom.errorText.textContent = '';
 }
 
-function createIcon(url, className, altText) {
-  const img = document.createElement('img');
-  img.className = className;
-  img.alt = altText;
-  img.loading = 'lazy';
-  img.decoding = 'async';
-  img.referrerPolicy = 'no-referrer';
-  if (url) {
-    img.src = url;
-  } else {
-    img.hidden = true;
-  }
-  return img;
-}
-
 function getPrecipLabel(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return 'n/a';
   }
   return `${Math.round(Number(value))}%`;
+}
+
+function isNightForecast(forecastText, startTime) {
+  const lower = String(forecastText || '').toLowerCase();
+  if (lower.includes('night') || lower.includes('overnight')) return true;
+
+  const date = new Date(startTime);
+  if (Number.isNaN(date.getTime())) return false;
+  const hour = date.getHours();
+  return hour < 6 || hour >= 19;
+}
+
+function getWeatherEmoji(forecastText, options = {}) {
+  const text = String(forecastText || '').toLowerCase();
+  const night = Boolean(options.night);
+
+  if (text.includes('thunder') || text.includes('t-storm')) return '⛈️';
+  if (text.includes('snow') || text.includes('flurr') || text.includes('sleet') || text.includes('ice')) return '🌨️';
+  if (text.includes('rain') || text.includes('shower') || text.includes('drizzle')) return '🌧️';
+  if (text.includes('fog') || text.includes('mist') || text.includes('haze') || text.includes('smoke')) return '🌫️';
+  if (text.includes('wind')) return '💨';
+  if (text.includes('cloud') || text.includes('overcast')) return '☁️';
+  if (text.includes('partly') || text.includes('mostly clear')) return night ? '🌙' : '⛅';
+  if (text.includes('clear') || text.includes('sunny') || text.includes('fair')) return night ? '🌙' : '☀️';
+  return night ? '🌙' : '⛅';
+}
+
+function createIconBadge(forecastText, startTime, className) {
+  const icon = document.createElement('span');
+  icon.className = className;
+  icon.setAttribute('aria-label', forecastText || 'Weather icon');
+  icon.title = forecastText || 'Weather icon';
+  icon.textContent = getWeatherEmoji(forecastText, {
+    night: isNightForecast(forecastText, startTime),
+  });
+  return icon;
 }
 
 function renderCurrent(payload) {
@@ -108,14 +135,10 @@ function renderCurrent(payload) {
     dom.conditionText.textContent = current.condition || `${city}${state ? `, ${state}` : ''}`;
   }
 
-  if (dom.currentIcon) {
-    if (current.icon) {
-      dom.currentIcon.src = current.icon;
-      dom.currentIcon.hidden = false;
-    } else {
-      dom.currentIcon.removeAttribute('src');
-      dom.currentIcon.hidden = true;
-    }
+  if (dom.currentIconGlyph) {
+    dom.currentIconGlyph.textContent = getWeatherEmoji(current.condition, {
+      night: isNightForecast(current.condition, new Date().toISOString()),
+    });
   }
 
   if (dom.conditionLine) {
@@ -162,7 +185,7 @@ function renderHourly(payload) {
     temp.textContent = `${hour.temperature ?? '--'}${DEGREE_SYMBOL}`;
     item.appendChild(temp);
 
-    item.appendChild(createIcon(hour.icon || '', 'hourly-icon', hour.shortForecast || 'Hourly forecast icon'));
+    item.appendChild(createIconBadge(hour.shortForecast || '', hour.startTime, 'hourly-icon'));
 
     const precip = document.createElement('p');
     precip.className = 'hourly-precip';
@@ -205,7 +228,7 @@ function renderDaily(payload) {
     low.textContent = `${day.lowTemperature ?? '--'}${DEGREE_SYMBOL}`;
     item.appendChild(low);
 
-    item.appendChild(createIcon(day.icon || '', 'daily-icon', day.shortForecast || 'Daily forecast icon'));
+    item.appendChild(createIconBadge(day.shortForecast || '', day.startTime, 'daily-icon'));
 
     const precip = document.createElement('p');
     precip.className = 'daily-precip';
@@ -214,7 +237,7 @@ function renderDaily(payload) {
 
     const name = document.createElement('p');
     name.className = 'daily-name';
-    name.textContent = day.name || 'Day';
+    name.textContent = formatDayShort(day.startTime);
     item.appendChild(name);
 
     const date = document.createElement('p');
@@ -241,14 +264,16 @@ function renderMap(payload) {
 
   const latitude = payload?.location?.latitude;
   const longitude = payload?.location?.longitude;
-  const staticMapUrl = buildStaticMapUrl(latitude, longitude);
+  const fallbackStaticMapUrl = buildStaticMapUrl(latitude, longitude);
+  const radarLoopUrl = payload?.map?.radarLoopUrl || '';
   const mapClickUrl = payload?.map?.mapClickUrl || 'https://forecast.weather.gov/';
   const radarPageUrl = payload?.map?.radarPageUrl || 'https://radar.weather.gov/';
 
   dom.mapLink.href = mapClickUrl;
   dom.radarLink.href = radarPageUrl;
 
-  if (!staticMapUrl) {
+  const candidates = [radarLoopUrl, fallbackStaticMapUrl].filter(Boolean);
+  if (candidates.length === 0) {
     dom.mapImage.hidden = true;
     dom.mapImage.removeAttribute('src');
     dom.mapFallback.hidden = false;
@@ -256,15 +281,28 @@ function renderMap(payload) {
     return;
   }
 
-  dom.mapImage.onerror = () => {
-    dom.mapImage.hidden = true;
-    dom.mapFallback.hidden = false;
-    dom.mapFallback.textContent = 'Map preview did not load. Use the map link below.';
+  let candidateIndex = 0;
+  const tryNext = () => {
+    if (candidateIndex >= candidates.length) {
+      dom.mapImage.hidden = true;
+      dom.mapImage.removeAttribute('src');
+      dom.mapFallback.hidden = false;
+      dom.mapFallback.textContent = 'Map preview did not load. Use the map links below.';
+      return;
+    }
+
+    const src = candidates[candidateIndex];
+    candidateIndex += 1;
+    dom.mapImage.src = src;
+    dom.mapImage.hidden = false;
+    dom.mapFallback.hidden = true;
   };
 
-  dom.mapImage.src = staticMapUrl;
-  dom.mapImage.hidden = false;
-  dom.mapFallback.hidden = true;
+  dom.mapImage.onerror = () => {
+    tryNext();
+  };
+
+  tryNext();
 }
 
 function wireScrollerButtons() {
@@ -276,7 +314,7 @@ function wireScrollerButtons() {
       const list = targetId ? document.getElementById(targetId) : null;
       if (!list) return;
 
-      const moveBy = Math.max(180, Math.round(list.clientWidth * 0.75));
+      const moveBy = Math.max(144, Math.round(list.clientWidth * 0.7));
       list.scrollBy({
         left: direction * moveBy,
         behavior: 'smooth',
@@ -370,4 +408,3 @@ if (/^\d{5}$/.test(savedZip) && dom.zipInput) {
   dom.zipInput.value = savedZip;
   loadForecast(savedZip);
 }
-

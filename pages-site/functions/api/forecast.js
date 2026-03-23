@@ -215,7 +215,6 @@ export async function onRequestGet(context) {
       : [];
 
     const stationFeature = Array.isArray(stationsData?.features) ? stationsData.features[0] : null;
-    const stationId = safeText(stationFeature?.properties?.stationIdentifier, '');
     const stationUrl = safeText(stationFeature?.id, '');
 
     let observation = null;
@@ -283,6 +282,10 @@ export async function onRequestGet(context) {
       source: {
         zipLookup: `${ZIP_LOOKUP_BASE}${zip}`,
         points: `${NWS_BASE}/points/${latitude},${longitude}`,
+        forecast: safeText(props.forecast, ''),
+        forecastHourly: safeText(props.forecastHourly, ''),
+        observationStations: safeText(props.observationStations, ''),
+        nearestStation: stationUrl,
       },
     };
 

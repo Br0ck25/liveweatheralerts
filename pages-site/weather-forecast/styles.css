@@ -3,7 +3,6 @@
   --forecast-bg-2: #8ac2ee;
   --forecast-bg-3: #9acef3;
   --forecast-ink: #082341;
-  --forecast-muted: #1d4368;
   --forecast-card: rgba(245, 249, 255, 0.95);
   --forecast-outline: #b7d2ee;
 }
@@ -107,7 +106,7 @@ body.forecast-theme {
   margin-top: 10px;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   color: #092949;
   font-size: clamp(1.45rem, 4.5vw, 2.2rem);
   font-weight: 700;
@@ -118,9 +117,15 @@ body.forecast-theme {
   line-height: 1.1;
 }
 
-.condition-icon {
-  width: clamp(44px, 7vw, 68px);
-  height: clamp(44px, 7vw, 68px);
+.condition-icon-glyph {
+  display: inline-grid;
+  place-items: center;
+  width: clamp(44px, 7vw, 64px);
+  height: clamp(44px, 7vw, 64px);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid #bed8ef;
+  font-size: clamp(1.6rem, 3.8vw, 2.1rem);
 }
 
 .current-temp {
@@ -183,26 +188,26 @@ body.forecast-theme {
 .daily-list {
   display: grid;
   grid-auto-flow: column;
-  gap: 12px;
+  gap: 10px;
   overflow-x: auto;
   padding-bottom: 8px;
   scrollbar-width: thin;
 }
 
 .hourly-list {
-  grid-auto-columns: minmax(106px, 1fr);
+  grid-auto-columns: minmax(86px, 1fr);
 }
 
 .daily-list {
-  grid-auto-columns: minmax(136px, 1fr);
+  grid-auto-columns: minmax(110px, 1fr);
 }
 
 .hourly-item,
 .daily-item {
   border: 1px solid var(--forecast-outline);
   background: rgba(255, 255, 255, 0.93);
-  border-radius: 22px;
-  padding: 10px;
+  border-radius: 20px;
+  padding: 8px;
   text-align: center;
 }
 
@@ -210,50 +215,47 @@ body.forecast-theme {
 .daily-high {
   margin: 0;
   font-weight: 800;
-  font-size: 2rem;
+  font-size: 1.6rem;
   color: #133a5e;
 }
 
 .daily-low {
   margin: 0;
   font-weight: 700;
-  font-size: 1.9rem;
+  font-size: 1.52rem;
   color: #2a5375;
 }
 
 .hourly-icon,
 .daily-icon {
-  width: 48px;
-  height: 48px;
-  object-fit: contain;
-  margin: 5px auto;
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: #ebf5fd;
+  border: 1px solid #bfd8ef;
+  margin: 4px auto;
+  font-size: 1.45rem;
 }
 
 .hourly-precip,
 .daily-precip {
   margin: 0;
   color: #224f73;
-  font-size: 1.45rem;
+  font-size: 1.16rem;
   font-weight: 700;
-  line-height: 1.15;
+  line-height: 1.12;
 }
 
 .hourly-time,
 .daily-name,
 .daily-date {
-  margin: 7px 0 0;
-  color: #1a4467;
-  font-size: 1.5rem;
-  font-weight: 700;
-  line-height: 1.15;
-}
-
-.hourly-brief,
-.daily-brief {
   margin: 6px 0 0;
-  color: #2d577a;
-  font-size: 0.96rem;
-  line-height: 1.25;
+  color: #1a4467;
+  font-size: 1.2rem;
+  font-weight: 700;
+  line-height: 1.12;
 }
 
 .map-card .card-head {
@@ -318,28 +320,31 @@ body.forecast-theme {
   }
 
   .hourly-list {
-    grid-auto-columns: minmax(128px, 1fr);
+    grid-auto-columns: minmax(104px, 1fr);
   }
 
   .daily-list {
-    grid-auto-columns: minmax(152px, 1fr);
+    grid-auto-columns: minmax(122px, 1fr);
   }
 
   .hourly-temp,
-  .daily-high,
+  .daily-high {
+    font-size: 1.92rem;
+  }
+
   .daily-low {
-    font-size: 2.2rem;
+    font-size: 1.74rem;
   }
 
   .hourly-precip,
   .daily-precip {
-    font-size: 1.6rem;
+    font-size: 1.28rem;
   }
 
   .hourly-time,
   .daily-name,
   .daily-date {
-    font-size: 1.65rem;
+    font-size: 1.32rem;
   }
 }
 
