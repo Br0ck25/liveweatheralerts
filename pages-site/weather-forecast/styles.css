@@ -96,6 +96,65 @@ body.forecast-theme {
   background: #225277;
 }
 
+.inline-action-btn {
+  margin-top: 8px;
+  border: 1px solid #9fbedc;
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #123e63;
+  font-size: 0.92rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.inline-action-btn:hover {
+  background: #eef6fd;
+}
+
+.latlon-form {
+  margin: 10px auto 0;
+  max-width: 430px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  text-align: left;
+}
+
+.latlon-form label {
+  font-weight: 800;
+  color: #2c5476;
+  font-size: 0.84rem;
+}
+
+.latlon-form input {
+  border: 1px solid #aac9e6;
+  border-radius: 10px;
+  min-height: 40px;
+  padding: 8px 10px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  color: #0b2b49;
+}
+
+.latlon-form button {
+  grid-column: 1 / -1;
+  border: 1px solid #2d6795;
+  border-radius: 10px;
+  min-height: 40px;
+  padding: 8px 12px;
+  background: #2d6795;
+  color: #fff;
+  font-size: 0.92rem;
+  font-family: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.latlon-form button:hover {
+  background: #225277;
+}
+
 .status-text {
   margin: 11px 0 0;
   color: #204668;
@@ -317,6 +376,11 @@ body.forecast-theme {
 
   .zip-form label {
     grid-column: 1 / -1;
+  }
+
+  .latlon-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 10px;
   }
 
   .hourly-list {

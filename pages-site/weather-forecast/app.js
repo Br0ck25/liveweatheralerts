@@ -1,10 +1,18 @@
 const DEGREE_SYMBOL = '\u00B0';
 const ZIP_STORAGE_KEY = 'lwa_saved_zip';
+const LAT_STORAGE_KEY = 'lwa_saved_lat';
+const LON_STORAGE_KEY = 'lwa_saved_lon';
+const MODE_STORAGE_KEY = 'lwa_saved_mode';
 
 const dom = {
   zipForm: document.getElementById('zipForm'),
   zipInput: document.getElementById('zipInput'),
   zipSubmit: document.getElementById('zipSubmit'),
+  useLocationBtn: document.getElementById('useLocationBtn'),
+  latLonForm: document.getElementById('latLonForm'),
+  latInput: document.getElementById('latInput'),
+  lonInput: document.getElementById('lonInput'),
+  latLonSubmit: document.getElementById('latLonSubmit'),
   statusText: document.getElementById('statusText'),
   errorText: document.getElementById('errorText'),
   conditionLine: document.getElementById('conditionLine'),
@@ -25,6 +33,11 @@ let activeRequestId = 0;
 
 function cleanZip(value) {
   return String(value || '').replace(/\D/g, '').slice(0, 5);
+}
+
+function parseCoordinate(value) {
+  const parsed = Number(String(value ?? '').trim());
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function getErrorMessage(error) {
@@ -323,24 +336,45 @@ function wireScrollerButtons() {
   }
 }
 
-async function loadForecast(zip) {
-  if (!dom.statusText || !dom.zipSubmit) return;
-  const cleanedZip = cleanZip(zip);
+async function loadForecast(requestInput) {
+  if (!dom.statusText || !dom.zipSubmit || !dom.latLonSubmit || !dom.useLocationBtn) return;
 
-  if (!/^\d{5}$/.test(cleanedZip)) {
-    setError('Please enter a valid 5-digit ZIP code.');
-    return;
+  let query = '';
+  let saveMode = 'zip';
+
+  if (requestInput?.mode === 'latlon') {
+    const lat = parseCoordinate(requestInput.lat);
+    const lon = parseCoordinate(requestInput.lon);
+    if (lat === null || lon === null || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      setError('Enter valid latitude and longitude values.');
+      return;
+    }
+
+    query = `lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
+    saveMode = 'latlon';
+  } else {
+    const cleanedZip = cleanZip(requestInput?.zip || '');
+    if (!/^\d{5}$/.test(cleanedZip)) {
+      setError('Please enter a valid 5-digit ZIP code.');
+      return;
+    }
+
+    query = `zip=${encodeURIComponent(cleanedZip)}`;
+    saveMode = 'zip';
   }
 
   activeRequestId += 1;
   const requestId = activeRequestId;
   clearError();
-  dom.statusText.textContent = `Loading forecast for ${cleanedZip}...`;
+  dom.statusText.textContent = 'Loading forecast...';
   dom.zipSubmit.disabled = true;
+  dom.latLonSubmit.disabled = true;
+  dom.useLocationBtn.disabled = true;
   dom.zipSubmit.textContent = 'Loading...';
+  dom.latLonSubmit.textContent = 'Loading...';
 
   try {
-    const response = await fetch(`/api/forecast?zip=${encodeURIComponent(cleanedZip)}`, {
+    const response = await fetch(`/api/forecast?${query}`, {
       method: 'GET',
       headers: { Accept: 'application/json' },
     });
@@ -358,7 +392,14 @@ async function loadForecast(zip) {
     }
 
     try {
-      localStorage.setItem(ZIP_STORAGE_KEY, cleanedZip);
+      localStorage.setItem(MODE_STORAGE_KEY, saveMode);
+      if (saveMode === 'zip') {
+        const cleanedZip = cleanZip(requestInput?.zip || '');
+        localStorage.setItem(ZIP_STORAGE_KEY, cleanedZip);
+      } else {
+        localStorage.setItem(LAT_STORAGE_KEY, String(requestInput.lat));
+        localStorage.setItem(LON_STORAGE_KEY, String(requestInput.lon));
+      }
     } catch {
       // Ignore storage failures.
     }
@@ -368,7 +409,7 @@ async function loadForecast(zip) {
     renderDaily(payload);
     renderMap(payload);
 
-    const city = payload?.location?.city || cleanedZip;
+    const city = payload?.location?.city || 'Selected location';
     const state = payload?.location?.state ? `, ${payload.location.state}` : '';
     dom.statusText.textContent = `Forecast for ${city}${state}. Updated ${formatUpdatedAt(payload.updatedAt)}.`;
   } catch (error) {
@@ -377,9 +418,46 @@ async function loadForecast(zip) {
   } finally {
     if (requestId === activeRequestId) {
       dom.zipSubmit.disabled = false;
+      dom.latLonSubmit.disabled = false;
+      dom.useLocationBtn.disabled = false;
       dom.zipSubmit.textContent = 'Update';
+      dom.latLonSubmit.textContent = 'Use lat/lon';
     }
   }
+}
+
+function useBrowserLocation() {
+  if (!navigator.geolocation) {
+    setError('Geolocation is not available on this device/browser.');
+    return;
+  }
+
+  clearError();
+  if (dom.statusText) {
+    dom.statusText.textContent = 'Getting your location...';
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const lat = position.coords.latitude;
+      const lon = position.coords.longitude;
+      if (dom.latInput) dom.latInput.value = lat.toFixed(6);
+      if (dom.lonInput) dom.lonInput.value = lon.toFixed(6);
+      await loadForecast({ mode: 'latlon', lat, lon });
+    },
+    (error) => {
+      if (error.code === 1) {
+        setError('Location permission was denied. You can still use ZIP or lat/lon.');
+        return;
+      }
+      setError('Could not get location right now. You can still use ZIP or lat/lon.');
+    },
+    {
+      enableHighAccuracy: true,
+      timeout: 12000,
+      maximumAge: 300000,
+    },
+  );
 }
 
 if (dom.zipInput) {
@@ -391,20 +469,51 @@ if (dom.zipInput) {
 if (dom.zipForm && dom.zipInput) {
   dom.zipForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    await loadForecast(dom.zipInput.value);
+    await loadForecast({ mode: 'zip', zip: dom.zipInput.value });
+  });
+}
+
+if (dom.latLonForm && dom.latInput && dom.lonInput) {
+  dom.latLonForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await loadForecast({ mode: 'latlon', lat: dom.latInput.value, lon: dom.lonInput.value });
+  });
+}
+
+if (dom.useLocationBtn) {
+  dom.useLocationBtn.addEventListener('click', () => {
+    useBrowserLocation();
   });
 }
 
 wireScrollerButtons();
 
+let savedMode = 'zip';
 let savedZip = '';
+let savedLat = '';
+let savedLon = '';
+
 try {
+  savedMode = String(localStorage.getItem(MODE_STORAGE_KEY) || 'zip');
   savedZip = String(localStorage.getItem(ZIP_STORAGE_KEY) || '');
+  savedLat = String(localStorage.getItem(LAT_STORAGE_KEY) || '');
+  savedLon = String(localStorage.getItem(LON_STORAGE_KEY) || '');
 } catch {
-  savedZip = '';
+  savedMode = 'zip';
 }
 
-if (/^\d{5}$/.test(savedZip) && dom.zipInput) {
+if (savedMode === 'latlon') {
+  const lat = parseCoordinate(savedLat);
+  const lon = parseCoordinate(savedLon);
+  if (lat !== null && lon !== null && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+    if (dom.latInput) dom.latInput.value = String(lat);
+    if (dom.lonInput) dom.lonInput.value = String(lon);
+    loadForecast({ mode: 'latlon', lat, lon });
+  } else if (/^\d{5}$/.test(savedZip) && dom.zipInput) {
+    dom.zipInput.value = savedZip;
+    loadForecast({ mode: 'zip', zip: savedZip });
+  }
+} else if (/^\d{5}$/.test(savedZip) && dom.zipInput) {
   dom.zipInput.value = savedZip;
-  loadForecast(savedZip);
+  loadForecast({ mode: 'zip', zip: savedZip });
 }

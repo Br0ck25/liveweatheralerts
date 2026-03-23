@@ -151,44 +151,66 @@ export async function onRequestOptions() {
 }
 
 export async function onRequestGet(context) {
-  const zip = String(context.request?.url ? new URL(context.request.url).searchParams.get('zip') || '' : '').trim();
-  if (!/^\d{5}$/.test(zip)) {
+  const requestUrl = new URL(context.request.url);
+  const zipParam = String(requestUrl.searchParams.get('zip') || '').trim();
+  const latRaw = requestUrl.searchParams.get('lat');
+  const lonRaw = requestUrl.searchParams.get('lon');
+  const latParam = latRaw === null || latRaw.trim() === '' ? null : asNumber(latRaw);
+  const lonParam = lonRaw === null || lonRaw.trim() === '' ? null : asNumber(lonRaw);
+
+  const hasLatLon = latParam !== null && lonParam !== null;
+  const latLonInRange = hasLatLon && latParam >= -90 && latParam <= 90 && lonParam >= -180 && lonParam <= 180;
+  const hasZip = /^\d{5}$/.test(zipParam);
+
+  let zip = null;
+  let firstPlace = null;
+  let latitude = null;
+  let longitude = null;
+  let queryMode = '';
+
+  if (latLonInRange) {
+    latitude = latParam;
+    longitude = lonParam;
+    queryMode = 'latlon';
+  } else if (hasZip) {
+    let zipData;
+    try {
+      zipData = await fetchJson(`${ZIP_LOOKUP_BASE}${zipParam}`);
+    } catch {
+      return new Response(JSON.stringify({
+        error: 'Unable to find that ZIP code.',
+      }), {
+        status: 404,
+        headers: {
+          ...corsHeaders(),
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
+
+    firstPlace = Array.isArray(zipData?.places) ? zipData.places[0] : null;
+    latitude = asNumber(firstPlace?.latitude);
+    longitude = asNumber(firstPlace?.longitude);
+    if (latitude === null || longitude === null) {
+      return new Response(JSON.stringify({
+        error: 'ZIP found, but location coordinates were unavailable.',
+      }), {
+        status: 502,
+        headers: {
+          ...corsHeaders(),
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
+    zip = zipParam;
+    queryMode = 'zip';
+  } else {
     return new Response(JSON.stringify({
-      error: 'Please provide a valid 5-digit ZIP code.',
+      error: 'Provide either a valid 5-digit ZIP code or valid latitude/longitude coordinates.',
     }), {
       status: 400,
-      headers: {
-        ...corsHeaders(),
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-      },
-    });
-  }
-
-  let zipData;
-  try {
-    zipData = await fetchJson(`${ZIP_LOOKUP_BASE}${zip}`);
-  } catch {
-    return new Response(JSON.stringify({
-      error: 'Unable to find that ZIP code.',
-    }), {
-      status: 404,
-      headers: {
-        ...corsHeaders(),
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-      },
-    });
-  }
-
-  const firstPlace = Array.isArray(zipData?.places) ? zipData.places[0] : null;
-  const latitude = asNumber(firstPlace?.latitude);
-  const longitude = asNumber(firstPlace?.longitude);
-  if (latitude === null || longitude === null) {
-    return new Response(JSON.stringify({
-      error: 'ZIP found, but location coordinates were unavailable.',
-    }), {
-      status: 502,
       headers: {
         ...corsHeaders(),
         'Content-Type': 'application/json; charset=utf-8',
@@ -239,6 +261,16 @@ export async function onRequestGet(context) {
     const fallbackUnit = firstHourly ? safeText(firstHourly.temperatureUnit, 'F') : 'F';
     const currentTempValue = currentTempF ?? fallbackTemp;
     const currentTempUnit = currentTempF !== null ? 'F' : fallbackUnit;
+    let feelsLikeSource = 'temperature';
+    if (heatIndexC !== null) {
+      feelsLikeSource = 'heatIndex';
+    } else if (windChillC !== null) {
+      feelsLikeSource = 'windChill';
+    } else if (currentTempC !== null) {
+      feelsLikeSource = 'temperature';
+    } else if (fallbackTemp !== null) {
+      feelsLikeSource = 'hourlyTemperature';
+    }
 
     const { high, low } = getHighLowFromPeriods(dailyPeriods, hourlyPeriods);
 
@@ -261,6 +293,7 @@ export async function onRequestGet(context) {
         temperatureUnit: currentTempUnit,
         feelsLike: feelsLikeF ?? currentTempValue,
         feelsLikeUnit: 'F',
+        feelsLikeSource,
         condition: safeText(observation?.textDescription, safeText(dailyPeriods[0]?.shortForecast, 'Not available')),
         humidity: asNumber(observation?.relativeHumidity?.value),
         wind: formatWind(observation?.windDirection?.value, observation?.windSpeed?.value),
@@ -280,12 +313,25 @@ export async function onRequestGet(context) {
         mapClickUrl: `https://forecast.weather.gov/MapClick.php?lat=${latitude}&lon=${longitude}`,
       },
       source: {
-        zipLookup: `${ZIP_LOOKUP_BASE}${zip}`,
+        queryMode,
+        zipProvided: zip,
+        coordinatesUsed: { latitude, longitude },
+        zipLookup: zip ? `${ZIP_LOOKUP_BASE}${zip}` : null,
         points: `${NWS_BASE}/points/${latitude},${longitude}`,
         forecast: safeText(props.forecast, ''),
         forecastHourly: safeText(props.forecastHourly, ''),
         observationStations: safeText(props.observationStations, ''),
         nearestStation: stationUrl,
+        feelsLikeObservation: stationUrl ? `${stationUrl}/observations/latest` : null,
+        feelsLikeField: (
+          feelsLikeSource === 'heatIndex'
+            ? 'properties.heatIndex.value'
+            : feelsLikeSource === 'windChill'
+              ? 'properties.windChill.value'
+              : feelsLikeSource === 'temperature'
+                ? 'properties.temperature.value'
+                : 'hourly.periods[0].temperature'
+        ),
       },
     };
 
