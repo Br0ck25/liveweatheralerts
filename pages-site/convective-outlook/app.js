@@ -63,6 +63,18 @@ function renderOutlooks(outlooks) {
     const urgency = item.urgency || 'Keep checking weather updates.';
     const summary = item.summary || 'No summary text is available.';
     const importance = simpleImportance(item.risk);
+    const mapImageUrl = String(item.mapImageUrl || '').trim();
+    const mapImageAlt = String(item.mapImageAlt || `${dayLabel} outlook map`).trim();
+    const mapMarkup = mapImageUrl
+      ? `
+          <figure class="map-box">
+            <img class="outlook-map" src="${escHtml(mapImageUrl)}" alt="${escHtml(mapImageAlt)}" loading="lazy" decoding="async" />
+            <figcaption>
+              <a class="map-link" href="${escHtml(mapImageUrl)}" target="_blank" rel="noopener noreferrer">Open map full size</a>
+            </figcaption>
+          </figure>
+        `
+      : '';
 
     return `
       <article class="outlook-card ${escHtml(cardRiskClass)}">
@@ -76,6 +88,7 @@ function renderOutlooks(outlooks) {
             <h3>What this means in simple words</h3>
             <p>${escHtml(urgency)}</p>
           </div>
+          ${mapMarkup}
           <div class="summary-box">
             <h3>Forecaster summary</h3>
             <p>${escHtml(summary)}</p>

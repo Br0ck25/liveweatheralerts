@@ -63,6 +63,33 @@ function extractCanonicalLink(html, fallbackUrl) {
   return raw;
 }
 
+function extractMapImageUrl(html, day, pageUrl) {
+  const text = String(html || '');
+  const tabMatch =
+    text.match(/onload=["'][^"']*show_tab\('([^']+)'\)/i) ||
+    text.match(/show_tab\('([^']+)'\)/i);
+  const tabName = tabMatch ? tabMatch[1].trim() : '';
+  if (!tabName) return null;
+
+  const srcPartsMatch =
+    text.match(/document\.getElementById\(["']main["']\)\.src\s*=\s*["']([^"']*)["']\s*\+\s*nam\s*\+\s*["']([^"']*)["']/i) ||
+    text.match(/document\.forms\[[^\]]+\]\.[^.]+\s*=\s*["']([^"']*)["']\s*\+\s*nam\s*\+\s*["']([^"']*)["']/i);
+  const prefix = srcPartsMatch ? srcPartsMatch[1] : `day${day}`;
+  const postfix = srcPartsMatch ? srcPartsMatch[2] : '.png';
+
+  const fallbackFile = `${prefix}${tabName}${postfix}`;
+  let filename = fallbackFile;
+
+  const explicitNameMatch = text.match(new RegExp(`day${day}${tabName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.png`, 'i'));
+  if (explicitNameMatch) filename = explicitNameMatch[0];
+
+  try {
+    return new URL(filename, pageUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
 function extractPreText(html, day) {
   const blocks = Array.from(String(html || '').matchAll(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi))
     .map((match) => stripHtml(match[1]))
@@ -216,6 +243,8 @@ function createFallbackOutlook(day, url, reason) {
     day,
     title: `Day ${day} Convective Outlook`,
     link: url,
+    mapImageUrl: null,
+    mapImageAlt: `Day ${day} severe weather outlook map`,
     publishedAt: null,
     risk,
     riskLabel: riskLabel(risk),
@@ -227,17 +256,22 @@ function createFallbackOutlook(day, url, reason) {
 
 function parseDayOutlookHtml(day, url, html) {
   const pageTitle = extractTitle(html);
+  const canonicalLink = extractCanonicalLink(html, url);
   const preText = extractPreText(html, day);
   const combined = `${pageTitle}\n${preText}\n${url}`;
   const risk = detectRisk(combined);
   const publishedLine = extractPublishedLine(preText);
   const publishedAt = parseSpcDateLine(publishedLine) || publishedLine || null;
   const summary = extractSummary(preText) || 'Summary text was not available in this outlook.';
+  const mapImageUrl = extractMapImageUrl(html, day, canonicalLink);
+  const mapImageAlt = `Day ${day} Storm Prediction Center convective outlook map`;
 
   return {
     day,
     title: titleFromPreText(preText, day, pageTitle),
-    link: extractCanonicalLink(html, url),
+    link: canonicalLink,
+    mapImageUrl,
+    mapImageAlt,
     publishedAt,
     risk,
     riskLabel: riskLabel(risk),
