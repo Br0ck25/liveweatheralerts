@@ -8,6 +8,7 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 - `styles.css` - page styling
 - `app.js` - fetches alert JSON and renders cards
 - `functions/api/alerts.js` - Pages Function proxy to the backend Worker
+- `functions/api/forecast.js` - ZIP-to-forecast endpoint (current, hourly, 7-day, radar)
 - `information-hub/` - tabbed weather learning center and hazard library
 - `convective-outlook/` - plain-language SPC outlook page
 - `faq/` - plain-language weather FAQ page
@@ -19,6 +20,7 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 
 `FAQ` and `Forecast Maps` are also accessible as tabs in the Information Hub.
 Weather Terms are available at `/weather-terms/` and in the Information Hub glossary tab.
+Weather Forecast is available in the Information Hub via the `Weather Forecast` tab and supports ZIP memory on return visits.
 
 ## Required Pages Environment Variable
 
@@ -40,3 +42,4 @@ Set this in Cloudflare Pages project settings:
 - The frontend calls `/api/alerts` on the same domain.
 - The Pages Function forwards that request to your backend Worker.
 - The convective outlook page calls `/api/convective-outlook`.
+- The ZIP forecast tab calls `/api/forecast`.

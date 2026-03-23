@@ -34,12 +34,10 @@
     <section class="hub-shell">
       <div class="hub-tabs" role="tablist" aria-label="Information Hub sections">
         <button class="hub-tab is-active" id="tab-start" role="tab" aria-selected="true" aria-controls="panel-start" data-panel="start">Start Here</button>
+        <button class="hub-tab" id="tab-forecast" role="tab" aria-selected="false" aria-controls="panel-forecast" data-panel="forecast" tabindex="-1">Weather Forecast</button>
         <button class="hub-tab" id="tab-hazards" role="tab" aria-selected="false" aria-controls="panel-hazards" data-panel="hazards" tabindex="-1">Hazard Library</button>
         <button class="hub-tab" id="tab-faq" role="tab" aria-selected="false" aria-controls="panel-faq" data-panel="faq" tabindex="-1">Weather FAQ</button>
         <button class="hub-tab" id="tab-glossary" role="tab" aria-selected="false" aria-controls="panel-glossary" data-panel="glossary" tabindex="-1">Glossary</button>
-        <button class="hub-tab" id="tab-alerts" role="tab" aria-selected="false" aria-controls="panel-alerts" data-panel="alerts" tabindex="-1">Alert Methods</button>
-        <button class="hub-tab" id="tab-tornado" role="tab" aria-selected="false" aria-controls="panel-tornado" data-panel="tornado" tabindex="-1">Tornado Basics</button>
-        <button class="hub-tab" id="tab-maps" role="tab" aria-selected="false" aria-controls="panel-maps" data-panel="maps" tabindex="-1">Forecast Maps</button>
       </div>
 
       <section class="hub-panel is-active" id="panel-start" role="tabpanel" aria-labelledby="tab-start">
@@ -50,15 +48,19 @@
             <p>Open the <a href="/">Weather Alerts page</a> first. Warnings mean act now. Watches mean get ready.</p>
           </article>
           <article class="plan-card">
-            <h3>Step 2: Check risk for next days</h3>
+            <h3>Step 2: Check local forecast by ZIP</h3>
+            <p>Use the Weather Forecast tab to see current temperature, hourly changes, 7-day trends, and your local radar map.</p>
+          </article>
+          <article class="plan-card">
+            <h3>Step 3: Check risk for next days</h3>
             <p>Use <a href="/convective-outlook/">Convective Outlook</a> for broader severe weather setup over Day 1 to Day 3.</p>
           </article>
           <article class="plan-card">
-            <h3>Step 3: Review hazard guidance</h3>
+            <h3>Step 4: Review hazard guidance</h3>
             <p>Use the Hazard Library tab for what each threat means and simple action steps.</p>
           </article>
           <article class="plan-card">
-            <h3>Step 4: Confirm alert delivery</h3>
+            <h3>Step 5: Confirm alert delivery</h3>
             <p>Set up multiple methods so warnings reach you even if one system fails.</p>
           </article>
         </div>
@@ -70,6 +72,51 @@
             <p><strong>Outlook:</strong> forecast guidance for potential risk over a future time period.</p>
           </div>
         </details>
+      </section>
+
+      <section class="hub-panel" id="panel-forecast" role="tabpanel" aria-labelledby="tab-forecast" hidden>
+        <h2>Weather Forecast By ZIP Code</h2>
+        <p class="panel-intro">Enter a ZIP code to get current temperature, feels-like, high/low, hourly forecast, 7-day forecast, and a local radar map.</p>
+
+        <form id="forecastForm" class="forecast-form">
+          <label for="forecastZipInput">ZIP code</label>
+          <input id="forecastZipInput" name="zip" type="text" inputmode="numeric" autocomplete="postal-code" pattern="\d{5}" maxlength="5" placeholder="Example: 40475" required />
+          <button type="submit" id="forecastSubmitBtn">Get forecast</button>
+        </form>
+
+        <p class="forecast-status" id="forecastStatus">Enter a ZIP code to load forecast details.</p>
+        <p class="sync-warning" id="forecastError" hidden></p>
+
+        <div class="forecast-stack" id="forecastResults" hidden>
+          <div class="forecast-top-grid">
+            <article class="forecast-card">
+              <h3>Current Conditions</h3>
+              <div id="forecastCurrentSummary"></div>
+            </article>
+
+            <article class="forecast-card">
+              <h3>Today</h3>
+              <div id="forecastTodaySummary"></div>
+            </article>
+
+            <article class="forecast-card">
+              <h3>Local Weather Map</h3>
+              <img id="forecastRadarImage" class="forecast-radar" alt="Local radar weather map" hidden />
+              <p id="forecastMapFallback">Radar map will appear after forecast loads.</p>
+              <a id="forecastRadarLink" class="panel-link" href="https://radar.weather.gov/" target="_blank" rel="noopener noreferrer">Open interactive radar</a>
+            </article>
+          </div>
+
+          <article class="forecast-card">
+            <h3>Next 24 Hours</h3>
+            <div class="forecast-hourly-scroll" id="forecastHourlyList"></div>
+          </article>
+
+          <article class="forecast-card">
+            <h3>7-Day Forecast</h3>
+            <div class="forecast-daily-grid" id="forecastDailyList"></div>
+          </article>
+        </div>
       </section>
 
       <section class="hub-panel" id="panel-hazards" role="tabpanel" aria-labelledby="tab-hazards" hidden>
@@ -223,65 +270,6 @@
         <a class="panel-link" href="/weather-terms/">Open full glossary page</a>
       </section>
 
-      <section class="hub-panel" id="panel-alerts" role="tabpanel" aria-labelledby="tab-alerts" hidden>
-        <h2>Alert Methods You Should Use Together</h2>
-        <div class="method-grid">
-          <article class="method-card">
-            <h3>Wireless Emergency Alerts (WEA)</h3>
-            <p>Fast phone-based warnings for your location. Great when you are away from home.</p>
-            <p>Keep emergency alert settings enabled and test volume settings.</p>
-          </article>
-          <article class="method-card">
-            <h3>NOAA Weather Radio</h3>
-            <p>Reliable backup with warning tones, especially overnight and during network outages.</p>
-            <p>Use battery backup and verify your local station coverage.</p>
-          </article>
-          <article class="method-card">
-            <h3>This Site</h3>
-            <p>Use Live Weather Alerts for plain-language interpretation and quick planning.</p>
-            <p>Best when paired with push alerts so you do not miss urgent warnings.</p>
-          </article>
-        </div>
-        <a class="panel-link" href="/alert-methods/">Open full Alert Methods guide</a>
-      </section>
-
-      <section class="hub-panel" id="panel-tornado" role="tabpanel" aria-labelledby="tab-tornado" hidden>
-        <h2>Tornado Basics In Plain Language</h2>
-        <div class="panel-grid">
-          <article class="panel-card">
-            <h3>Core truth</h3>
-            <p>Tornadoes can form quickly and are not always visibly obvious. Use warnings and alerts, not visuals alone.</p>
-          </article>
-          <article class="panel-card">
-            <h3>Best action</h3>
-            <p>When a tornado warning is issued, move immediately to your safe place and stay there until danger passes.</p>
-          </article>
-          <article class="panel-card">
-            <h3>Common myth</h3>
-            <p>“I can wait to see it.” This delays action and increases risk. Early movement is safer than late movement.</p>
-          </article>
-        </div>
-        <a class="panel-link" href="/tornado-basics/">Open full Tornado Basics page</a>
-      </section>
-
-      <section class="hub-panel" id="panel-maps" role="tabpanel" aria-labelledby="tab-maps" hidden>
-        <h2>Forecast Maps Without The Jargon</h2>
-        <div class="panel-grid">
-          <article class="panel-card">
-            <h3>Temperature</h3>
-            <p>Plan for heat and cold impacts on travel, work, school, and vulnerable people.</p>
-          </article>
-          <article class="panel-card">
-            <h3>Wind</h3>
-            <p>Wind affects fire spread, storm damage potential, and difficult travel conditions.</p>
-          </article>
-          <article class="panel-card">
-            <h3>Rain chance and totals</h3>
-            <p>Use both together. Chance tells if rain is likely; totals help estimate flood potential.</p>
-          </article>
-        </div>
-        <a class="panel-link" href="/forecast-maps/">Open full Forecast Maps guide</a>
-      </section>
     </section>
 
     <p class="footer-note">
