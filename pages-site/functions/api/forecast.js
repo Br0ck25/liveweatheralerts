@@ -62,6 +62,7 @@ function normalizeHourlyPeriod(period) {
 }
 
 function normalizeDailyPeriod(period) {
+  const precip = asNumber(period?.probabilityOfPrecipitation?.value);
   return {
     name: safeText(period?.name, 'Forecast'),
     startTime: period?.startTime || null,
@@ -71,7 +72,30 @@ function normalizeDailyPeriod(period) {
     shortForecast: safeText(period?.shortForecast, 'No forecast text'),
     detailedForecast: safeText(period?.detailedForecast, ''),
     icon: safeText(period?.icon, ''),
+    precipitationChance: precip,
   };
+}
+
+function buildDailySummaries(periods) {
+  const summaries = [];
+  for (let i = 0; i < periods.length; i += 1) {
+    const period = periods[i];
+    if (!period?.isDaytime) continue;
+
+    const nextPeriod = periods[i + 1];
+    const overnight = nextPeriod && !nextPeriod.isDaytime ? nextPeriod : null;
+    const daytimePrecip = asNumber(period.precipitationChance);
+    const overnightPrecip = asNumber(overnight?.precipitationChance);
+
+    summaries.push({
+      ...period,
+      lowTemperature: asNumber(overnight?.temperature),
+      lowTemperatureUnit: safeText(overnight?.temperatureUnit, period.temperatureUnit || 'F'),
+      overnightForecast: safeText(overnight?.shortForecast, ''),
+      precipitationChance: daytimePrecip ?? overnightPrecip,
+    });
+  }
+  return summaries;
 }
 
 function getHighLowFromPeriods(periods, hourly) {
@@ -249,7 +273,7 @@ export async function onRequestGet(context) {
         unit: 'F',
       },
       hourly: hourlyPeriods.slice(0, 24),
-      daily: dailyPeriods.filter((item) => item.isDaytime).slice(0, 7),
+      daily: buildDailySummaries(dailyPeriods).slice(0, 7),
       map: {
         radarStation: radarStation || null,
         radarLoopUrl,

@@ -17,6 +17,7 @@
   <main class="page">
     <nav class="site-nav" aria-label="Main pages">
       <a class="nav-link" href="/">Weather Alerts</a>
+      <a class="nav-link" href="/weather-forecast/">Weather Forecast</a>
       <a class="nav-link" href="/convective-outlook/">Convective Outlook</a>
       <a class="nav-link active" href="/information-hub/">Information Hub</a>
     </nav>
@@ -34,7 +35,6 @@
     <section class="hub-shell">
       <div class="hub-tabs" role="tablist" aria-label="Information Hub sections">
         <button class="hub-tab is-active" id="tab-start" role="tab" aria-selected="true" aria-controls="panel-start" data-panel="start">Start Here</button>
-        <button class="hub-tab" id="tab-forecast" role="tab" aria-selected="false" aria-controls="panel-forecast" data-panel="forecast" tabindex="-1">Weather Forecast</button>
         <button class="hub-tab" id="tab-hazards" role="tab" aria-selected="false" aria-controls="panel-hazards" data-panel="hazards" tabindex="-1">Hazard Library</button>
         <button class="hub-tab" id="tab-faq" role="tab" aria-selected="false" aria-controls="panel-faq" data-panel="faq" tabindex="-1">Weather FAQ</button>
         <button class="hub-tab" id="tab-glossary" role="tab" aria-selected="false" aria-controls="panel-glossary" data-panel="glossary" tabindex="-1">Glossary</button>
@@ -49,7 +49,7 @@
           </article>
           <article class="plan-card">
             <h3>Step 2: Check local forecast by ZIP</h3>
-            <p>Use the Weather Forecast tab to see current temperature, hourly changes, 7-day trends, and your local radar map.</p>
+            <p>Open <a href="/weather-forecast/">Weather Forecast</a> for current temperature, hourly changes, 7-day trends, and your local map.</p>
           </article>
           <article class="plan-card">
             <h3>Step 3: Check risk for next days</h3>
@@ -72,51 +72,6 @@
             <p><strong>Outlook:</strong> forecast guidance for potential risk over a future time period.</p>
           </div>
         </details>
-      </section>
-
-      <section class="hub-panel" id="panel-forecast" role="tabpanel" aria-labelledby="tab-forecast" hidden>
-        <h2>Weather Forecast By ZIP Code</h2>
-        <p class="panel-intro">Enter a ZIP code to get current temperature, feels-like, high/low, hourly forecast, 7-day forecast, and a local radar map.</p>
-
-        <form id="forecastForm" class="forecast-form">
-          <label for="forecastZipInput">ZIP code</label>
-          <input id="forecastZipInput" name="zip" type="text" inputmode="numeric" autocomplete="postal-code" pattern="\d{5}" maxlength="5" placeholder="Example: 40475" required />
-          <button type="submit" id="forecastSubmitBtn">Get forecast</button>
-        </form>
-
-        <p class="forecast-status" id="forecastStatus">Enter a ZIP code to load forecast details.</p>
-        <p class="sync-warning" id="forecastError" hidden></p>
-
-        <div class="forecast-stack" id="forecastResults" hidden>
-          <div class="forecast-top-grid">
-            <article class="forecast-card">
-              <h3>Current Conditions</h3>
-              <div id="forecastCurrentSummary"></div>
-            </article>
-
-            <article class="forecast-card">
-              <h3>Today</h3>
-              <div id="forecastTodaySummary"></div>
-            </article>
-
-            <article class="forecast-card">
-              <h3>Local Weather Map</h3>
-              <img id="forecastRadarImage" class="forecast-radar" alt="Local radar weather map" hidden />
-              <p id="forecastMapFallback">Radar map will appear after forecast loads.</p>
-              <a id="forecastRadarLink" class="panel-link" href="https://radar.weather.gov/" target="_blank" rel="noopener noreferrer">Open interactive radar</a>
-            </article>
-          </div>
-
-          <article class="forecast-card">
-            <h3>Next 24 Hours</h3>
-            <div class="forecast-hourly-scroll" id="forecastHourlyList"></div>
-          </article>
-
-          <article class="forecast-card">
-            <h3>7-Day Forecast</h3>
-            <div class="forecast-daily-grid" id="forecastDailyList"></div>
-          </article>
-        </div>
       </section>
 
       <section class="hub-panel" id="panel-hazards" role="tabpanel" aria-labelledby="tab-hazards" hidden>
