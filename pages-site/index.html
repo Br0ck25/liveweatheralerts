@@ -7,109 +7,52 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=20260323-mobile-fix-4" />
-  <style>
-    .header-logo {
-      width: 100%;
-      height: var(--fixed-logo-height, clamp(110px, 21vw, 240px));
-      object-fit: cover;
-      object-position: center;
-    }
-
-    .site-nav {
-      padding: 8px max(12px, env(safe-area-inset-right, 0px)) 10px max(12px, env(safe-area-inset-left, 0px));
-    }
-
-    .push-controls-row {
-      display: grid;
-      grid-template-columns: minmax(180px, 230px) auto auto;
-      gap: 10px;
-      align-items: end;
-    }
-
-    .push-controls-row label {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      font-weight: 800;
-      font-size: 0.9rem;
-      color: #17324a;
-    }
-
-    .push-controls-row select {
-      border: 1px solid #b4c8da;
-      border-radius: 10px;
-      padding: 10px 12px;
-      font-size: 1rem;
-      font-family: inherit;
-      background: #fff;
-    }
-
-    .push-btn {
-      border: 1px solid #2b618a;
-      background: #2b618a;
-      color: #fff;
-      border-radius: 10px;
-      padding: 10px 14px;
-      font-weight: 800;
-      min-height: 44px;
-      width: 100%;
-      font-family: inherit;
-      font-size: 1rem;
-      appearance: none;
-      -webkit-appearance: none;
-    }
-
-    .push-btn-secondary {
-      border-color: #6c879f;
-      background: #f1f6fb;
-      color: #17354f;
-    }
-
-    @media (max-width: 980px) {
-      .push-controls-row {
-        grid-template-columns: 1fr;
-      }
-
-      .push-controls-row label,
-      .push-controls-row select,
-      .push-controls-row button {
-        width: 100%;
-      }
-    }
-
-    @media (max-width: 680px) {
-      .header-logo {
-        object-position: center top;
-      }
-
-      .site-nav {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
-        overflow: visible;
-        align-items: stretch;
-        justify-items: stretch;
-      }
-
-      .nav-link {
-        width: 100%;
-        justify-content: center;
-        text-align: center;
-        padding: 8px 10px;
-      }
-    }
-  </style>
-  <link rel="icon" type="image/png" sizes="32x32" href="/logo/Live Weather Alerts logo 32.png" />
+  <link rel="stylesheet" href="./styles.css?v=20260324-nav-1" />
+<link rel="icon" type="image/png" sizes="32x32" href="/logo/Live Weather Alerts logo 32.png" />
   <link rel="apple-touch-icon" sizes="192x192" href="/logo/Live Weather Alerts logo 192.png" />
   <link rel="manifest" href="/manifest.json" />
 </head>
 <body>
-  <main class="page">
-    <a class="header-logo-link" href="/" aria-label="Live Weather Alerts home">
-      <img class="header-logo" src="/logo/Live Weather Alerts Horizonal Logo.png" alt="Live Weather Alerts" />
-    </a>
-    <nav class="site-nav" aria-label="Main pages">
+    <button type="button" class="menu-toggle" data-menu-toggle aria-label="Open menu" aria-expanded="false" aria-controls="siteSettingsDrawer">
+    <span class="menu-toggle-bars" aria-hidden="true"></span>
+  </button>
+  <div class="settings-overlay" data-settings-overlay hidden></div>
+  <aside class="settings-drawer" id="siteSettingsDrawer" data-settings-drawer aria-hidden="true">
+    <div class="drawer-head">
+      <h2>Menu</h2>
+      <button type="button" class="drawer-close" data-menu-close aria-label="Close menu">Close</button>
+    </div>
+    <div class="drawer-tabs" role="tablist" aria-label="Drawer tabs">
+      <button type="button" class="drawer-tab" data-drawer-tab="menu" role="tab" aria-selected="false" aria-controls="drawerPanelMenu" id="drawerTabMenu">Menu</button>
+      <button type="button" class="drawer-tab is-active" data-drawer-tab="settings" role="tab" aria-selected="true" aria-controls="drawerPanelSettings" id="drawerTabSettings">Settings</button>
+    </div>
+    <section class="drawer-panel" data-drawer-panel="menu" id="drawerPanelMenu" role="tabpanel" aria-labelledby="drawerTabMenu" hidden>
+      <nav class="drawer-links" aria-label="Drawer pages">
+        <a class="drawer-link" href="/">Alerts</a>
+        <a class="drawer-link" href="/weather-forecast/">Forecast</a>
+        <a class="drawer-link" href="/convective-outlook/">Convective Outlook</a>
+        <a class="drawer-link" href="/information-hub/">Information Hub</a>
+      </nav>
+    </section>
+    <section class="drawer-panel is-active" data-drawer-panel="settings" id="drawerPanelSettings" role="tabpanel" aria-labelledby="drawerTabSettings">
+      <section class="push-settings" aria-label="State push notifications">
+        <h2>State Push Alerts</h2>
+        <p>Choose a state and enable push alerts. You will get notified when a new alert is added for that state.</p>
+        <div class="push-controls-row">
+          <label>Notify me for state
+            <select id="pushStateSelect">
+              <option value="KY">Kentucky</option>
+            </select>
+          </label>
+          <button type="button" id="enablePushBtn" class="push-btn">Enable push alerts</button>
+          <button type="button" id="disablePushBtn" class="push-btn push-btn-secondary">Turn off</button>
+        </div>
+        <p class="push-status" id="pushStatusText">Push alerts are off for Kentucky.</p>
+      </section>
+    </section>
+  </aside>
+<main class="page">
+<nav class="site-nav" aria-label="Main pages">
       <a class="nav-link active" href="/">Alerts</a>
       <a class="nav-link" href="/weather-forecast/">Forecast</a>
       <a class="nav-link" href="/convective-outlook/">Convective Outlook</a>
@@ -152,19 +95,7 @@
         <button type="button" class="chip-btn" data-level="watch">Be ready</button>
         <button type="button" class="chip-btn" data-level="other">Stay aware</button>
       </div>
-      <section class="push-settings" aria-label="State push notifications">
-        <h2>State Push Alerts</h2>
-        <p>Choose a state and enable push alerts. You will get notified when a new alert is added for that state.</p>
-        <div class="push-controls-row">
-          <label>Notify me for state
-            <select id="pushStateSelect"></select>
-          </label>
-          <button type="button" id="enablePushBtn" class="push-btn">Enable push alerts</button>
-          <button type="button" id="disablePushBtn" class="push-btn push-btn-secondary">Turn off</button>
-        </div>
-        <p class="push-status" id="pushStatusText">Push alerts are off.</p>
-      </section>
-    </section>
+</section>
 
     <section class="results-row" aria-live="polite">
       <p id="resultsCount">Loading alerts...</p>
@@ -185,6 +116,8 @@
     </p>
   </main>
 
-  <script src="./app.js?v=20260323-mobile-fix-4" defer></script>
+  <script src="./app.js?v=20260324-nav-1" defer></script>
+  <script src="/menu.js?v=20260324-nav-1" defer></script>
 </body>
 </html>
+

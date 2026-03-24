@@ -2,25 +2,60 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Information Hub | Live Weather Alerts</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="../styles.css" />
+  <link rel="stylesheet" href="../styles.css?v=20260324-nav-1" />
   <link rel="stylesheet" href="./styles.css" />
   <link rel="icon" type="image/png" sizes="32x32" href="/logo/Live Weather Alerts logo 32.png" />
   <link rel="apple-touch-icon" sizes="192x192" href="/logo/Live Weather Alerts logo 192.png" />
   <link rel="manifest" href="/manifest.json" />
 </head>
 <body>
-  <main class="page">
-    <a class="header-logo-link" href="/" aria-label="Live Weather Alerts home">
-      <img class="header-logo" src="/logo/Live Weather Alerts Horizonal Logo.png" alt="Live Weather Alerts" />
-    </a>
-    <nav class="site-nav" aria-label="Main pages">
-      <a class="nav-link" href="/">Weather Alerts</a>
-      <a class="nav-link" href="/weather-forecast/">Weather Forecast</a>
+    <button type="button" class="menu-toggle" data-menu-toggle aria-label="Open menu" aria-expanded="false" aria-controls="siteSettingsDrawer">
+    <span class="menu-toggle-bars" aria-hidden="true"></span>
+  </button>
+  <div class="settings-overlay" data-settings-overlay hidden></div>
+  <aside class="settings-drawer" id="siteSettingsDrawer" data-settings-drawer aria-hidden="true">
+    <div class="drawer-head">
+      <h2>Menu</h2>
+      <button type="button" class="drawer-close" data-menu-close aria-label="Close menu">Close</button>
+    </div>
+    <div class="drawer-tabs" role="tablist" aria-label="Drawer tabs">
+      <button type="button" class="drawer-tab" data-drawer-tab="menu" role="tab" aria-selected="false" aria-controls="drawerPanelMenu" id="drawerTabMenu">Menu</button>
+      <button type="button" class="drawer-tab is-active" data-drawer-tab="settings" role="tab" aria-selected="true" aria-controls="drawerPanelSettings" id="drawerTabSettings">Settings</button>
+    </div>
+    <section class="drawer-panel" data-drawer-panel="menu" id="drawerPanelMenu" role="tabpanel" aria-labelledby="drawerTabMenu" hidden>
+      <nav class="drawer-links" aria-label="Drawer pages">
+        <a class="drawer-link" href="/">Alerts</a>
+        <a class="drawer-link" href="/weather-forecast/">Forecast</a>
+        <a class="drawer-link" href="/convective-outlook/">Convective Outlook</a>
+        <a class="drawer-link" href="/information-hub/">Information Hub</a>
+      </nav>
+    </section>
+    <section class="drawer-panel is-active" data-drawer-panel="settings" id="drawerPanelSettings" role="tabpanel" aria-labelledby="drawerTabSettings">
+      <section class="push-settings" aria-label="State push notifications">
+        <h2>State Push Alerts</h2>
+        <p>Choose a state and enable push alerts. You will get notified when a new alert is added for that state.</p>
+        <div class="push-controls-row">
+          <label>Notify me for state
+            <select id="pushStateSelect">
+              <option value="KY">Kentucky</option>
+            </select>
+          </label>
+          <button type="button" id="enablePushBtn" class="push-btn">Enable push alerts</button>
+          <button type="button" id="disablePushBtn" class="push-btn push-btn-secondary">Turn off</button>
+        </div>
+        <p class="push-status" id="pushStatusText">Push alerts are off for Kentucky.</p>
+      </section>
+    </section>
+  </aside>
+<main class="page">
+<nav class="site-nav" aria-label="Main pages">
+      <a class="nav-link" href="/">Alerts</a>
+      <a class="nav-link" href="/weather-forecast/">Forecast</a>
       <a class="nav-link" href="/convective-outlook/">Convective Outlook</a>
       <a class="nav-link active" href="/information-hub/">Information Hub</a>
     </nav>
@@ -53,7 +88,7 @@
           </article>
           <article class="plan-card">
             <h3>Step 2: Check local forecast by ZIP</h3>
-            <p>Open <a href="/weather-forecast/">Weather Forecast</a> for current temperature, hourly changes, 7-day trends, and your local map.</p>
+            <p>Open <a href="/weather-forecast/">Forecast</a> for current temperature, hourly changes, 7-day trends, and your local map.</p>
           </article>
           <article class="plan-card">
             <h3>Step 3: Check risk for next days</h3>
@@ -268,5 +303,8 @@
   </main>
 
   <script src="./app.js" defer></script>
+  <script src="/menu.js?v=20260324-nav-1" defer></script>
+  <script src="/push-controls.js?v=20260324-nav-1" defer></script>
 </body>
 </html>
+
