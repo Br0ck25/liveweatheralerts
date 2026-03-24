@@ -57,6 +57,7 @@ const STATE_CODE_TO_NAME = {
 const ALL_STATE_CODES_50 = Object.keys(STATE_CODE_TO_NAME);
 
 const dom = {
+  siteNav: document.querySelector('.site-nav'),
   totalCount: document.getElementById('totalCount'),
   lastSynced: document.getElementById('lastSynced'),
   warningCount: document.getElementById('warningCount'),
@@ -425,6 +426,15 @@ function isStandalonePwa() {
   return Boolean(mediaStandalone || legacyStandalone);
 }
 
+async function isBraveBrowser() {
+  try {
+    if (!navigator.brave || typeof navigator.brave.isBrave !== 'function') return false;
+    return await navigator.brave.isBrave();
+  } catch {
+    return false;
+  }
+}
+
 function setPushStatus(message, isError = false) {
   if (!dom.pushStatusText) return;
   dom.pushStatusText.textContent = message;
@@ -578,7 +588,11 @@ async function enablePushAlerts() {
   } catch (err) {
     const text = String(err);
     if (/AbortError/i.test(text)) {
-      setPushStatus('Push subscription failed. If on iPhone/iPad, open the installed Home Screen app first. Otherwise check notification and browser push permissions, then try again.', true);
+      if (await isBraveBrowser()) {
+        setPushStatus('Push subscription failed in Brave. Check Brave setting "Use Google services for push messaging", allow notifications for this site, then try again.', true);
+      } else {
+        setPushStatus('Push subscription failed. If on iPhone/iPad, open the installed Home Screen app first. Otherwise check notification and browser push permissions, then try again.', true);
+      }
     } else {
       setPushStatus(`Could not enable push alerts: ${text}`, true);
     }
@@ -707,6 +721,7 @@ function bindEvents() {
 
 async function boot() {
   try {
+    if (dom.siteNav) dom.siteNav.scrollLeft = 0;
     const payload = await fetchAlerts();
     alertRows = Array.isArray(payload.alerts) ? payload.alerts : [];
     renderStats(alertRows, payload.lastPoll, payload.syncError);
