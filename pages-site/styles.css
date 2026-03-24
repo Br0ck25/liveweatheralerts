@@ -154,6 +154,7 @@ body {
   transform: translateX(-102%);
   transition: transform 180ms ease;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 body.menu-open {
@@ -232,6 +233,51 @@ body.menu-open .settings-drawer {
 
 .drawer-link:hover {
   background: #f2f8ff;
+}
+
+.settings-drawer .push-settings {
+  margin-top: 0;
+}
+
+.settings-drawer .push-controls-row {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.settings-drawer .push-controls-row label,
+.settings-drawer .push-controls-row select,
+.settings-drawer .push-controls-row button {
+  width: 100%;
+}
+
+.settings-drawer .push-btn {
+  white-space: nowrap;
+}
+
+@media (min-width: 981px) {
+  .settings-overlay {
+    background: rgba(9, 27, 43, 0.22);
+  }
+
+  .settings-drawer {
+    top: 64px;
+    left: 12px;
+    bottom: auto;
+    width: min(420px, calc(100vw - 24px));
+    max-height: calc(100vh - 76px);
+    border: 1px solid rgba(16, 38, 59, 0.16);
+    border-radius: 16px;
+    box-shadow: 0 16px 36px rgba(12, 35, 56, 0.24);
+    transform: translateY(-8px) scale(0.98);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  body.menu-open .settings-drawer {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .hero {
