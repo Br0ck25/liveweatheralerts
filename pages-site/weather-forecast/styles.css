@@ -18,7 +18,7 @@ body.forecast-theme {
 
 .forecast-page {
   width: min(980px, 100% - 18px);
-  margin: 12px auto 26px;
+  margin: 0 auto 26px;
 }
 
 .forecast-theme .site-nav {
@@ -320,7 +320,7 @@ body.forecast-theme {
 @media (min-width: 760px) {
   .forecast-page {
     width: min(980px, 100% - 34px);
-    margin-top: 20px;
+    margin-top: 0;
   }
 
   .current-card,
