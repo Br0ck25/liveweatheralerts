@@ -804,8 +804,12 @@ async function sendPushForState(env: Env, vapid: VapidKeys, stateCode: string, n
 			// Endpoint is gone — clean up to avoid repeated failures.
 			if (response.status === 404 || response.status === 410) {
 				await removePushSubscriptionById(env, subscriptionId);
+			} else if (!response.ok) {
+				const body = await response.text().catch(() => '');
+				console.log(`[push] send failed state=${stateCode} status=${response.status} body=${body.slice(0, 240)}`);
 			}
-		} catch {
+		} catch (err) {
+			console.log(`[push] send exception state=${stateCode} err=${String(err)}`);
 			// Ignore transient send failures and retry on the next schedule cycle.
 		}
 	}

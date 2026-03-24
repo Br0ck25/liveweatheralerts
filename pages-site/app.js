@@ -415,6 +415,16 @@ function pushSupported() {
     && 'Notification' in window;
 }
 
+function isIosDevice() {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent || '');
+}
+
+function isStandalonePwa() {
+  const mediaStandalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
+  const legacyStandalone = typeof navigator.standalone === 'boolean' ? navigator.standalone : false;
+  return Boolean(mediaStandalone || legacyStandalone);
+}
+
 function setPushStatus(message, isError = false) {
   if (!dom.pushStatusText) return;
   dom.pushStatusText.textContent = message;
@@ -533,6 +543,11 @@ async function enablePushAlerts() {
     return;
   }
 
+  if (isIosDevice() && !isStandalonePwa()) {
+    setPushStatus('On iPhone/iPad, install this app to Home Screen and open it from there before enabling push alerts.', true);
+    return;
+  }
+
   setPushButtonsLoading(true);
   try {
     const registration = await ensureServiceWorkerRegistration();
@@ -546,18 +561,27 @@ async function enablePushAlerts() {
     }
 
     const publicKey = await fetchPushPublicKey();
+    const appServerKey = base64UrlToUint8Array(publicKey);
+    if (appServerKey.length !== 65 || appServerKey[0] !== 4) {
+      throw new Error('Server VAPID public key format is invalid.');
+    }
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: base64UrlToUint8Array(publicKey),
+        applicationServerKey: appServerKey,
       });
     }
 
     await savePushSubscription(subscription, stateCode);
     setPushStatus(`Push alerts are on for ${formatStateName(stateCode)}.`);
   } catch (err) {
-    setPushStatus(`Could not enable push alerts: ${String(err)}`, true);
+    const text = String(err);
+    if (/AbortError/i.test(text)) {
+      setPushStatus('Push subscription failed. If on iPhone/iPad, open the installed Home Screen app first. Otherwise check notification and browser push permissions, then try again.', true);
+    } else {
+      setPushStatus(`Could not enable push alerts: ${text}`, true);
+    }
   } finally {
     setPushButtonsLoading(false);
   }
@@ -622,6 +646,13 @@ async function initPushControls() {
     dom.enablePushBtn.disabled = true;
     dom.disablePushBtn.disabled = true;
     setPushStatus('Push alerts require HTTPS and a supported browser.', true);
+    return;
+  }
+
+  if (isIosDevice() && !isStandalonePwa()) {
+    dom.enablePushBtn.disabled = true;
+    dom.disablePushBtn.disabled = true;
+    setPushStatus('On iPhone/iPad, add this site to Home Screen and open the installed app to enable push alerts.', true);
     return;
   }
 
