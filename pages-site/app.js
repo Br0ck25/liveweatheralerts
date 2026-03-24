@@ -1,4 +1,5 @@
 const STATE_STORAGE_KEY = 'liveWeather:selectedState';
+const PUSH_STATE_STORAGE_KEY = 'liveWeather:pushState';
 
 const STATE_CODE_TO_NAME = {
   AL: 'Alabama',
@@ -72,9 +73,15 @@ const dom = {
   globalEmpty: document.getElementById('globalEmpty'),
   alertsGrid: document.getElementById('alertsGrid'),
   filterEmptyState: document.getElementById('filterEmptyState'),
+  pushStateSelect: document.getElementById('pushStateSelect'),
+  enablePushBtn: document.getElementById('enablePushBtn'),
+  disablePushBtn: document.getElementById('disablePushBtn'),
+  pushStatusText: document.getElementById('pushStatusText'),
 };
 
 let alertRows = [];
+let pushPublicKeyCache = '';
+let swRegistrationPromise = null;
 
 function escHtml(text) {
   return String(text ?? '')
@@ -230,6 +237,16 @@ function formatStateName(code) {
   return STATE_CODE_TO_NAME[c] || c || '';
 }
 
+function normalizeStateCode(value) {
+  const code = String(value || '').trim().toUpperCase();
+  return STATE_CODE_TO_NAME[code] ? code : '';
+}
+
+function queryStateCode() {
+  const state = new URLSearchParams(window.location.search).get('state');
+  return normalizeStateCode(state);
+}
+
 function initStateFilter() {
   const extras = Array.from(new Set(alertRows.map((a) => String(a.stateCode || '').toUpperCase()).filter(Boolean)));
   const allCodes = Array.from(new Set([...ALL_STATE_CODES_50, ...extras])).sort((a, b) => formatStateName(a).localeCompare(formatStateName(b)));
@@ -237,9 +254,10 @@ function initStateFilter() {
     .concat(allCodes.map((code) => `<option value="${escHtml(code)}">${escHtml(formatStateName(code))}</option>`))
     .join('');
   dom.stateFilter.innerHTML = options;
-  const savedState = localStorage.getItem(STATE_STORAGE_KEY) || 'all';
-  const hasSaved = Array.from(dom.stateFilter.options).some((opt) => opt.value === savedState);
-  dom.stateFilter.value = hasSaved ? savedState : 'all';
+  const requestedState = queryStateCode() || localStorage.getItem(STATE_STORAGE_KEY) || 'all';
+  const hasRequested = Array.from(dom.stateFilter.options).some((opt) => opt.value === requestedState);
+  dom.stateFilter.value = hasRequested ? requestedState : 'all';
+  localStorage.setItem(STATE_STORAGE_KEY, String(dom.stateFilter.value || 'all'));
 }
 
 function updateQuickButtons(level) {
@@ -390,6 +408,234 @@ async function fetchAlerts() {
   throw new Error(`Unable to load alerts from API. Tried: ${errors.join(', ')}`);
 }
 
+function pushSupported() {
+  return window.isSecureContext
+    && 'serviceWorker' in navigator
+    && 'PushManager' in window
+    && 'Notification' in window;
+}
+
+function setPushStatus(message, isError = false) {
+  if (!dom.pushStatusText) return;
+  dom.pushStatusText.textContent = message;
+  dom.pushStatusText.classList.toggle('error', Boolean(isError));
+}
+
+function pushStatePreference() {
+  const fromStorage = normalizeStateCode(localStorage.getItem(PUSH_STATE_STORAGE_KEY));
+  if (fromStorage) return fromStorage;
+  const fromQuery = queryStateCode();
+  if (fromQuery) return fromQuery;
+  const selectedMainState = normalizeStateCode(dom.stateFilter?.value);
+  if (selectedMainState) return selectedMainState;
+  return 'KY';
+}
+
+function buildPushStateSelect() {
+  if (!dom.pushStateSelect) return;
+  const options = ALL_STATE_CODES_50
+    .slice()
+    .sort((a, b) => formatStateName(a).localeCompare(formatStateName(b)))
+    .map((code) => `<option value="${escHtml(code)}">${escHtml(formatStateName(code))}</option>`)
+    .join('');
+  dom.pushStateSelect.innerHTML = options;
+  dom.pushStateSelect.value = pushStatePreference();
+}
+
+function base64UrlToUint8Array(base64Url) {
+  const padded = base64Url.replace(/-/g, '+').replace(/_/g, '/')
+    + '='.repeat((4 - (base64Url.length % 4)) % 4);
+  const raw = atob(padded);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+async function ensureServiceWorkerRegistration() {
+  if (!swRegistrationPromise) {
+    swRegistrationPromise = navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then(async () => await navigator.serviceWorker.ready);
+  }
+  return await swRegistrationPromise;
+}
+
+async function fetchPushPublicKey() {
+  if (pushPublicKeyCache) return pushPublicKeyCache;
+  const res = await fetch('/api/push/public-key', {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok || !payload.publicKey) {
+    throw new Error(payload.error || 'Push public key is unavailable.');
+  }
+  pushPublicKeyCache = String(payload.publicKey);
+  return pushPublicKeyCache;
+}
+
+async function savePushSubscription(subscription, stateCode) {
+  const res = await fetch('/api/push/subscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      stateCode,
+      subscription: subscription.toJSON(),
+    }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload.error || 'Could not save push subscription.');
+  }
+  return payload;
+}
+
+async function removePushSubscription(endpoint) {
+  const res = await fetch('/api/push/unsubscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ endpoint }),
+  });
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({}));
+    throw new Error(payload.error || 'Could not remove push subscription.');
+  }
+}
+
+function setPushButtonsLoading(isLoading) {
+  if (dom.enablePushBtn) dom.enablePushBtn.disabled = isLoading;
+  if (dom.disablePushBtn) dom.disablePushBtn.disabled = isLoading;
+}
+
+async function syncExistingPushSubscription() {
+  const stateCode = normalizeStateCode(dom.pushStateSelect?.value) || pushStatePreference();
+  localStorage.setItem(PUSH_STATE_STORAGE_KEY, stateCode);
+  const registration = await ensureServiceWorkerRegistration();
+  const subscription = await registration.pushManager.getSubscription();
+  if (!subscription) {
+    setPushStatus(`Push alerts are off for ${formatStateName(stateCode)}.`);
+    return false;
+  }
+  await savePushSubscription(subscription, stateCode);
+  setPushStatus(`Push alerts are on for ${formatStateName(stateCode)}.`);
+  return true;
+}
+
+async function enablePushAlerts() {
+  const stateCode = normalizeStateCode(dom.pushStateSelect?.value);
+  if (!stateCode) {
+    setPushStatus('Choose a valid state before enabling push alerts.', true);
+    return;
+  }
+  localStorage.setItem(PUSH_STATE_STORAGE_KEY, stateCode);
+
+  if (!pushSupported()) {
+    setPushStatus('Push alerts are not supported on this browser/device.', true);
+    return;
+  }
+
+  setPushButtonsLoading(true);
+  try {
+    const registration = await ensureServiceWorkerRegistration();
+    let permission = Notification.permission;
+    if (permission !== 'granted') {
+      permission = await Notification.requestPermission();
+    }
+    if (permission !== 'granted') {
+      setPushStatus('Notification permission was not granted.', true);
+      return;
+    }
+
+    const publicKey = await fetchPushPublicKey();
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: base64UrlToUint8Array(publicKey),
+      });
+    }
+
+    await savePushSubscription(subscription, stateCode);
+    setPushStatus(`Push alerts are on for ${formatStateName(stateCode)}.`);
+  } catch (err) {
+    setPushStatus(`Could not enable push alerts: ${String(err)}`, true);
+  } finally {
+    setPushButtonsLoading(false);
+  }
+}
+
+async function disablePushAlerts() {
+  if (!pushSupported()) {
+    setPushStatus('Push alerts are not supported on this browser/device.', true);
+    return;
+  }
+  setPushButtonsLoading(true);
+  try {
+    const registration = await ensureServiceWorkerRegistration();
+    const subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      setPushStatus('Push alerts are already off.');
+      return;
+    }
+    await removePushSubscription(subscription.endpoint);
+    await subscription.unsubscribe();
+    setPushStatus('Push alerts are off.');
+  } catch (err) {
+    setPushStatus(`Could not turn off push alerts: ${String(err)}`, true);
+  } finally {
+    setPushButtonsLoading(false);
+  }
+}
+
+async function initPushControls() {
+  if (!dom.pushStateSelect || !dom.enablePushBtn || !dom.disablePushBtn || !dom.pushStatusText) return;
+  buildPushStateSelect();
+
+  dom.pushStateSelect.addEventListener('change', async () => {
+    const stateCode = normalizeStateCode(dom.pushStateSelect.value);
+    if (!stateCode) return;
+    localStorage.setItem(PUSH_STATE_STORAGE_KEY, stateCode);
+    try {
+      if (pushSupported()) {
+        const registration = await ensureServiceWorkerRegistration();
+        const subscription = await registration.pushManager.getSubscription();
+        if (subscription) {
+          await savePushSubscription(subscription, stateCode);
+          setPushStatus(`Push alerts are on for ${formatStateName(stateCode)}.`);
+          return;
+        }
+      }
+      setPushStatus(`State preference saved: ${formatStateName(stateCode)}. Push alerts are off.`);
+    } catch (err) {
+      setPushStatus(`Could not update state preference: ${String(err)}`, true);
+    }
+  });
+
+  dom.enablePushBtn.addEventListener('click', async () => {
+    await enablePushAlerts();
+  });
+
+  dom.disablePushBtn.addEventListener('click', async () => {
+    await disablePushAlerts();
+  });
+
+  if (!pushSupported()) {
+    dom.enablePushBtn.disabled = true;
+    dom.disablePushBtn.disabled = true;
+    setPushStatus('Push alerts require HTTPS and a supported browser.', true);
+    return;
+  }
+
+  try {
+    const enabled = await syncExistingPushSubscription();
+    if (!enabled) {
+      const stateCode = normalizeStateCode(dom.pushStateSelect.value) || pushStatePreference();
+      setPushStatus(`Push alerts are off for ${formatStateName(stateCode)}.`);
+    }
+  } catch (err) {
+    setPushStatus(`Push setup issue: ${String(err)}`, true);
+  }
+}
+
 function bindEvents() {
   dom.quickButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -442,6 +688,8 @@ async function boot() {
     dom.globalEmpty.hidden = false;
     dom.globalEmpty.querySelector('h2').textContent = 'Unable to load alerts';
     dom.globalEmpty.querySelector('p').textContent = String(err);
+  } finally {
+    await initPushControls();
   }
 }
 

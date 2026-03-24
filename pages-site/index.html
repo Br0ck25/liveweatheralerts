@@ -60,6 +60,18 @@
         <button type="button" class="chip-btn" data-level="watch">Be ready</button>
         <button type="button" class="chip-btn" data-level="other">Stay aware</button>
       </div>
+      <section class="push-settings" aria-label="State push notifications">
+        <h2>State Push Alerts</h2>
+        <p>Choose a state and enable push alerts. You will get notified when a new alert is added for that state.</p>
+        <div class="push-controls-row">
+          <label>Notify me for state
+            <select id="pushStateSelect"></select>
+          </label>
+          <button type="button" id="enablePushBtn" class="push-btn">Enable push alerts</button>
+          <button type="button" id="disablePushBtn" class="push-btn push-btn-secondary">Turn off</button>
+        </div>
+        <p class="push-status" id="pushStatusText">Push alerts are off.</p>
+      </section>
     </section>
 
     <section class="results-row" aria-live="polite">

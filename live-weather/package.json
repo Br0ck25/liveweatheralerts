@@ -15,5 +15,8 @@
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.76.0"
+	},
+	"dependencies": {
+		"@block65/webcrypto-web-push": "^1.0.2"
 	}
 }

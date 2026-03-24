@@ -19,6 +19,10 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 - `forecast-maps/` - plain-language national forecast maps guide with embedded live map images
 - `alert-methods/` - plain-language warning delivery setup guide
 - `functions/api/convective-outlook.js` - pulls and simplifies SPC Day 1/2/3 outlook pages
+- `functions/api/push/public-key.js` - proxy for VAPID public key
+- `functions/api/push/subscribe.js` - saves browser push subscription + selected state
+- `functions/api/push/unsubscribe.js` - removes browser push subscription
+- `sw.js` - service worker that receives push and shows notifications
 
 `FAQ` and `Forecast Maps` are also accessible as tabs in the Information Hub.
 Weather Terms are available at `/weather-terms/` and in the Information Hub glossary tab.
@@ -30,6 +34,20 @@ Set this in Cloudflare Pages project settings:
 
 - `WEATHER_WORKER_ORIGIN` = your backend Worker origin
   - Example: `https://live-weather.jamesbrock25.workers.dev`
+
+Backend Worker secrets for push notifications:
+
+- `VAPID_PUBLIC_KEY`
+- `VAPID_PRIVATE_KEY`
+- `VAPID_SUBJECT` (example: `mailto:alerts@liveweatheralerts.com`)
+
+Generate keys once (local machine):
+
+1. `npx web-push generate-vapid-keys`
+2. Copy values into Worker secrets with Wrangler:
+   - `npx wrangler secret put VAPID_PUBLIC_KEY`
+   - `npx wrangler secret put VAPID_PRIVATE_KEY`
+   - `npx wrangler secret put VAPID_SUBJECT`
 
 ## Deploy (Cloudflare Pages)
 
@@ -45,3 +63,8 @@ Set this in Cloudflare Pages project settings:
 - The Pages Function forwards that request to your backend Worker.
 - The convective outlook page calls `/api/convective-outlook`.
 - The ZIP forecast tab calls `/api/forecast`.
+- State-based push flow:
+  - Frontend requests `/api/push/public-key`.
+  - Browser subscribes with service worker `/sw.js`.
+  - Frontend posts subscription + selected state to `/api/push/subscribe`.
+  - Backend cron sends push only when a new alert ID appears for that state.

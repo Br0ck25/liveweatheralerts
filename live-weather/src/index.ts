@@ -1,4 +1,10 @@
 import { renderPublicAlertsPage } from './public-alerts-page';
+import {
+	buildPushPayload,
+	type PushMessage,
+	type PushSubscription as WebPushSubscription,
+	type VapidKeys,
+} from '@block65/webcrypto-web-push';
 
 interface Env {
 	WEATHER_KV: KVNamespace;
@@ -6,6 +12,9 @@ interface Env {
 	FB_PAGE_ACCESS_TOKEN?: string;
 	ADMIN_PASSWORD?: string;
 	FB_IMAGE_BASE_URL?: string;
+	VAPID_PUBLIC_KEY?: string;
+	VAPID_PRIVATE_KEY?: string;
+	VAPID_SUBJECT?: string;
 	ASSETS?: {
 		fetch(request: Request): Promise<Response>;
 	};
@@ -23,6 +32,9 @@ const KV_ALERT_MAP  = 'alerts:map';       // JSON: Record<alertId, feature> — 
 const KV_ETAG       = 'alerts:etag';      // Last ETag string from NWS
 const KV_LAST_POLL  = 'alerts:last-poll'; // ISO timestamp of last successful poll
 const KV_FB_APP_CONFIG = 'fb:app-config';  // JSON: { appId, appSecret }
+const KV_PUSH_SUB_PREFIX = 'push:sub:'; // push:sub:{sha256(endpoint)}
+const KV_PUSH_STATE_INDEX_PREFIX = 'push:index:state:'; // push:index:state:{stateCode}
+const KV_PUSH_STATE_ALERT_SNAPSHOT = 'push:state-alert-snapshot:v1'; // JSON: Record<stateCode, alertId[]>
 // KV thread keys: thread:{ugc}:{eventSlug} — tracks active FB post threads per county+alertType
 // e.g. thread:KYC195:severe_thunderstorm_warning
 
@@ -39,6 +51,18 @@ interface FbAppConfig {
 	appId?: string;
 	appSecret?: string;
 }
+
+interface PushSubscriptionRecord {
+	id: string;
+	endpoint: string;
+	stateCode: string;
+	subscription: WebPushSubscription;
+	createdAt: string;
+	updatedAt: string;
+	userAgent?: string;
+}
+
+type PushStateAlertSnapshot = Record<string, string[]>;
 
 async function readFbAppConfig(env: Env): Promise<FbAppConfig> {
 	try {
@@ -487,8 +511,9 @@ function expandEventSlugs(eventSlug: string): string[] {
 	return Array.from(variants);
 }
 
-function extractStateCode(feature: any): string {
+function extractStateCodes(feature: any): string[] {
 	const p = feature?.properties ?? {};
+	const codes = new Set<string>();
 	const ugcCodes: string[] = Array.isArray(p.geocode?.UGC) ? p.geocode.UGC : [];
 	for (const ugc of ugcCodes) {
 		if (typeof ugc === 'string' && ugc.length >= 2) {
@@ -496,14 +521,323 @@ function extractStateCode(feature: any): string {
 			// Only accept codes that are actual US state/territory abbreviations.
 			// Marine zone prefixes (AM, PZ, GM, AN, LC, LE, LH, LM, LO, LS, SL, PM, PH, PK, PS, PY)
 			// are NOT state codes and must be rejected to avoid bad image paths.
-			if (STATE_CODE_TO_NAME[code]) return code;
+			if (STATE_CODE_TO_NAME[code]) {
+				codes.add(code);
+			}
 		}
 	}
+	if (codes.size > 0) return Array.from(codes);
 	// fallback: try to infer from sender name (e.g. "NWS Louisville KY")
 	const sender = String(p.senderName || '');
 	const m = sender.match(/\b([A-Z]{2})\b/);
-	if (m && STATE_CODE_TO_NAME[m[1]]) return m[1];
+	if (m && STATE_CODE_TO_NAME[m[1]]) return [m[1]];
+	return [];
+}
+
+function extractStateCode(feature: any): string {
+	const codes = extractStateCodes(feature);
+	if (codes.length > 0) return codes[0];
 	return '';
+}
+
+function normalizeStateCode(input: unknown): string | null {
+	const code = String(input ?? '').trim().toUpperCase();
+	if (!code) return null;
+	return STATE_CODE_TO_NAME[code] ? code : null;
+}
+
+function stateCodeDisplayName(code: string): string {
+	const slug = stateCodeToName(code);
+	if (!slug) return String(code || '').toUpperCase();
+	return slug
+		.split('-')
+		.filter(Boolean)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(' ');
+}
+
+function pushSubKey(subscriptionId: string): string {
+	return `${KV_PUSH_SUB_PREFIX}${subscriptionId}`;
+}
+
+function pushStateIndexKey(stateCode: string): string {
+	return `${KV_PUSH_STATE_INDEX_PREFIX}${stateCode}`;
+}
+
+function getVapidKeys(env: Env): VapidKeys | null {
+	const publicKey = String(env.VAPID_PUBLIC_KEY || '').trim();
+	const privateKey = String(env.VAPID_PRIVATE_KEY || '').trim();
+	const subject = String(env.VAPID_SUBJECT || '').trim() || 'mailto:alerts@liveweatheralerts.com';
+	if (!publicKey || !privateKey) return null;
+	return { publicKey, privateKey, subject };
+}
+
+function isValidPushSubscription(value: unknown): value is WebPushSubscription {
+	const v = value as Record<string, any> | null | undefined;
+	if (!v || typeof v !== 'object') return false;
+	const endpoint = String(v.endpoint ?? '');
+	const keys = v.keys as Record<string, any> | undefined;
+	const auth = String(keys?.auth ?? '');
+	const p256dh = String(keys?.p256dh ?? '');
+	if (!endpoint.startsWith('https://')) return false;
+	return auth.length > 0 && p256dh.length > 0;
+}
+
+async function sha256Hex(text: string): Promise<string> {
+	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+	return Array.from(new Uint8Array(digest))
+		.map((byte) => byte.toString(16).padStart(2, '0'))
+		.join('');
+}
+
+function dedupeStrings(values: string[]): string[] {
+	return Array.from(new Set(values.filter(Boolean)));
+}
+
+async function readPushStateIndex(env: Env, stateCode: string): Promise<string[]> {
+	try {
+		const raw = await env.WEATHER_KV.get(pushStateIndexKey(stateCode));
+		if (!raw) return [];
+		const parsed = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return dedupeStrings(parsed.map((v) => String(v)));
+	} catch {
+		return [];
+	}
+}
+
+async function writePushStateIndex(env: Env, stateCode: string, subscriptionIds: string[]): Promise<void> {
+	const ids = dedupeStrings(subscriptionIds);
+	if (ids.length === 0) {
+		await env.WEATHER_KV.delete(pushStateIndexKey(stateCode));
+		return;
+	}
+	await env.WEATHER_KV.put(pushStateIndexKey(stateCode), JSON.stringify(ids));
+}
+
+async function addPushIdToStateIndex(env: Env, stateCode: string, subscriptionId: string): Promise<void> {
+	const current = await readPushStateIndex(env, stateCode);
+	if (current.includes(subscriptionId)) return;
+	current.push(subscriptionId);
+	await writePushStateIndex(env, stateCode, current);
+}
+
+async function removePushIdFromStateIndex(env: Env, stateCode: string, subscriptionId: string): Promise<void> {
+	const current = await readPushStateIndex(env, stateCode);
+	const next = current.filter((id) => id !== subscriptionId);
+	await writePushStateIndex(env, stateCode, next);
+}
+
+async function readPushSubscriptionRecordById(env: Env, subscriptionId: string): Promise<PushSubscriptionRecord | null> {
+	try {
+		const raw = await env.WEATHER_KV.get(pushSubKey(subscriptionId));
+		if (!raw) return null;
+		const parsed = JSON.parse(raw) as PushSubscriptionRecord;
+		if (!parsed?.id || !parsed?.endpoint || !parsed?.stateCode) return null;
+		if (!isValidPushSubscription(parsed.subscription)) return null;
+		return parsed;
+	} catch {
+		return null;
+	}
+}
+
+async function upsertPushSubscriptionRecord(
+	env: Env,
+	subscription: WebPushSubscription,
+	stateCode: string,
+	userAgent?: string,
+): Promise<PushSubscriptionRecord> {
+	const nowIso = new Date().toISOString();
+	const subscriptionId = await sha256Hex(subscription.endpoint);
+	const existing = await readPushSubscriptionRecordById(env, subscriptionId);
+	const normalizedState = normalizeStateCode(stateCode) || stateCode;
+
+	const record: PushSubscriptionRecord = {
+		id: subscriptionId,
+		endpoint: subscription.endpoint,
+		stateCode: normalizedState,
+		subscription,
+		createdAt: existing?.createdAt || nowIso,
+		updatedAt: nowIso,
+		userAgent: String(userAgent || existing?.userAgent || '').slice(0, 300),
+	};
+
+	await env.WEATHER_KV.put(pushSubKey(subscriptionId), JSON.stringify(record));
+
+	if (existing?.stateCode && existing.stateCode !== normalizedState) {
+		await removePushIdFromStateIndex(env, existing.stateCode, subscriptionId);
+	}
+	await addPushIdToStateIndex(env, normalizedState, subscriptionId);
+
+	return record;
+}
+
+async function removePushSubscriptionById(env: Env, subscriptionId: string): Promise<boolean> {
+	const existing = await readPushSubscriptionRecordById(env, subscriptionId);
+	if (!existing) {
+		await env.WEATHER_KV.delete(pushSubKey(subscriptionId));
+		return false;
+	}
+	await Promise.all([
+		env.WEATHER_KV.delete(pushSubKey(subscriptionId)),
+		removePushIdFromStateIndex(env, existing.stateCode, subscriptionId),
+	]);
+	return true;
+}
+
+async function removePushSubscriptionByEndpoint(env: Env, endpoint: string): Promise<boolean> {
+	const subscriptionId = await sha256Hex(endpoint);
+	return await removePushSubscriptionById(env, subscriptionId);
+}
+
+function buildStateAlertSnapshot(map: Record<string, any>): PushStateAlertSnapshot {
+	const snapshot: PushStateAlertSnapshot = {};
+	for (const [fallbackId, feature] of Object.entries(map)) {
+		const id = String((feature as any)?.id ?? fallbackId ?? '');
+		if (!id) continue;
+		const stateCodes = extractStateCodes(feature);
+		for (const stateCode of stateCodes) {
+			if (!snapshot[stateCode]) snapshot[stateCode] = [];
+			snapshot[stateCode].push(id);
+		}
+	}
+	for (const stateCode of Object.keys(snapshot)) {
+		snapshot[stateCode] = dedupeStrings(snapshot[stateCode]).sort();
+	}
+	return snapshot;
+}
+
+async function readPushStateAlertSnapshot(env: Env): Promise<PushStateAlertSnapshot | null> {
+	try {
+		const raw = await env.WEATHER_KV.get(KV_PUSH_STATE_ALERT_SNAPSHOT);
+		if (!raw) return null;
+		const parsed = JSON.parse(raw);
+		if (!parsed || typeof parsed !== 'object') return null;
+		const snapshot: PushStateAlertSnapshot = {};
+		for (const [stateCode, ids] of Object.entries(parsed as Record<string, unknown>)) {
+			if (!Array.isArray(ids)) continue;
+			const normalized = normalizeStateCode(stateCode);
+			if (!normalized) continue;
+			snapshot[normalized] = dedupeStrings(ids.map((id) => String(id))).sort();
+		}
+		return snapshot;
+	} catch {
+		return null;
+	}
+}
+
+async function writePushStateAlertSnapshot(env: Env, snapshot: PushStateAlertSnapshot): Promise<void> {
+	await env.WEATHER_KV.put(KV_PUSH_STATE_ALERT_SNAPSHOT, JSON.stringify(snapshot));
+}
+
+function truncateText(value: string, maxLength: number): string {
+	const text = String(value || '').trim();
+	if (text.length <= maxLength) return text;
+	return text.slice(0, Math.max(0, maxLength - 1)).trimEnd() + '…';
+}
+
+function buildStatePushMessageData(stateCode: string, features: any[]): Record<string, any> {
+	const stateName = stateCodeDisplayName(stateCode);
+	if (features.length <= 1) {
+		const feature = features[0] ?? {};
+		const properties = feature?.properties ?? {};
+		const alertId = String(feature?.id ?? properties?.id ?? '');
+		const event = String(properties.event ?? 'Weather Alert');
+		const headline = String(properties.headline ?? '').trim();
+		const areaDesc = String(properties.areaDesc ?? '').trim();
+		return {
+			title: `${event} - ${stateName}`,
+			body: truncateText(headline || areaDesc || 'Tap for details.', 140),
+			url: `/?state=${encodeURIComponent(stateCode)}`,
+			tag: `state-${stateCode}-${alertId || Date.now()}`,
+			stateCode,
+			alertId,
+			icon: '/logo/Live Weather Alerts logo 192.png',
+			badge: '/logo/Live Weather Alerts logo 32.png',
+		};
+	}
+
+	const warningCount = features.filter((f) => classifyAlert(String(f?.properties?.event ?? '')) === 'warning').length;
+	const watchCount = features.filter((f) => classifyAlert(String(f?.properties?.event ?? '')) === 'watch').length;
+	const bodyParts = [];
+	if (warningCount > 0) bodyParts.push(`${warningCount} warning${warningCount === 1 ? '' : 's'}`);
+	if (watchCount > 0) bodyParts.push(`${watchCount} watch${watchCount === 1 ? '' : 'es'}`);
+	if (bodyParts.length === 0) bodyParts.push(`${features.length} new alerts`);
+
+	return {
+		title: `${features.length} new weather alerts - ${stateName}`,
+		body: truncateText(`Includes ${bodyParts.join(', ')}. Tap to review now.`, 140),
+		url: `/?state=${encodeURIComponent(stateCode)}`,
+		tag: `state-${stateCode}-${Date.now()}`,
+		stateCode,
+		icon: '/logo/Live Weather Alerts logo 192.png',
+		badge: '/logo/Live Weather Alerts logo 32.png',
+	};
+}
+
+async function sendPushForState(env: Env, vapid: VapidKeys, stateCode: string, newFeatures: any[]): Promise<void> {
+	if (newFeatures.length === 0) return;
+	const subscriptionIds = await readPushStateIndex(env, stateCode);
+	if (subscriptionIds.length === 0) return;
+
+	const payloadData = buildStatePushMessageData(stateCode, newFeatures);
+
+	for (const subscriptionId of subscriptionIds) {
+		const record = await readPushSubscriptionRecordById(env, subscriptionId);
+		if (!record) {
+			await removePushIdFromStateIndex(env, stateCode, subscriptionId);
+			continue;
+		}
+		if (record.stateCode !== stateCode) {
+			await removePushIdFromStateIndex(env, stateCode, subscriptionId);
+			continue;
+		}
+
+		try {
+			const message: PushMessage = {
+				data: payloadData,
+				options: { ttl: 900, urgency: 'high', topic: `state-${stateCode}` },
+			};
+			const payload = await buildPushPayload(message, record.subscription, vapid);
+			const response = await fetch(record.subscription.endpoint, payload);
+
+			// Endpoint is gone — clean up to avoid repeated failures.
+			if (response.status === 404 || response.status === 410) {
+				await removePushSubscriptionById(env, subscriptionId);
+			}
+		} catch {
+			// Ignore transient send failures and retry on the next schedule cycle.
+		}
+	}
+}
+
+async function dispatchStatePushNotifications(env: Env, map: Record<string, any>): Promise<void> {
+	const vapid = getVapidKeys(env);
+	if (!vapid) return;
+
+	const currentSnapshot = buildStateAlertSnapshot(map);
+	const previousSnapshot = await readPushStateAlertSnapshot(env);
+	if (!previousSnapshot) {
+		// First run: establish baseline to avoid blasting for all currently active alerts.
+		await writePushStateAlertSnapshot(env, currentSnapshot);
+		return;
+	}
+
+	const allStateCodes = dedupeStrings([
+		...Object.keys(previousSnapshot),
+		...Object.keys(currentSnapshot),
+	]);
+
+	for (const stateCode of allStateCodes) {
+		const currentIds = new Set(currentSnapshot[stateCode] ?? []);
+		const previousIds = new Set(previousSnapshot[stateCode] ?? []);
+		const newIds = Array.from(currentIds).filter((id) => !previousIds.has(id));
+		if (newIds.length === 0) continue;
+		const newFeatures = newIds.map((id) => map[id]).filter(Boolean);
+		await sendPushForState(env, vapid, stateCode, newFeatures);
+	}
+
+	await writePushStateAlertSnapshot(env, currentSnapshot);
 }
 
 /**
@@ -1699,6 +2033,98 @@ function apiCorsHeaders(): Headers {
 	});
 }
 
+function pushCorsHeaders(): Headers {
+	return new Headers({
+		'Access-Control-Allow-Origin': '*',
+		'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+		'Access-Control-Allow-Headers': 'Content-Type',
+		'Vary': 'Origin',
+	});
+}
+
+async function handlePushPublicKey(env: Env): Promise<Response> {
+	const vapid = getVapidKeys(env);
+	const headers = pushCorsHeaders();
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+	if (!vapid) {
+		return new Response(JSON.stringify({
+			error: 'Push notifications are not configured on the server.',
+		}), { status: 503, headers });
+	}
+	return new Response(JSON.stringify({
+		publicKey: vapid.publicKey,
+	}), { status: 200, headers });
+}
+
+async function handlePushSubscribe(request: Request, env: Env): Promise<Response> {
+	const headers = pushCorsHeaders();
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	const vapid = getVapidKeys(env);
+	if (!vapid) {
+		return new Response(JSON.stringify({
+			error: 'Push notifications are not configured on the server.',
+		}), { status: 503, headers });
+	}
+
+	let body: any;
+	try {
+		body = await request.json();
+	} catch {
+		return new Response(JSON.stringify({ error: 'Invalid JSON body.' }), { status: 400, headers });
+	}
+
+	const stateCode = normalizeStateCode(body?.stateCode || body?.state);
+	if (!stateCode) {
+		return new Response(JSON.stringify({ error: 'A valid US state code is required.' }), { status: 400, headers });
+	}
+
+	const subscription = body?.subscription as WebPushSubscription;
+	if (!isValidPushSubscription(subscription)) {
+		return new Response(JSON.stringify({ error: 'Invalid push subscription payload.' }), { status: 400, headers });
+	}
+
+	const record = await upsertPushSubscriptionRecord(
+		env,
+		subscription,
+		stateCode,
+		request.headers.get('user-agent') || undefined,
+	);
+
+	return new Response(JSON.stringify({
+		ok: true,
+		stateCode: record.stateCode,
+		subscriptionId: record.id,
+	}), { status: 200, headers });
+}
+
+async function handlePushUnsubscribe(request: Request, env: Env): Promise<Response> {
+	const headers = pushCorsHeaders();
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	let body: any;
+	try {
+		body = await request.json();
+	} catch {
+		return new Response(JSON.stringify({ error: 'Invalid JSON body.' }), { status: 400, headers });
+	}
+
+	const endpoint = String(
+		body?.endpoint
+		|| body?.subscription?.endpoint
+		|| ''
+	).trim();
+	if (!endpoint) {
+		return new Response(JSON.stringify({ error: 'Subscription endpoint is required.' }), { status: 400, headers });
+	}
+
+	const removed = await removePushSubscriptionByEndpoint(env, endpoint);
+	return new Response(JSON.stringify({ ok: true, removed }), { status: 200, headers });
+}
+
 async function handleApiAlerts(env: Env): Promise<Response> {
 	const { map, error } = await syncAlerts(env);
 	const alerts = Object.values(map).map((feature: any) => {
@@ -1968,7 +2394,8 @@ async function handlePost(request: Request, env: Env): Promise<Response> {
 
 async function handleScheduled(env: Env): Promise<void> {
 	// Sync alerts with ETag — if NWS returns 304, this costs ~2 KV reads total
-	await syncAlerts(env);
+	const { map } = await syncAlerts(env);
+	await dispatchStatePushNotifications(env, map);
 }
 
 // ---------------------------------------------------------------------------
@@ -2024,8 +2451,20 @@ export default {
 		if (url.pathname === '/api/alerts' && request.method === 'OPTIONS') {
 			return new Response(null, { status: 204, headers: apiCorsHeaders() });
 		}
+		if (url.pathname.startsWith('/api/push/') && request.method === 'OPTIONS') {
+			return new Response(null, { status: 204, headers: pushCorsHeaders() });
+		}
 		if (url.pathname === '/api/alerts' && request.method === 'GET') {
 			return await handleApiAlerts(env);
+		}
+		if (url.pathname === '/api/push/public-key' && request.method === 'GET') {
+			return await handlePushPublicKey(env);
+		}
+		if (url.pathname === '/api/push/subscribe' && request.method === 'POST') {
+			return await handlePushSubscribe(request, env);
+		}
+		if (url.pathname === '/api/push/unsubscribe' && request.method === 'POST') {
+			return await handlePushUnsubscribe(request, env);
 		}
 		if (url.pathname === '/live-weather-alerts' && request.method === 'GET') {
 			return await handlePublicAlertsPage(env);
