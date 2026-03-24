@@ -2,12 +2,83 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Live Weather Alerts</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./styles.css?v=20260323-mobile-fix-1" />
+  <style>
+    .header-logo {
+      width: 100%;
+      height: var(--fixed-logo-height, clamp(56px, 16vw, 84px));
+      max-height: 120px;
+      object-fit: cover;
+      object-position: center;
+    }
+
+    .site-nav {
+      padding: 8px max(12px, env(safe-area-inset-right, 0px)) 10px max(12px, env(safe-area-inset-left, 0px));
+    }
+
+    .push-controls-row {
+      display: grid;
+      grid-template-columns: minmax(180px, 230px) auto auto;
+      gap: 10px;
+      align-items: end;
+    }
+
+    .push-controls-row label {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-weight: 800;
+      font-size: 0.9rem;
+      color: #17324a;
+    }
+
+    .push-controls-row select {
+      border: 1px solid #b4c8da;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 1rem;
+      font-family: inherit;
+      background: #fff;
+    }
+
+    .push-btn {
+      border: 1px solid #2b618a;
+      background: #2b618a;
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 800;
+      min-height: 44px;
+      width: 100%;
+      font-family: inherit;
+      font-size: 1rem;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+
+    .push-btn-secondary {
+      border-color: #6c879f;
+      background: #f1f6fb;
+      color: #17354f;
+    }
+
+    @media (max-width: 980px) {
+      .push-controls-row {
+        grid-template-columns: 1fr;
+      }
+
+      .push-controls-row label,
+      .push-controls-row select,
+      .push-controls-row button {
+        width: 100%;
+      }
+    }
+  </style>
   <link rel="icon" type="image/png" sizes="32x32" href="/logo/Live Weather Alerts logo 32.png" />
   <link rel="apple-touch-icon" sizes="192x192" href="/logo/Live Weather Alerts logo 192.png" />
   <link rel="manifest" href="/manifest.json" />
@@ -93,6 +164,6 @@
     </p>
   </main>
 
-  <script src="./app.js" defer></script>
+  <script src="./app.js?v=20260323-mobile-fix-1" defer></script>
 </body>
 </html>

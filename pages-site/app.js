@@ -83,6 +83,34 @@ const dom = {
 let alertRows = [];
 let pushPublicKeyCache = '';
 let swRegistrationPromise = null;
+let navResetTimer = null;
+
+function resetNavToStart() {
+  if (!dom.siteNav) return;
+  dom.siteNav.scrollLeft = 0;
+  const firstNavLink = dom.siteNav.querySelector('.nav-link');
+  if (firstNavLink && typeof firstNavLink.scrollIntoView === 'function') {
+    try {
+      firstNavLink.scrollIntoView({ inline: 'start', block: 'nearest' });
+    } catch {
+      // Ignore browser differences in scrollIntoView options.
+    }
+  }
+  requestAnimationFrame(() => {
+    if (dom.siteNav) dom.siteNav.scrollLeft = 0;
+  });
+}
+
+function scheduleNavReset() {
+  if (!dom.siteNav) return;
+  if (navResetTimer !== null) {
+    clearTimeout(navResetTimer);
+  }
+  navResetTimer = setTimeout(() => {
+    navResetTimer = null;
+    resetNavToStart();
+  }, 80);
+}
 
 function escHtml(text) {
   return String(text ?? '')
@@ -721,12 +749,7 @@ function bindEvents() {
 
 async function boot() {
   try {
-    if (dom.siteNav) {
-      dom.siteNav.scrollLeft = 0;
-      requestAnimationFrame(() => {
-        dom.siteNav.scrollLeft = 0;
-      });
-    }
+    resetNavToStart();
     const payload = await fetchAlerts();
     alertRows = Array.isArray(payload.alerts) ? payload.alerts : [];
     renderStats(alertRows, payload.lastPoll, payload.syncError);
@@ -745,7 +768,16 @@ async function boot() {
 }
 
 window.addEventListener('pageshow', () => {
-  if (dom.siteNav) dom.siteNav.scrollLeft = 0;
+  resetNavToStart();
+});
+window.addEventListener('load', () => {
+  resetNavToStart();
+});
+window.addEventListener('resize', () => {
+  scheduleNavReset();
+});
+window.addEventListener('orientationchange', () => {
+  scheduleNavReset();
 });
 
 boot();
