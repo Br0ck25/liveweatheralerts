@@ -133,10 +133,11 @@ body {
   min-height: 52px;
   margin: 0 auto 12px;
   padding: 8px max(12px, env(safe-area-inset-right, 0px)) 10px max(12px, env(safe-area-inset-left, 0px));
-  background: #dfefff;
-  border-bottom: 1px solid rgba(16, 38, 59, 0.1);
+  background: rgba(223, 239, 255, 0.96);
+  border: 1px solid rgba(16, 38, 59, 0.12);
+  border-radius: 16px;
   z-index: 1;
-  box-shadow: 0 4px 14px rgba(16, 38, 59, 0.08);
+  box-shadow: 0 10px 20px rgba(16, 38, 59, 0.08);
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -963,20 +964,26 @@ body.menu-open .settings-drawer {
   }
 
   .site-nav {
-    display: flex;
-    gap: 8px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
     padding-top: 8px;
     padding-bottom: 9px;
-    padding-left: max(10px, env(safe-area-inset-left, 0px));
-    padding-right: max(10px, env(safe-area-inset-right, 0px));
+    padding-left: max(6px, env(safe-area-inset-left, 0px));
+    padding-right: max(6px, env(safe-area-inset-right, 0px));
+    overflow: visible;
   }
 
   .nav-link {
-    font-size: 0.9rem;
-    padding: 8px 10px;
     width: 100%;
-    justify-content: center;
-    text-align: center;
+    min-width: 0;
+    font-size: clamp(0.5rem, 2.15vw, 0.72rem);
+    line-height: 1.15;
+    padding: 6px 4px;
+    letter-spacing: -0.015em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .push-controls-row {
