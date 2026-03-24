@@ -8,9 +8,9 @@
   --warning: #b5271f;
   --watch: #c96a11;
   --other: #1f6ea0;
-  --fixed-logo-height: clamp(58px, 7.4vw, 98px);
+  --fixed-logo-height: clamp(86px, 13vw, 190px);
   --fixed-logo-pad-top: 4px;
-  --fixed-logo-pad-bottom: 6px;
+  --fixed-logo-pad-bottom: 0px;
   --fixed-nav-height: 52px;
   --fixed-stack-height: calc(
     var(--fixed-logo-height) +
@@ -57,18 +57,19 @@ body {
   right: 0;
   width: 100%;
   margin: 0;
-  padding: var(--fixed-logo-pad-top) 12px var(--fixed-logo-pad-bottom);
+  padding: var(--fixed-logo-pad-top) 0 var(--fixed-logo-pad-bottom);
   background: rgba(239, 248, 255, 0.96);
   border-bottom: 1px solid rgba(16, 38, 59, 0.13);
   backdrop-filter: blur(10px);
   z-index: 1200;
+  overflow: hidden;
 }
 
 .header-logo {
   display: block;
   width: 100%;
   height: var(--fixed-logo-height);
-  object-fit: contain;
+  object-fit: cover;
   object-position: center;
   filter: drop-shadow(0 8px 16px rgba(12, 35, 56, 0.12));
 }
@@ -649,7 +650,7 @@ body {
 
 @media (max-width: 680px) {
   :root {
-    --fixed-logo-height: 62px;
+    --fixed-logo-height: 84px;
     --fixed-nav-height: 50px;
   }
 

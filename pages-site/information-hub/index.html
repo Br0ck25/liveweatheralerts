@@ -38,6 +38,7 @@
     <section class="hub-shell">
       <div class="hub-tabs" role="tablist" aria-label="Information Hub sections">
         <button class="hub-tab is-active" id="tab-start" role="tab" aria-selected="true" aria-controls="panel-start" data-panel="start">Start Here</button>
+        <button class="hub-tab" id="tab-night" role="tab" aria-selected="false" aria-controls="panel-night" data-panel="night" tabindex="-1">Night Checklist</button>
         <button class="hub-tab" id="tab-hazards" role="tab" aria-selected="false" aria-controls="panel-hazards" data-panel="hazards" tabindex="-1">Hazard Library</button>
         <button class="hub-tab" id="tab-faq" role="tab" aria-selected="false" aria-controls="panel-faq" data-panel="faq" tabindex="-1">Weather FAQ</button>
         <button class="hub-tab" id="tab-glossary" role="tab" aria-selected="false" aria-controls="panel-glossary" data-panel="glossary" tabindex="-1">Glossary</button>
@@ -79,6 +80,29 @@
             <p><strong>Outlook:</strong> forecast guidance for potential risk over a future time period.</p>
           </div>
         </details>
+      </section>
+
+      <section class="hub-panel" id="panel-night" role="tabpanel" aria-labelledby="tab-night" hidden>
+        <h2>Nighttime Warning Checklist</h2>
+        <div class="panel-grid">
+          <article class="panel-card">
+            <h3>Before bed</h3>
+            <p>Turn alert sounds on, charge phones, and place shoes + flashlight beside the bed.</p>
+          </article>
+          <article class="panel-card">
+            <h3>If a watch is active</h3>
+            <p>Review your safe place, keep devices close, and stay near live weather updates overnight.</p>
+          </article>
+          <article class="panel-card">
+            <h3>If a warning is issued</h3>
+            <p>Move immediately to your safe place. Do not wait for a second alert.</p>
+          </article>
+          <article class="panel-card">
+            <h3>Family wake-up plan</h3>
+            <p>Use one short phrase everyone knows so nighttime action is fast and clear.</p>
+          </article>
+        </div>
+        <a class="panel-link" href="/nighttime-warning-checklist/">Open full Nighttime Warning Checklist page</a>
       </section>
 
       <section class="hub-panel" id="panel-hazards" role="tabpanel" aria-labelledby="tab-hazards" hidden>
