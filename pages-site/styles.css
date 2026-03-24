@@ -8,7 +8,7 @@
   --warning: #b5271f;
   --watch: #c96a11;
   --other: #1f6ea0;
-  --fixed-logo-height: clamp(72px, 22.6vw, 320px);
+  --fixed-logo-height: clamp(64px, 10vw, 120px);
   --fixed-logo-pad-top: 0px;
   --fixed-logo-pad-bottom: 0px;
   --fixed-nav-height: 52px;
@@ -31,6 +31,7 @@ html,
 body {
   margin: 0;
   padding: 0;
+  background: #e7f3ff;
 }
 
 body {
@@ -46,7 +47,7 @@ body {
 .page {
   width: min(1140px, 100% - 28px);
   margin: 0 auto 34px;
-  padding-top: var(--fixed-stack-height);
+  padding-top: calc(var(--fixed-stack-height) + env(safe-area-inset-top, 0px));
 }
 
 .header-logo-link {
@@ -57,10 +58,9 @@ body {
   right: 0;
   width: 100%;
   margin: 0;
-  padding: var(--fixed-logo-pad-top) 0 var(--fixed-logo-pad-bottom);
-  background: rgba(239, 248, 255, 0.96);
-  border-bottom: 1px solid rgba(16, 38, 59, 0.13);
-  backdrop-filter: blur(10px);
+  padding: max(var(--fixed-logo-pad-top), env(safe-area-inset-top, 0px)) 0 var(--fixed-logo-pad-bottom);
+  background: #e7f3ff;
+  border-bottom: 1px solid rgba(16, 38, 59, 0.1);
   z-index: 1200;
   overflow: hidden;
 }
@@ -69,7 +69,7 @@ body {
   display: block;
   width: 100%;
   height: var(--fixed-logo-height);
-  object-fit: contain;
+  object-fit: cover;
   object-position: center;
   filter: drop-shadow(0 8px 16px rgba(12, 35, 56, 0.12));
 }
@@ -77,7 +77,7 @@ body {
 
 .site-nav {
   position: fixed;
-  top: calc(var(--fixed-logo-height) + var(--fixed-logo-pad-top) + var(--fixed-logo-pad-bottom));
+  top: calc(var(--fixed-logo-height) + max(var(--fixed-logo-pad-top), env(safe-area-inset-top, 0px)) + var(--fixed-logo-pad-bottom));
   left: 0;
   right: 0;
   display: flex;
@@ -89,11 +89,16 @@ body {
   -webkit-overflow-scrolling: touch;
   min-height: var(--fixed-nav-height);
   margin: 0;
-  padding: 8px max(12px, calc((100vw - 1140px) / 2 + 14px)) 10px;
-  background: rgba(227, 242, 255, 0.95);
-  border-bottom: 1px solid rgba(16, 38, 59, 0.13);
-  backdrop-filter: blur(10px);
+  padding: 8px max(12px, env(safe-area-inset-left, 0px)) 10px max(12px, env(safe-area-inset-right, 0px));
+  background: #dfefff;
+  border-bottom: 1px solid rgba(16, 38, 59, 0.1);
   z-index: 1190;
+  scrollbar-width: none;
+  scroll-padding-inline: 12px;
+}
+
+.site-nav::-webkit-scrollbar {
+  display: none;
 }
 
 .nav-link {
@@ -315,6 +320,11 @@ body {
   font-weight: 800;
   cursor: pointer;
   min-height: 44px;
+  width: 100%;
+  font-family: inherit;
+  font-size: 1rem;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .push-btn:hover {
@@ -745,13 +755,40 @@ body {
 
 @media (max-width: 680px) {
   :root {
-    --fixed-logo-height: clamp(72px, 22.6vw, 96px);
+    --fixed-logo-height: clamp(56px, 16vw, 84px);
     --fixed-nav-height: 50px;
   }
 
   .page {
     width: min(100% - 18px, 1140px);
-    padding-top: var(--fixed-stack-height);
+    padding-top: calc(var(--fixed-stack-height) + env(safe-area-inset-top, 0px));
+  }
+
+  .site-nav {
+    gap: 10px;
+    padding-top: 9px;
+    padding-bottom: 9px;
+  }
+
+  .nav-link {
+    font-size: 0.9rem;
+    padding: 8px 12px;
+  }
+
+  .push-controls-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .push-controls-row label,
+  .push-controls-row select,
+  .push-controls-row button {
+    width: 100%;
+  }
+
+  .push-controls-row select,
+  .push-controls-row button {
+    min-height: 46px;
   }
 
 

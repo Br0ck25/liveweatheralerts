@@ -721,7 +721,12 @@ function bindEvents() {
 
 async function boot() {
   try {
-    if (dom.siteNav) dom.siteNav.scrollLeft = 0;
+    if (dom.siteNav) {
+      dom.siteNav.scrollLeft = 0;
+      requestAnimationFrame(() => {
+        dom.siteNav.scrollLeft = 0;
+      });
+    }
     const payload = await fetchAlerts();
     alertRows = Array.isArray(payload.alerts) ? payload.alerts : [];
     renderStats(alertRows, payload.lastPoll, payload.syncError);
@@ -738,5 +743,9 @@ async function boot() {
     await initPushControls();
   }
 }
+
+window.addEventListener('pageshow', () => {
+  if (dom.siteNav) dom.siteNav.scrollLeft = 0;
+});
 
 boot();
