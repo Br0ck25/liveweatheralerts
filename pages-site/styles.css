@@ -70,7 +70,7 @@ body {
   width: 100%;
   height: var(--fixed-logo-height);
   object-fit: cover;
-  object-position: center;
+  object-position: center top;
   filter: drop-shadow(0 8px 16px rgba(12, 35, 56, 0.12));
 }
 
@@ -125,6 +125,10 @@ body {
   background: #11314c;
   color: #fff;
   border-color: #11314c;
+}
+
+.nav-label-short {
+  display: none;
 }
 
 .hero {
@@ -757,8 +761,8 @@ body {
 
 @media (max-width: 680px) {
   :root {
-    --fixed-logo-height: clamp(56px, 16vw, 84px);
-    --fixed-nav-height: 50px;
+    --fixed-logo-height: clamp(64px, 19vw, 96px);
+    --fixed-nav-height: 112px;
   }
 
   .page {
@@ -767,14 +771,32 @@ body {
   }
 
   .site-nav {
-    gap: 10px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
     padding-top: 9px;
     padding-bottom: 9px;
+    overflow: visible;
+    align-items: stretch;
+    justify-items: stretch;
+    scroll-padding-inline-start: 0;
+    scroll-padding-inline-end: 0;
   }
 
   .nav-link {
     font-size: 0.9rem;
-    padding: 8px 12px;
+    padding: 8px 10px;
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .nav-label-full {
+    display: none;
+  }
+
+  .nav-label-short {
+    display: inline;
   }
 
   .push-controls-row {
