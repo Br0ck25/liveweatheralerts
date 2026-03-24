@@ -7,14 +7,13 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=20260323-mobile-fix-2" />
+  <link rel="stylesheet" href="./styles.css?v=20260323-mobile-fix-4" />
   <style>
     .header-logo {
       width: 100%;
-      height: var(--fixed-logo-height, clamp(56px, 16vw, 84px));
-      max-height: 120px;
+      height: var(--fixed-logo-height, clamp(110px, 21vw, 240px));
       object-fit: cover;
-      object-position: center top;
+      object-position: center;
     }
 
     .site-nav {
@@ -67,10 +66,6 @@
       color: #17354f;
     }
 
-    .nav-label-short {
-      display: none;
-    }
-
     @media (max-width: 980px) {
       .push-controls-row {
         grid-template-columns: 1fr;
@@ -84,6 +79,10 @@
     }
 
     @media (max-width: 680px) {
+      .header-logo {
+        object-position: center top;
+      }
+
       .site-nav {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -99,14 +98,6 @@
         text-align: center;
         padding: 8px 10px;
       }
-
-      .nav-label-full {
-        display: none;
-      }
-
-      .nav-label-short {
-        display: inline;
-      }
     }
   </style>
   <link rel="icon" type="image/png" sizes="32x32" href="/logo/Live Weather Alerts logo 32.png" />
@@ -119,14 +110,14 @@
       <img class="header-logo" src="/logo/Live Weather Alerts Horizonal Logo.png" alt="Live Weather Alerts" />
     </a>
     <nav class="site-nav" aria-label="Main pages">
-      <a class="nav-link active" href="/"><span class="nav-label-full">Weather Alerts</span><span class="nav-label-short" aria-hidden="true">Alerts</span></a>
-      <a class="nav-link" href="/weather-forecast/"><span class="nav-label-full">Weather Forecast</span><span class="nav-label-short" aria-hidden="true">Forecast</span></a>
+      <a class="nav-link active" href="/">Alerts</a>
+      <a class="nav-link" href="/weather-forecast/">Forecast</a>
       <a class="nav-link" href="/convective-outlook/">Convective Outlook</a>
       <a class="nav-link" href="/information-hub/">Information Hub</a>
     </nav>
 
     <section class="hero">
-      <h1>Weather Alerts</h1>
+      <h1>Alerts</h1>
       <p>Simple, clear weather safety updates for every state. The most urgent alerts are shown first.</p>
       <div class="hero-meta">
         <span class="meta-pill">Active alerts: <strong id="totalCount">0</strong></span>
@@ -194,6 +185,6 @@
     </p>
   </main>
 
-  <script src="./app.js?v=20260323-mobile-fix-2" defer></script>
+  <script src="./app.js?v=20260323-mobile-fix-4" defer></script>
 </body>
 </html>

@@ -8,7 +8,7 @@
   --warning: #b5271f;
   --watch: #c96a11;
   --other: #1f6ea0;
-  --fixed-logo-height: clamp(64px, 10vw, 120px);
+  --fixed-logo-height: clamp(110px, 21vw, 240px);
   --fixed-logo-pad-top: 0px;
   --fixed-logo-pad-bottom: 0px;
   --fixed-nav-height: 52px;
@@ -70,7 +70,7 @@ body {
   width: 100%;
   height: var(--fixed-logo-height);
   object-fit: cover;
-  object-position: center top;
+  object-position: center;
   filter: drop-shadow(0 8px 16px rgba(12, 35, 56, 0.12));
 }
 
@@ -125,10 +125,6 @@ body {
   background: #11314c;
   color: #fff;
   border-color: #11314c;
-}
-
-.nav-label-short {
-  display: none;
 }
 
 .hero {
@@ -765,6 +761,10 @@ body {
     --fixed-nav-height: 112px;
   }
 
+  .header-logo {
+    object-position: center top;
+  }
+
   .page {
     width: min(100% - 18px, 1140px);
     padding-top: calc(var(--fixed-stack-height) + env(safe-area-inset-top, 0px));
@@ -789,14 +789,6 @@ body {
     width: 100%;
     justify-content: center;
     text-align: center;
-  }
-
-  .nav-label-full {
-    display: none;
-  }
-
-  .nav-label-short {
-    display: inline;
   }
 
   .push-controls-row {
