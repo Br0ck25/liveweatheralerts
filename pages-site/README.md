@@ -15,6 +15,7 @@ This folder is a Cloudflare Pages project for `liveweatheralerts.com`.
 - `faq/` - plain-language weather FAQ page
 - `weather-terms/` - mini-glossary for common weather terms
 - `tornado-basics/` - evergreen tornado basics page
+- `nighttime-warning-checklist/` - before-bed severe weather prep checklist
 - `forecast-maps/` - plain-language national forecast maps guide with embedded live map images
 - `alert-methods/` - plain-language warning delivery setup guide
 - `functions/api/convective-outlook.js` - pulls and simplifies SPC Day 1/2/3 outlook pages

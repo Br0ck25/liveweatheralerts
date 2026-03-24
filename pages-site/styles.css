@@ -8,6 +8,17 @@
   --warning: #b5271f;
   --watch: #c96a11;
   --other: #1f6ea0;
+  --fixed-logo-height: clamp(58px, 7.4vw, 98px);
+  --fixed-logo-pad-top: 4px;
+  --fixed-logo-pad-bottom: 6px;
+  --fixed-nav-height: 52px;
+  --fixed-stack-height: calc(
+    var(--fixed-logo-height) +
+    var(--fixed-logo-pad-top) +
+    var(--fixed-logo-pad-bottom) +
+    var(--fixed-nav-height) +
+    18px
+  );
 }
 
 *,
@@ -34,31 +45,59 @@ body {
 
 .page {
   width: min(1140px, 100% - 28px);
-  margin: 22px auto 34px;
+  margin: 0 auto 34px;
+  padding-top: var(--fixed-stack-height);
 }
+
 .header-logo-link {
   display: block;
-  width: min(620px, 100%);
-  margin: 0 auto 12px;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  margin: 0;
+  padding: var(--fixed-logo-pad-top) 12px var(--fixed-logo-pad-bottom);
+  background: rgba(239, 248, 255, 0.96);
+  border-bottom: 1px solid rgba(16, 38, 59, 0.13);
+  backdrop-filter: blur(10px);
+  z-index: 1200;
 }
 
 .header-logo {
   display: block;
   width: 100%;
-  height: auto;
+  height: var(--fixed-logo-height);
+  object-fit: contain;
+  object-position: center;
   filter: drop-shadow(0 8px 16px rgba(12, 35, 56, 0.12));
 }
 
 
 .site-nav {
+  position: fixed;
+  top: calc(var(--fixed-logo-height) + var(--fixed-logo-pad-top) + var(--fixed-logo-pad-bottom));
+  left: 0;
+  right: 0;
   display: flex;
   gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: center;
+  overflow-x: auto;
+  min-height: var(--fixed-nav-height);
+  margin: 0;
+  padding: 8px max(12px, calc((100vw - 1140px) / 2 + 14px)) 10px;
+  background: rgba(227, 242, 255, 0.95);
+  border-bottom: 1px solid rgba(16, 38, 59, 0.13);
+  backdrop-filter: blur(10px);
+  z-index: 1190;
 }
 
 .nav-link {
-  display: inline-block;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
   text-decoration: none;
   color: #0f3453;
   background: rgba(255, 255, 255, 0.9);
@@ -609,9 +648,14 @@ body {
 }
 
 @media (max-width: 680px) {
+  :root {
+    --fixed-logo-height: 62px;
+    --fixed-nav-height: 50px;
+  }
+
   .page {
     width: min(100% - 18px, 1140px);
-    margin-top: 14px;
+    padding-top: var(--fixed-stack-height);
   }
 
 
