@@ -904,7 +904,12 @@ function RadarPreviewCard({
             </div>
           </div>
 
-          <div className="relative overflow-hidden rounded-[22px] border border-white/10 bg-slate-900">
+          <button
+            type="button"
+            onClick={onViewRadar}
+            className="relative overflow-hidden rounded-[22px] border border-white/10 bg-slate-900 text-left transition hover:border-sky-400/40 hover:bg-slate-800/80 active:scale-[0.99]"
+            aria-label="Open live radar"
+          >
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_60%_25%,rgba(255,196,0,0.30),transparent_18%),linear-gradient(135deg,rgba(34,197,94,0.28),transparent_25%),linear-gradient(160deg,rgba(250,204,21,0.24),transparent_45%),linear-gradient(200deg,rgba(239,68,68,0.30),transparent_62%),linear-gradient(180deg,#162033_0%,#0b1220_100%)]" />
             <div className="relative flex h-full min-h-[130px] flex-col justify-between p-4">
               <div>
@@ -925,7 +930,7 @@ function RadarPreviewCard({
                 </div>
               </div>
             </div>
-          </div>
+          </button>
         </div>
       </CardContent>
     </Card>
