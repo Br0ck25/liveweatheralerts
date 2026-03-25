@@ -364,8 +364,13 @@ export default function LiveWeatherAlertsHomePage() {
     }
 
     run();
+    const refreshInterval = setInterval(() => {
+      run();
+    }, 2 * 60 * 1000); // refresh every 2 minutes to keep mobile up-to-date
+
     return () => {
       active = false;
+      clearInterval(refreshInterval);
     };
   }, [location?.lat, location?.lon]);
 

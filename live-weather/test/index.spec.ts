@@ -125,6 +125,54 @@ describe('Live Weather Admin worker', () => {
 		expect(json.alerts[0].event).toBe('Tornado Warning');
 	});
 
+	it('prefers recent hourly temp over stale obs and avoids invalid heat/wind chill logic', async () => {
+		(globalThis.fetch as any).mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes('api.weather.gov/points/')) {
+				return new Response(JSON.stringify({ properties: {
+					forecast: 'https://api.weather.gov/mock_forecast',
+					forecastHourly: 'https://api.weather.gov/mock_hourly',
+					observationStations: 'https://api.weather.gov/mock_observations',
+				} }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url === 'https://api.weather.gov/mock_forecast') {
+				return new Response(JSON.stringify({ properties: { periods: [{ name: 'Today', startTime: '2026-01-01T12:00:00Z', isDaytime: true, temperature: 60, temperatureUnit: 'F', shortForecast: 'Sunny', icon: 'sunny', windSpeed: '5 mph', windDirection: 'N', probabilityOfPrecipitation: { value: 0 } }] } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url === 'https://api.weather.gov/mock_hourly') {
+				return new Response(JSON.stringify({ properties: { periods: [{ startTime: '2026-01-01T12:00:00Z', temperature: 60, temperatureUnit: 'F', shortForecast: 'Sunny', icon: 'sunny', windSpeed: '5 mph', windDirection: 'N', probabilityOfPrecipitation: { value: 0 } }] } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url === 'https://api.weather.gov/mock_observations') {
+				return new Response(JSON.stringify({ features: [{ properties: { stationIdentifier: 'TEST' } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('/stations/TEST/observations/latest')) {
+				return new Response(JSON.stringify({ properties: {
+					temperature: { value: 54, unitCode: 'unit:degF' },
+					windChill: { value: 0, unitCode: 'unit:degC' },
+					heatIndex: { value: 0, unitCode: 'unit:degC' },
+					relativeHumidity: { value: 50 },
+					barometricPressure: { value: 101325, unitCode: 'unit:Pa' },
+					visibility: { value: 16000, unitCode: 'unit:m' },
+					dewpoint: { value: 45, unitCode: 'unit:degF' },
+					windSpeed: { value: 10, unitCode: 'unit:mi_h-1' },
+					windDirection: { value: 180 },
+					textDescription: 'Cool',
+					icon: 'cool',
+					timestamp: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+				} }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			return new Response('not found', { status: 404 });
+		});
+
+		const request = new IncomingRequest('https://live-weather.example/api/weather?lat=37.1187&lon=-82.8187');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+		const json = await response.json() as any;
+		expect(json.current.temperatureF).toBe(60);
+		expect(json.current.feelsLikeF).toBe(60);
+	});
+
 	it('posts a single alert to Facebook via /admin/post when authenticated', async () => {
 		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword', FB_PAGE_ID: '1097328350123101', FB_PAGE_ACCESS_TOKEN: 'dummy-token' };
 		const loginResp = await worker.fetch(

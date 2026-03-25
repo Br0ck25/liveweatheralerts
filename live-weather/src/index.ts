@@ -2661,16 +2661,38 @@ function normalizeDailyPeriods(periods: any[]): any[] {
 	return normalized.slice(0, 10);
 }
 
+function isRecentObservation(timestamp?: string | null): boolean {
+	if (!timestamp) return false;
+	const ms = Date.parse(String(timestamp));
+	if (!Number.isFinite(ms)) return false;
+	return Date.now() - ms <= 15 * 60 * 1000; // 15 minutes freshness window
+}
+
+function computeFeelsLike(observedTempF: number | null, heatIndexF: number | null, windChillF: number | null, fallbackTempF: number | null): number | null {
+	if (Number.isFinite(heatIndexF as number) && Number.isFinite(observedTempF as number) && (observedTempF as number) >= 80) {
+		return heatIndexF;
+	}
+	if (Number.isFinite(windChillF as number) && Number.isFinite(observedTempF as number) && (observedTempF as number) <= 50) {
+		return windChillF;
+	}
+	if (Number.isFinite(observedTempF as number)) {
+		return observedTempF;
+	}
+	return firstFinite(heatIndexF, windChillF, fallbackTempF);
+}
+
 function buildCurrentConditions(observationProps: any, firstHourly: any): any {
 	const observedTempF = toTemperatureF(observationProps?.temperature);
 	const hourlyTempF = forecastTemperatureToF(firstHourly);
-	const temperatureF = firstFinite(observedTempF, hourlyTempF);
-
-	const observedFeelsF = firstFinite(
-		toTemperatureF(observationProps?.heatIndex),
-		toTemperatureF(observationProps?.windChill),
+	const temperatureF = firstFinite(
+		isRecentObservation(observationProps?.timestamp) ? observedTempF : null,
+		hourlyTempF,
 		observedTempF,
 	);
+
+	const heatIndexF = toTemperatureF(observationProps?.heatIndex);
+	const windChillF = toTemperatureF(observationProps?.windChill);
+	const feelsLikeF = computeFeelsLike(temperatureF, heatIndexF, windChillF, hourlyTempF);
 
 	const humidity = toPercent(observationProps?.relativeHumidity);
 	const pressureInHg = toPressureInHg(observationProps?.barometricPressure);
@@ -2693,7 +2715,7 @@ function buildCurrentConditions(observationProps: any, firstHourly: any): any {
 
 	return {
 		temperatureF: roundTo(temperatureF, 0),
-		feelsLikeF: roundTo(firstFinite(observedFeelsF, hourlyTempF), 0),
+		feelsLikeF: roundTo(feelsLikeF, 0),
 		condition,
 		windMph: roundTo(windMph, 0),
 		windDirection: toCompassDirection(windDirection) || String(firstHourly?.windDirection || ''),
