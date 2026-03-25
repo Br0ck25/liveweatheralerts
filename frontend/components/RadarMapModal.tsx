@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { X, MapPin } from "lucide-react";
+import { X, MapPin, Play, Pause } from "lucide-react";
 
 type RadarModalProps = {
   open: boolean;
@@ -20,6 +20,44 @@ type RadarModalProps = {
   } | null;
 };
 
+function buildRecentFrames(count = 8, stepMinutes = 2) {
+  const now = new Date();
+  const frames: string[] = [];
+
+  const rounded = new Date(now);
+  rounded.setUTCSeconds(0, 0);
+  rounded.setUTCMinutes(Math.floor(rounded.getUTCMinutes() / stepMinutes) * stepMinutes);
+
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(rounded);
+    d.setUTCMinutes(d.getUTCMinutes() - i * stepMinutes);
+    frames.push(d.toISOString());
+  }
+
+  return frames;
+}
+
+function buildRadarTileUrl(time?: string) {
+  const params = [
+    "SERVICE=WMS",
+    "VERSION=1.1.1",
+    "REQUEST=GetMap",
+    "FORMAT=image/png",
+    "TRANSPARENT=true",
+    "LAYERS=conus_bref_qcd",
+    "SRS=EPSG:3857",
+    "WIDTH=256",
+    "HEIGHT=256",
+    "BBOX={bbox-epsg-3857}",
+  ];
+
+  if (time) {
+    params.push(`TIME=${encodeURIComponent(time)}`);
+  }
+
+  return `https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows?${params.join("&")}`;
+}
+
 const RADAR_SOURCE_ID = "nexrad-radar";
 const LOCATION_SOURCE_ID = "location-point";
 
@@ -32,6 +70,10 @@ export default function RadarMapModal({
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const refreshTimerRef = useRef<number | null>(null);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const [frameIndex, setFrameIndex] = useState(0);
+
+  const frames = useMemo(() => buildRecentFrames(8, 2), []);
 
   useEffect(() => {
     if (!open || !mapContainerRef.current || mapRef.current) return;
@@ -71,20 +113,16 @@ export default function RadarMapModal({
       dragRotate: false,
     });
 
+    map.touchZoomRotate.enable();
+    map.dragPan.enable();
+    map.scrollZoom.enable();
+
     mapRef.current = map;
 
     map.addControl(new maplibregl.NavigationControl(), "top-right");
 
     map.on("load", () => {
-      const radarTiles = [
-        "https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows?" +
-          "SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap" +
-          "&FORMAT=image/png&TRANSPARENT=true" +
-          "&LAYERS=conus_bref_qcd" +
-          "&SRS=EPSG:3857" +
-          "&WIDTH=256&HEIGHT=256" +
-          "&BBOX={bbox-epsg-3857}",
-      ];
+      const radarTiles = [buildRadarTileUrl(frames[0])];
 
       if (map.getSource(RADAR_SOURCE_ID)) {
         if (map.getLayer(RADAR_SOURCE_ID)) {
@@ -155,22 +193,6 @@ export default function RadarMapModal({
           "text-halo-width": 2,
         },
       });
-
-      refreshTimerRef.current = window.setInterval(() => {
-        const source = map.getSource(RADAR_SOURCE_ID) as maplibregl.RasterTileSource | undefined;
-        if (!source) return;
-
-        source.setTiles([
-          "https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows?" +
-            "SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap" +
-            "&FORMAT=image/png&TRANSPARENT=true" +
-            "&LAYERS=conus_bref_qcd" +
-            "&SRS=EPSG:3857" +
-            "&WIDTH=256&HEIGHT=256" +
-            `&CACHEBUST=${Date.now()}` +
-            "&BBOX={bbox-epsg-3857}",
-        ]);
-      }, 300000);
     });
 
     map.on("error", (e: unknown) => {
@@ -203,6 +225,27 @@ export default function RadarMapModal({
     return () => window.clearTimeout(id);
   }, [open, location.lat, location.lon]);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!open || !mapRef.current || !isPlaying) return;
+
+    const timer = window.setInterval(() => {
+      setFrameIndex((prev) => (prev + 1) % frames.length);
+    }, 700);
+
+    return () => window.clearInterval(timer);
+  }, [open, isPlaying, frames.length, frames]);
+
+  useEffect(() => {
+    if (!open || !mapRef.current) return;
+
+    const map = mapRef.current;
+    const source = map.getSource(RADAR_SOURCE_ID) as maplibregl.RasterTileSource | undefined;
+    if (!source) return;
+
+    source.setTiles([buildRadarTileUrl(frames[frameIndex])]);
+  }, [open, frameIndex, frames]);
+
   if (!open) return null;
 
   return (
@@ -214,24 +257,36 @@ export default function RadarMapModal({
             <div className="mt-1 flex items-center gap-2 text-xs text-slate-300">
               <MapPin className="h-3.5 w-3.5" />
               <span>{location.label}</span>
-              {radar?.updated ? <span>• Updated {new Date(radar.updated).toLocaleTimeString()}</span> : null}
+              <span>• Frame {new Date(frames[frameIndex]).toLocaleTimeString()}</span>
+              {radar?.summary ? <span>• {radar.summary}</span> : null}
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-full border border-white/10 bg-white/5 p-2 text-white"
-            aria-label="Close radar"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsPlaying((v) => !v)}
+              className="rounded-full border border-white/10 bg-white/5 p-2 text-white"
+              aria-label={isPlaying ? "Pause radar loop" : "Play radar loop"}
+            >
+              {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-full border border-white/10 bg-white/5 p-2 text-white"
+              aria-label="Close radar"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
         <div
           ref={mapContainerRef}
-          className="min-h-0 flex-1 touch-none"
-          style={{ width: "100%", height: "100%" }}
+          className="min-h-0 flex-1"
+          style={{ width: "100%", height: "100%", touchAction: "pan-x pan-y" }}
         />
       </div>
     </div>
