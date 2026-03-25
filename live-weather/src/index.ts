@@ -25,7 +25,10 @@ interface Env {
 // Contact info in User-Agent is per NWS guidelines — they email you instead of silently blocking.
 const WEATHER_API    = 'https://api.weather.gov/alerts/active';
 const NWS_USER_AGENT = 'LocalKYNews/1.0 (localkynews.com; news@localkynews.com)';
+const NWS_ACCEPT     = 'application/geo+json,application/json';
 const FB_GRAPH_API   = 'https://graph.facebook.com/v17.0';
+const DEFAULT_WEATHER_LAT = 41.8781;
+const DEFAULT_WEATHER_LON = -87.6298;
 
 // KV keys
 const KV_ALERT_MAP  = 'alerts:map';       // JSON: Record<alertId, feature> — merged active alerts
@@ -63,6 +66,26 @@ interface PushSubscriptionRecord {
 }
 
 type PushStateAlertSnapshot = Record<string, string[]>;
+
+interface SavedLocation {
+	lat: number;
+	lon: number;
+	city?: string;
+	state?: string;
+	zip?: string;
+	label: string;
+}
+
+class HttpError extends Error {
+	status: number;
+
+	constructor(status: number, message: string) {
+		super(message);
+		this.status = status;
+	}
+}
+
+const ZIP_RE = /^\d{5}$/;
 
 async function readFbAppConfig(env: Env): Promise<FbAppConfig> {
 	try {
@@ -2168,6 +2191,556 @@ async function handleApiAlerts(env: Env): Promise<Response> {
 	});
 }
 
+async function geocodeZip(zip: string): Promise<SavedLocation> {
+	const endpoint = `https://api.zippopotam.us/us/${encodeURIComponent(zip)}`;
+	const response = await fetch(endpoint, {
+		headers: {
+			Accept: 'application/json',
+		},
+	});
+
+	if (response.status === 404) {
+		throw new HttpError(404, 'ZIP code not found.');
+	}
+	if (!response.ok) {
+		throw new HttpError(502, `ZIP lookup failed: ${response.status} ${response.statusText}`);
+	}
+
+	const payload = await response.json() as any;
+	const place = Array.isArray(payload?.places) ? payload.places[0] : null;
+	if (!place) {
+		throw new HttpError(404, 'ZIP code not found.');
+	}
+
+	const lat = Number(place?.latitude);
+	const lon = Number(place?.longitude);
+	if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+		throw new HttpError(502, 'ZIP lookup returned invalid coordinates.');
+	}
+
+	const city = String(place?.['place name'] || '').trim() || undefined;
+	const state = String(place?.['state abbreviation'] || '').trim() || undefined;
+	const label = city && state ? `${city}, ${state}` : zip;
+
+	return { lat, lon, city, state, zip, label };
+}
+
+async function reverseGeocodePoint(lat: number, lon: number): Promise<SavedLocation> {
+	const endpoint = `https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`;
+	const response = await fetch(endpoint, {
+		headers: {
+			'User-Agent': NWS_USER_AGENT,
+			Accept: 'application/geo+json,application/json',
+		},
+	});
+
+	if (response.status === 404) {
+		throw new HttpError(404, 'Location not found.');
+	}
+	if (!response.ok) {
+		throw new HttpError(502, `Reverse geocoding failed: ${response.status} ${response.statusText}`);
+	}
+
+	const payload = await response.json() as any;
+	const relative = payload?.properties?.relativeLocation?.properties ?? {};
+	const city = String(relative?.city || '').trim() || undefined;
+	const state = String(relative?.state || '').trim() || undefined;
+	const label = city && state ? `${city}, ${state}` : `Lat ${lat.toFixed(2)}, Lon ${lon.toFixed(2)}`;
+
+	return { lat, lon, city, state, label };
+}
+
+function parseCoordinate(raw: string, min: number, max: number, fieldLabel: string): number {
+	const value = Number(raw);
+	if (!Number.isFinite(value) || value < min || value > max) {
+		throw new HttpError(400, `${fieldLabel} is invalid.`);
+	}
+	return value;
+}
+
+function parseLatLonForWeather(request: Request): { lat: number; lon: number } {
+	const url = new URL(request.url);
+	const latRaw = String(url.searchParams.get('lat') || '').trim();
+	const lonRaw = String(url.searchParams.get('lon') || '').trim();
+
+	if (!latRaw && !lonRaw) {
+		return { lat: DEFAULT_WEATHER_LAT, lon: DEFAULT_WEATHER_LON };
+	}
+	if (!latRaw || !lonRaw) {
+		throw new HttpError(400, 'Provide both ?lat= and ?lon=.');
+	}
+
+	return {
+		lat: parseCoordinate(latRaw, -90, 90, 'Latitude'),
+		lon: parseCoordinate(lonRaw, -180, 180, 'Longitude'),
+	};
+}
+
+async function fetchNwsJson(url: string, label: string): Promise<any> {
+	const response = await fetch(url, {
+		headers: {
+			'User-Agent': NWS_USER_AGENT,
+			Accept: NWS_ACCEPT,
+		},
+	});
+
+	if (response.status === 404) {
+		throw new HttpError(404, `${label} not found.`);
+	}
+	if (!response.ok) {
+		throw new HttpError(502, `${label} request failed: ${response.status} ${response.statusText}`);
+	}
+	return await response.json();
+}
+
+function measurementValue(measurement: any): number | null {
+	const value = Number(measurement?.value);
+	return Number.isFinite(value) ? value : null;
+}
+
+function unitCode(measurement: any): string {
+	return String(measurement?.unitCode || '').toLowerCase();
+}
+
+function firstFinite(...values: Array<number | null | undefined>): number | null {
+	for (const value of values) {
+		if (Number.isFinite(value as number)) return Number(value);
+	}
+	return null;
+}
+
+function roundTo(value: number | null, decimals: number): number | null {
+	if (!Number.isFinite(value as number)) return null;
+	const factor = Math.pow(10, decimals);
+	return Math.round((value as number) * factor) / factor;
+}
+
+function celsiusToFahrenheit(value: number): number {
+	return (value * 9) / 5 + 32;
+}
+
+function kmhToMph(value: number): number {
+	return value * 0.621371;
+}
+
+function mpsToMph(value: number): number {
+	return value * 2.236936;
+}
+
+function knotsToMph(value: number): number {
+	return value * 1.15078;
+}
+
+function metersToMiles(value: number): number {
+	return value * 0.000621371;
+}
+
+function pascalsToInHg(value: number): number {
+	return value * 0.0002952998751;
+}
+
+function toTemperatureF(measurement: any): number | null {
+	const value = measurementValue(measurement);
+	if (value == null) return null;
+	const unit = unitCode(measurement);
+	if (unit.includes('degf')) return value;
+	if (unit.includes('degc')) return celsiusToFahrenheit(value);
+	return value;
+}
+
+function toSpeedMph(measurement: any): number | null {
+	const value = measurementValue(measurement);
+	if (value == null) return null;
+	const unit = unitCode(measurement);
+	if (unit.includes('mi_h-1') || unit.includes('mph')) return value;
+	if (unit.includes('km_h-1')) return kmhToMph(value);
+	if (unit.includes('m_s-1')) return mpsToMph(value);
+	if (unit.includes('knot') || unit.includes('kt')) return knotsToMph(value);
+	return value;
+}
+
+function toPressureInHg(measurement: any): number | null {
+	const value = measurementValue(measurement);
+	if (value == null) return null;
+	const unit = unitCode(measurement);
+	if (unit.includes('hpa')) return pascalsToInHg(value * 100);
+	if (unit.includes('pa')) return pascalsToInHg(value);
+	if (unit.includes('inhg')) return value;
+	return value;
+}
+
+function toMiles(measurement: any): number | null {
+	const value = measurementValue(measurement);
+	if (value == null) return null;
+	const unit = unitCode(measurement);
+	if (unit.endsWith(':m') || unit === 'wmounit:m' || unit.includes('meter')) return metersToMiles(value);
+	if (unit.includes('km')) return value * 0.621371;
+	if (unit.includes('mile')) return value;
+	return value;
+}
+
+function toPercent(measurement: any): number | null {
+	const value = measurementValue(measurement);
+	if (value == null) return null;
+	return value;
+}
+
+function toCompassDirection(degrees: number | null): string | null {
+	if (!Number.isFinite(degrees as number)) return null;
+	const value = ((degrees as number) % 360 + 360) % 360;
+	const dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+	return dirs[Math.round(value / 22.5) % 16];
+}
+
+function parseWindSpeedTextMph(value: string): number | null {
+	const text = String(value || '').toLowerCase();
+	if (!text) return null;
+	const numbers = text.match(/\d+(?:\.\d+)?/g);
+	if (!numbers || numbers.length === 0) return null;
+	const parsed = numbers
+		.map((x) => Number(x))
+		.filter((x) => Number.isFinite(x));
+	if (parsed.length === 0) return null;
+	const avg = parsed.reduce((sum, x) => sum + x, 0) / parsed.length;
+	if (text.includes('km')) return kmhToMph(avg);
+	if (text.includes('m/s')) return mpsToMph(avg);
+	if (text.includes('kt')) return knotsToMph(avg);
+	return avg;
+}
+
+function forecastTemperatureToF(period: any): number | null {
+	const raw = Number(period?.temperature);
+	if (!Number.isFinite(raw)) return null;
+	const unit = String(period?.temperatureUnit || '').toUpperCase();
+	if (unit === 'F' || !unit) return raw;
+	if (unit === 'C') return celsiusToFahrenheit(raw);
+	return raw;
+}
+
+function severityFromForecastText(text: string): 'high' | 'medium' | 'low' {
+	const value = String(text || '').toLowerCase();
+	if (/(severe|tornado|flash flood|hurricane|blizzard|thunderstorm|damaging)/i.test(value)) return 'high';
+	if (/(rain|showers|wind|snow|sleet|ice|storm|fog|heat)/i.test(value)) return 'medium';
+	return 'low';
+}
+
+async function fetchPointWeatherContext(lat: number, lon: number): Promise<any> {
+	const payload = await fetchNwsJson(
+		`https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`,
+		'Point lookup',
+	);
+	const p = payload?.properties ?? {};
+	const relative = p?.relativeLocation?.properties ?? {};
+	const city = String(relative?.city || '').trim() || undefined;
+	const state = String(relative?.state || '').trim() || undefined;
+	const label = city && state ? `${city}, ${state}` : `Lat ${lat.toFixed(2)}, Lon ${lon.toFixed(2)}`;
+
+	return {
+		lat,
+		lon,
+		city,
+		state,
+		label,
+		timeZone: String(p?.timeZone || ''),
+		gridId: String(p?.gridId || ''),
+		gridX: Number(p?.gridX),
+		gridY: Number(p?.gridY),
+		forecast: String(p?.forecast || ''),
+		forecastHourly: String(p?.forecastHourly || ''),
+		observationStations: String(p?.observationStations || ''),
+		radarStation: String(p?.radarStation || ''),
+	};
+}
+
+async function fetchLatestObservation(observationStationsUrl: string): Promise<{ stationId: string; properties: any } | null> {
+	if (!observationStationsUrl) return null;
+	try {
+		const stationsPayload = await fetchNwsJson(observationStationsUrl, 'Observation stations');
+		const features = Array.isArray(stationsPayload?.features) ? stationsPayload.features : [];
+		const first = features[0];
+		const stationId = String(
+			first?.properties?.stationIdentifier
+			|| first?.properties?.station
+			|| ''
+		).trim();
+		if (!stationId) return null;
+		const obsPayload = await fetchNwsJson(
+			`https://api.weather.gov/stations/${encodeURIComponent(stationId)}/observations/latest`,
+			'Latest observation',
+		);
+		return {
+			stationId,
+			properties: obsPayload?.properties ?? {},
+		};
+	} catch {
+		return null;
+	}
+}
+
+function normalizeHourlyPeriods(hourlyPeriods: any[]): any[] {
+	return hourlyPeriods.slice(0, 18).map((period: any, index: number) => {
+		const temperatureF = forecastTemperatureToF(period);
+		return {
+			startTime: String(period?.startTime || ''),
+			isNow: index === 0,
+			temperatureF: roundTo(temperatureF, 0),
+			shortForecast: String(period?.shortForecast || ''),
+			icon: String(period?.icon || ''),
+			windSpeedMph: roundTo(parseWindSpeedTextMph(String(period?.windSpeed || '')), 0),
+			windDirection: String(period?.windDirection || ''),
+			precipitationChance: roundTo(
+				Number.isFinite(Number(period?.probabilityOfPrecipitation?.value))
+					? Number(period?.probabilityOfPrecipitation?.value)
+					: null,
+				0,
+			),
+		};
+	});
+}
+
+function normalizeDailyPeriods(periods: any[]): any[] {
+	const daytime = periods.filter((period: any) => period?.isDaytime === true);
+	const source = daytime.length >= 5 ? daytime : periods;
+	return source.slice(0, 10).map((period: any) => {
+		const temperatureF = forecastTemperatureToF(period);
+		const forecastText = String(period?.shortForecast || '');
+		return {
+			name: String(period?.name || ''),
+			startTime: String(period?.startTime || ''),
+			isDaytime: Boolean(period?.isDaytime),
+			temperatureF: roundTo(temperatureF, 0),
+			shortForecast: forecastText,
+			icon: String(period?.icon || ''),
+			severity: severityFromForecastText(forecastText),
+		};
+	});
+}
+
+function buildCurrentConditions(observationProps: any, firstHourly: any): any {
+	const observedTempF = toTemperatureF(observationProps?.temperature);
+	const hourlyTempF = forecastTemperatureToF(firstHourly);
+	const temperatureF = firstFinite(observedTempF, hourlyTempF);
+
+	const observedFeelsF = firstFinite(
+		toTemperatureF(observationProps?.heatIndex),
+		toTemperatureF(observationProps?.windChill),
+		observedTempF,
+	);
+
+	const humidity = toPercent(observationProps?.relativeHumidity);
+	const pressureInHg = toPressureInHg(observationProps?.barometricPressure);
+	const visibilityMi = toMiles(observationProps?.visibility);
+	const dewpointF = toTemperatureF(observationProps?.dewpoint);
+	const windMph = firstFinite(
+		toSpeedMph(observationProps?.windSpeed),
+		parseWindSpeedTextMph(String(firstHourly?.windSpeed || '')),
+	);
+	const windDirection = firstFinite(
+		measurementValue(observationProps?.windDirection),
+		null,
+	);
+
+	const condition = String(
+		observationProps?.textDescription
+		|| firstHourly?.shortForecast
+		|| 'Conditions unavailable',
+	);
+
+	return {
+		temperatureF: roundTo(temperatureF, 0),
+		feelsLikeF: roundTo(firstFinite(observedFeelsF, hourlyTempF), 0),
+		condition,
+		windMph: roundTo(windMph, 0),
+		windDirection: toCompassDirection(windDirection) || String(firstHourly?.windDirection || ''),
+		humidity: roundTo(humidity, 0),
+		dewpointF: roundTo(dewpointF, 0),
+		pressureInHg: roundTo(pressureInHg, 2),
+		visibilityMi: roundTo(visibilityMi, 1),
+		icon: String(observationProps?.icon || firstHourly?.icon || ''),
+		timestamp: String(observationProps?.timestamp || firstHourly?.startTime || ''),
+	};
+}
+
+function radarImagesForStation(station: string): { loopImageUrl: string | null; stillImageUrl: string | null } {
+	const code = String(station || '').trim().toUpperCase();
+	if (!code) {
+		return { loopImageUrl: null, stillImageUrl: null };
+	}
+	return {
+		loopImageUrl: `https://radar.weather.gov/ridge/standard/${code}_loop.gif`,
+		stillImageUrl: `https://radar.weather.gov/ridge/standard/${code}_0.gif`,
+	};
+}
+
+async function handleApiWeather(request: Request): Promise<Response> {
+	const headers = apiCorsHeaders();
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	try {
+		const { lat, lon } = parseLatLonForWeather(request);
+		const point = await fetchPointWeatherContext(lat, lon);
+
+		if (!point.forecast || !point.forecastHourly) {
+			throw new HttpError(502, 'Forecast endpoints are unavailable for this location.');
+		}
+
+		const [forecastPayload, hourlyPayload, observation] = await Promise.all([
+			fetchNwsJson(point.forecast, 'Daily forecast'),
+			fetchNwsJson(point.forecastHourly, 'Hourly forecast'),
+			fetchLatestObservation(point.observationStations),
+		]);
+
+		const hourlyPeriodsRaw = Array.isArray(hourlyPayload?.properties?.periods)
+			? hourlyPayload.properties.periods
+			: [];
+		const dailyPeriodsRaw = Array.isArray(forecastPayload?.properties?.periods)
+			? forecastPayload.properties.periods
+			: [];
+
+		const hourly = normalizeHourlyPeriods(hourlyPeriodsRaw);
+		const daily = normalizeDailyPeriods(dailyPeriodsRaw);
+		const current = buildCurrentConditions(observation?.properties ?? {}, hourlyPeriodsRaw[0] ?? {});
+		const radarStation = point.radarStation || observation?.stationId || '';
+		const radarImages = radarImagesForStation(radarStation);
+
+		headers.set('Cache-Control', 'public, max-age=120');
+		return new Response(JSON.stringify({
+			location: {
+				lat: point.lat,
+				lon: point.lon,
+				city: point.city,
+				state: point.state,
+				label: point.label,
+				timeZone: point.timeZone || null,
+				gridId: point.gridId || null,
+				gridX: Number.isFinite(point.gridX) ? point.gridX : null,
+				gridY: Number.isFinite(point.gridY) ? point.gridY : null,
+				radarStation: radarStation || null,
+			},
+			current,
+			hourly,
+			daily,
+			radar: {
+				station: radarStation || null,
+				loopImageUrl: radarImages.loopImageUrl,
+				stillImageUrl: radarImages.stillImageUrl,
+				updated: String(observation?.properties?.timestamp || hourly[0]?.startTime || new Date().toISOString()),
+				summary: String(observation?.properties?.textDescription || current.condition || ''),
+			},
+			updated: new Date().toISOString(),
+		}), { status: 200, headers });
+	} catch (error) {
+		const status = error instanceof HttpError ? error.status : 500;
+		const message = error instanceof Error ? error.message : 'Unexpected weather lookup error.';
+		return new Response(JSON.stringify({ error: message }), { status, headers });
+	}
+}
+
+async function handleApiRadar(request: Request): Promise<Response> {
+	const headers = apiCorsHeaders();
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	try {
+		const { lat, lon } = parseLatLonForWeather(request);
+		const point = await fetchPointWeatherContext(lat, lon);
+		const observation = await fetchLatestObservation(point.observationStations);
+		const radarStation = point.radarStation || observation?.stationId || '';
+		const images = radarImagesForStation(radarStation);
+		const direction = toCompassDirection(measurementValue(observation?.properties?.windDirection));
+
+		headers.set('Cache-Control', 'public, max-age=120');
+		return new Response(JSON.stringify({
+			location: {
+				lat: point.lat,
+				lon: point.lon,
+				city: point.city,
+				state: point.state,
+				label: point.label,
+			},
+			station: radarStation || null,
+			loopImageUrl: images.loopImageUrl,
+			stillImageUrl: images.stillImageUrl,
+			updated: String(observation?.properties?.timestamp || new Date().toISOString()),
+			summary: String(observation?.properties?.textDescription || ''),
+			stormDirection: direction,
+		}), { status: 200, headers });
+	} catch (error) {
+		const status = error instanceof HttpError ? error.status : 500;
+		const message = error instanceof Error ? error.message : 'Unexpected radar lookup error.';
+		return new Response(JSON.stringify({ error: message }), { status, headers });
+	}
+}
+
+async function handleApiLocation(request: Request): Promise<Response> {
+	const headers = apiCorsHeaders();
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'public, max-age=3600');
+
+	try {
+		const url = new URL(request.url);
+		const zip = String(url.searchParams.get('zip') || '').trim();
+
+		if (!ZIP_RE.test(zip)) {
+			throw new HttpError(400, 'ZIP code is invalid.');
+		}
+
+		const location = await geocodeZipToLocation(zip);
+		return new Response(JSON.stringify(location), {
+			status: 200,
+			headers,
+		});
+	} catch (error) {
+		const status = error instanceof HttpError ? error.status : 500;
+		const message = error instanceof Error ? error.message : 'Unexpected location lookup error.';
+		return new Response(JSON.stringify({ error: message }), { status, headers });
+	}
+}
+
+async function geocodeZipToLocation(zip: string): Promise<SavedLocation> {
+	return await geocodeZip(zip);
+}
+
+async function handleApiGeocode(request: Request): Promise<Response> {
+	const headers = apiCorsHeaders();
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	const url = new URL(request.url);
+	const zip = String(url.searchParams.get('zip') || '').trim();
+	const latRaw = String(url.searchParams.get('lat') || '').trim();
+	const lonRaw = String(url.searchParams.get('lon') || '').trim();
+
+	try {
+		if (zip) {
+			if (!ZIP_RE.test(zip)) {
+				throw new HttpError(400, 'Enter a valid 5-digit ZIP code.');
+			}
+			const location = await geocodeZip(zip);
+			headers.set('Cache-Control', 'public, max-age=86400');
+			return new Response(JSON.stringify(location), { status: 200, headers });
+		}
+
+		if (!latRaw || !lonRaw) {
+			throw new HttpError(400, 'Provide either ?zip=##### or both ?lat= and ?lon=.');
+		}
+
+		const lat = parseCoordinate(latRaw, -90, 90, 'Latitude');
+		const lon = parseCoordinate(lonRaw, -180, 180, 'Longitude');
+		const location = await reverseGeocodePoint(lat, lon);
+		headers.set('Cache-Control', 'public, max-age=1800');
+		return new Response(JSON.stringify(location), { status: 200, headers });
+	} catch (error) {
+		const status = error instanceof HttpError ? error.status : 500;
+		const message =
+			error instanceof Error
+				? error.message
+				: 'Unexpected geocoding error.';
+		return new Response(JSON.stringify({ error: message }), { status, headers });
+	}
+}
+
 async function handleAdminPage(request: Request, env: Env): Promise<Response> {
 	if (!isAuthenticated(request, env)) {
 		return new Response(renderLoginPage(), {
@@ -2455,11 +3028,35 @@ export default {
 		if (url.pathname === '/api/alerts' && request.method === 'OPTIONS') {
 			return new Response(null, { status: 204, headers: apiCorsHeaders() });
 		}
+		if (url.pathname === '/api/geocode' && request.method === 'OPTIONS') {
+			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+		}
+		if (url.pathname === '/api/location' && request.method === 'OPTIONS') {
+			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+		}
+		if (url.pathname === '/api/weather' && request.method === 'OPTIONS') {
+			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+		}
+		if (url.pathname === '/api/radar' && request.method === 'OPTIONS') {
+			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+		}
 		if (url.pathname.startsWith('/api/push/') && request.method === 'OPTIONS') {
 			return new Response(null, { status: 204, headers: pushCorsHeaders() });
 		}
 		if (url.pathname === '/api/alerts' && request.method === 'GET') {
 			return await handleApiAlerts(env);
+		}
+		if (url.pathname === '/api/geocode' && request.method === 'GET') {
+			return await handleApiGeocode(request);
+		}
+		if (url.pathname === '/api/location' && request.method === 'GET') {
+			return await handleApiLocation(request);
+		}
+		if (url.pathname === '/api/weather' && request.method === 'GET') {
+			return await handleApiWeather(request);
+		}
+		if (url.pathname === '/api/radar' && request.method === 'GET') {
+			return await handleApiRadar(request);
 		}
 		if (url.pathname === '/api/push/public-key' && request.method === 'GET') {
 			return await handlePushPublicKey(env);
