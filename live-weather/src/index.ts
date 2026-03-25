@@ -2051,6 +2051,14 @@ async function handlePublicAlertsPage(env: Env): Promise<Response> {
 	});
 }
 
+function corsHeaders() {
+	return {
+		'Access-Control-Allow-Origin': '*',
+		'Access-Control-Allow-Methods': 'GET, OPTIONS',
+		'Access-Control-Allow-Headers': 'Content-Type',
+	};
+}
+
 function apiCorsHeaders(origin?: string | null): Headers {
 	const allowedOrigin = origin === 'https://liveweatheralerts.com' ? origin : '*';
 	return new Headers({
@@ -2182,9 +2190,11 @@ async function handleApiAlerts(env: Env): Promise<Response> {
 		};
 	});
 	const lastPoll = await env.WEATHER_KV.get(KV_LAST_POLL);
-	const headers = apiCorsHeaders();
-	headers.set('Content-Type', 'application/json; charset=utf-8');
-	headers.set('Cache-Control', 'no-store');
+	const headers = {
+		...corsHeaders(),
+		'Content-Type': 'application/json; charset=utf-8',
+		'Cache-Control': 'no-store',
+	};
 	return new Response(JSON.stringify({
 		alerts,
 		lastPoll: lastPoll ?? null,
@@ -2503,21 +2513,41 @@ function normalizeHourlyPeriods(hourlyPeriods: any[]): any[] {
 }
 
 function normalizeDailyPeriods(periods: any[]): any[] {
-	const daytime = periods.filter((period: any) => period?.isDaytime === true);
-	const source = daytime.length >= 5 ? daytime : periods;
-	return source.slice(0, 10).map((period: any) => {
-		const temperatureF = forecastTemperatureToF(period);
-		const forecastText = String(period?.shortForecast || '');
-		return {
-			name: String(period?.name || ''),
-			startTime: String(period?.startTime || ''),
-			isDaytime: Boolean(period?.isDaytime),
-			temperatureF: roundTo(temperatureF, 0),
-			shortForecast: forecastText,
-			icon: String(period?.icon || ''),
-			severity: severityFromForecastText(forecastText),
-		};
-	});
+	const normalized: any[] = [];
+
+	for (let i = 0; i < periods.length; i++) {
+		const period = periods[i];
+		if (!period) continue;
+
+		// Prefer daytime periods as the main day cards
+		if (period.isDaytime === true) {
+			const next = periods[i + 1];
+			const highF = forecastTemperatureToF(period);
+			const lowF =
+				next && next.isDaytime === false
+					? forecastTemperatureToF(next)
+					: null;
+
+			const forecastText = String(period?.shortForecast || "");
+			normalized.push({
+				name: String(period?.name || ""),
+				startTime: String(period?.startTime || ""),
+				isDaytime: true,
+				highF: roundTo(highF, 0),
+				lowF: lowF !== null ? roundTo(lowF, 0) : null,
+				temperatureF: roundTo(highF, 0),
+				shortForecast: forecastText,
+				detailedForecast: String(period?.detailedForecast || ""),
+				windSpeed: String(period?.windSpeed || ""),
+				windDirection: String(period?.windDirection || ""),
+				precipitationChance: Number(period?.probabilityOfPrecipitation?.value ?? 0),
+				icon: String(period?.icon || ""),
+				severity: severityFromForecastText(forecastText),
+			});
+		}
+	}
+
+	return normalized.slice(0, 10);
 }
 
 function buildCurrentConditions(observationProps: any, firstHourly: any): any {
@@ -2678,9 +2708,11 @@ async function handleApiRadar(request: Request): Promise<Response> {
 }
 
 async function handleApiLocation(request: Request): Promise<Response> {
-	const headers = apiCorsHeaders();
-	headers.set('Content-Type', 'application/json; charset=utf-8');
-	headers.set('Cache-Control', 'public, max-age=3600');
+	const headers = {
+		...corsHeaders(),
+		'Content-Type': 'application/json; charset=utf-8',
+		'Cache-Control': 'public, max-age=3600',
+	};
 
 	try {
 		const url = new URL(request.url);
@@ -3027,6 +3059,13 @@ export default {
 					// fallback to normal handler if static asset not found.
 				}
 			}
+		}
+
+		if (request.method === 'OPTIONS') {
+			return new Response(null, {
+				status: 204,
+				headers: corsHeaders(),
+			});
 		}
 
 		if (url.pathname === '/api/alerts' && request.method === 'OPTIONS') {

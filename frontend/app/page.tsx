@@ -5,6 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import RadarMapModal from "@/components/RadarMapModal";
 import { motion, AnimatePresence } from "framer-motion";
 
 /**
@@ -932,88 +933,6 @@ function RadarPreviewCard({
   );
 }
 
-function RadarModal({
-  open,
-  onClose,
-  radar,
-  locationLabel,
-}: {
-  open: boolean;
-  onClose: () => void;
-  radar: WeatherResponse["radar"] | null;
-  locationLabel: string;
-}) {
-  if (!open) return null;
-
-  const imageUrl = radar?.loopImageUrl || radar?.stillImageUrl || null;
-
-  return (
-    <AnimatePresence>
-      <motion.div
-        className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-md"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        onClick={onClose}
-      >
-        <motion.div
-          className="absolute inset-x-0 bottom-0 top-[6%] rounded-t-[30px] border border-white/10 bg-slate-950 text-white shadow-2xl"
-          initial={{ y: 80, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          exit={{ y: 80, opacity: 0 }}
-          transition={{ type: "spring", stiffness: 260, damping: 24 }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="mx-auto mt-3 h-1.5 w-14 rounded-full bg-white/20" />
-
-          <div className="flex items-center justify-between px-5 pb-4 pt-4">
-            <div>
-              <div className="text-lg font-black uppercase tracking-wide">Live Radar</div>
-              <div className="mt-1 text-sm text-slate-400">{locationLabel}</div>
-            </div>
-
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-xl bg-white/5 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
-            >
-              Close
-            </button>
-          </div>
-
-          <div className="px-4 pb-5">
-            <div className="overflow-hidden rounded-[24px] border border-white/10 bg-slate-900">
-              <div className="relative aspect-[9/14] w-full bg-slate-950">
-                {imageUrl ? (
-                  <img
-                    src={imageUrl}
-                    alt="Full radar"
-                    className="absolute inset-0 h-full w-full object-cover"
-                  />
-                ) : (
-                  <>
-                    <div className="absolute inset-0 bg-[radial-gradient(circle_at_65%_20%,rgba(255,200,0,0.35),transparent_18%),linear-gradient(135deg,rgba(34,197,94,0.35),transparent_25%),linear-gradient(160deg,rgba(250,204,21,0.28),transparent_45%),linear-gradient(200deg,rgba(239,68,68,0.4),transparent_62%),linear-gradient(180deg,#162033_0%,#101827_100%)]" />
-                    <div className="absolute inset-0 bg-gradient-to-br from-green-500/20 via-yellow-400/20 to-red-500/30 blur-[26px] opacity-50" />
-                    <div className="absolute inset-0 opacity-40 [background-image:linear-gradient(rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] [background-size:20px_20px]" />
-                  </>
-                )}
-
-                <div className="absolute left-3 top-3 rounded-full border border-white/15 bg-black/40 px-3 py-1 text-xs font-semibold text-white backdrop-blur-md">
-                  {radar?.summary || "Live radar"}
-                </div>
-
-                <div className="absolute bottom-3 right-3 rounded-full border border-white/15 bg-black/40 px-3 py-1 text-xs text-white/90 backdrop-blur-md">
-                  Updated {formatRelative(radar?.updated)}
-                </div>
-              </div>
-            </div>
-          </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>
-  );
-}
-
 function AlertHeadlineList({
   alerts,
   onSelectAlert,
@@ -1636,7 +1555,7 @@ export default function LiveWeatherAlertsHomePage() {
           <RadarPreviewCard
             alertState={alertState}
             radar={weather?.radar || null}
-            onViewRadar={() => setActiveTab("radar")}
+            onViewRadar={() => setShowRadarModal(true)}
           />
         </div>
 
@@ -1883,11 +1802,17 @@ export default function LiveWeatherAlertsHomePage() {
         }}
       />
 
-      <RadarModal
+      <RadarMapModal
         open={showRadarModal}
         onClose={() => setShowRadarModal(false)}
+        location={
+          weather?.location || {
+            lat: 41.8781,
+            lon: -87.6298,
+            label: "Your Area",
+          }
+        }
         radar={weather?.radar || null}
-        locationLabel={locationLabel}
       />
 
       {selectedAlert ? (
