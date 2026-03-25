@@ -194,6 +194,31 @@ export function getHeroVariant(event: string): "tornado" | "flood" | "winter" | 
   return "default";
 }
 
+export function getHeroVariantBackgroundImage(event: string): string | null {
+  const variant = getHeroVariant(event);
+
+  switch (variant) {
+    case "tornado":
+      return "/images/alerts/tornado.jpg";
+    case "flood":
+      return "/images/alerts/flood.jpg";
+    case "winter":
+      return "/images/alerts/winter.jpg";
+    case "fire":
+      return "/images/alerts/fire.jpg";
+    default:
+      return "/images/alerts/default.jpg";
+  }
+}
+
+export function getHeroVariantBackgroundImageIfExists(event: string): string | null {
+  const path = getHeroVariantBackgroundImage(event);
+  // fallback support for missing files
+  // (in this environment we cannot test filesystem at runtime in browser,
+  // so keep this as the declarative API, and make BigAlertHero handle null.)
+  return path || null;
+}
+
 export function getHeroVariantStyles(variant: ReturnType<typeof getHeroVariant>) {
   switch (variant) {
     case "tornado":

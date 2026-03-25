@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { TriangleAlert } from "lucide-react";
-import { getAlertCTA, getHeroVariant, getHeroVariantStyles, getAlertBackground, heroAreaLabel, heroThreats, AlertItem } from "@/lib/alerts/helpers";
+import { getAlertCTA, getHeroVariant, getHeroVariantStyles, getAlertBackground, getHeroVariantBackgroundImageIfExists, heroAreaLabel, heroThreats, AlertItem } from "@/lib/alerts/helpers";
 import { cn } from "@/lib/utils";
 import { formatTime } from "@/lib/weather/formatters";
 
@@ -19,6 +19,7 @@ export default function BigAlertHero({
   const threats = heroThreats(alert);
   const variant = getHeroVariant(alert.event);
   const styles = getHeroVariantStyles(variant);
+  const backgroundImage = getHeroVariantBackgroundImageIfExists(alert.event);
 
   const subtitle =
     variant === "flood"
@@ -40,7 +41,10 @@ export default function BigAlertHero({
         <div
           className="absolute inset-0"
           style={{
-            background: getAlertBackground(alert.event),
+            backgroundImage: `${backgroundImage ? `url(${backgroundImage}), ` : ""}${getAlertBackground(alert.event)}`,
+            backgroundSize: "cover",
+            backgroundPosition: "center",
+            backgroundRepeat: "no-repeat",
           }}
         />
 

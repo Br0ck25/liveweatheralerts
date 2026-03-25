@@ -55,11 +55,34 @@ interface FbAppConfig {
 	appSecret?: string;
 }
 
+type PushAlertTypes = {
+	warnings: boolean;
+	watches: boolean;
+	advisories: boolean;
+	statements: boolean;
+};
+
+type PushQuietHours = {
+	enabled: boolean;
+	start: string;
+	end: string;
+};
+
+type PushPreferences = {
+	stateCode: string;
+	deliveryScope: 'state' | 'county';
+	countyName?: string | null;
+	countyFips?: string | null;
+	alertTypes: PushAlertTypes;
+	quietHours: PushQuietHours;
+};
+
 interface PushSubscriptionRecord {
 	id: string;
 	endpoint: string;
 	stateCode: string;
 	subscription: WebPushSubscription;
+	prefs?: PushPreferences;
 	createdAt: string;
 	updatedAt: string;
 	userAgent?: string;
@@ -664,22 +687,89 @@ async function readPushSubscriptionRecordById(env: Env, subscriptionId: string):
 	}
 }
 
+function defaultPushPreferences(stateCode: string): PushPreferences {
+	return {
+		stateCode,
+		deliveryScope: 'state',
+		countyName: null,
+		countyFips: null,
+		alertTypes: {
+			warnings: true,
+			watches: true,
+			advisories: false,
+			statements: true,
+		},
+		quietHours: {
+			enabled: false,
+			start: '22:00',
+			end: '06:00',
+		},
+	};
+}
+
+function classifyAlertType(event: string): keyof PushAlertTypes {
+	const text = String(event || '').toLowerCase();
+	if (text.includes('warning')) return 'warnings';
+	if (text.includes('watch')) return 'watches';
+	if (text.includes('advisory')) return 'advisories';
+	return 'statements';
+}
+
+function alertMatchesTypePrefs(event: string, prefs: PushPreferences): boolean {
+	const bucket = classifyAlertType(event);
+	return !!prefs.alertTypes[bucket];
+}
+
+function timeStringToMinutes(value: string): number {
+	const [h, m] = String(value || '00:00').split(':').map((v) => Number(v) || 0);
+	return h * 60 + m;
+}
+
+function isWithinQuietHours(now: Date, prefs: PushPreferences): boolean {
+	if (!prefs.quietHours.enabled) return false;
+	const current = now.getHours() * 60 + now.getMinutes();
+	const start = timeStringToMinutes(prefs.quietHours.start);
+	const end = timeStringToMinutes(prefs.quietHours.end);
+	if (start === end) return false;
+	if (start < end) return current >= start && current < end;
+	return current >= start || current < end;
+}
+
+function alertBypassesQuietHours(event: string): boolean {
+	const text = String(event || '').toLowerCase();
+	return text.includes('tornado warning') || text.includes('severe thunderstorm warning');
+}
+
+function alertMatchesCountyPrefs(feature: any, prefs: PushPreferences): boolean {
+	if (prefs.deliveryScope !== 'county') return true;
+	const areaDesc = String(feature?.properties?.areaDesc || '').toLowerCase();
+	const countyName = String(prefs.countyName || '').trim().toLowerCase();
+	if (!countyName) return false;
+	return areaDesc.includes(countyName);
+}
+
 async function upsertPushSubscriptionRecord(
 	env: Env,
 	subscription: WebPushSubscription,
 	stateCode: string,
 	userAgent?: string,
+	prefs?: PushPreferences,
 ): Promise<PushSubscriptionRecord> {
 	const nowIso = new Date().toISOString();
 	const subscriptionId = await sha256Hex(subscription.endpoint);
 	const existing = await readPushSubscriptionRecordById(env, subscriptionId);
 	const normalizedState = normalizeStateCode(stateCode) || stateCode;
 
+	const nextPrefs = prefs
+		? { ...defaultPushPreferences(normalizedState), ...prefs, stateCode: normalizedState }
+		: existing?.prefs || defaultPushPreferences(normalizedState);
+
 	const record: PushSubscriptionRecord = {
 		id: subscriptionId,
 		endpoint: subscription.endpoint,
 		stateCode: normalizedState,
 		subscription,
+		prefs: nextPrefs,
 		createdAt: existing?.createdAt || nowIso,
 		updatedAt: nowIso,
 		userAgent: String(userAgent || existing?.userAgent || '').slice(0, 300),
@@ -803,8 +893,6 @@ async function sendPushForState(env: Env, vapid: VapidKeys, stateCode: string, n
 	const subscriptionIds = await readPushStateIndex(env, stateCode);
 	if (subscriptionIds.length === 0) return;
 
-	const payloadData = buildStatePushMessageData(stateCode, newFeatures);
-
 	for (const subscriptionId of subscriptionIds) {
 		const record = await readPushSubscriptionRecordById(env, subscriptionId);
 		if (!record) {
@@ -815,6 +903,27 @@ async function sendPushForState(env: Env, vapid: VapidKeys, stateCode: string, n
 			await removePushIdFromStateIndex(env, stateCode, subscriptionId);
 			continue;
 		}
+
+		const prefs = record.prefs || defaultPushPreferences(stateCode);
+
+		const matchingFeatures = newFeatures.filter((feature) => {
+			const event = String(feature?.properties?.event || '');
+
+			if (!alertMatchesTypePrefs(event, prefs)) return false;
+			if (!alertMatchesCountyPrefs(feature, prefs)) return false;
+
+			if (isWithinQuietHours(new Date(), prefs) && !alertBypassesQuietHours(event)) {
+				return false;
+			}
+
+			return true;
+		});
+
+		if (matchingFeatures.length === 0) {
+			continue;
+		}
+
+		const payloadData = buildStatePushMessageData(stateCode, matchingFeatures);
 
 		try {
 			const message: PushMessage = {
@@ -2125,11 +2234,13 @@ async function handlePushSubscribe(request: Request, env: Env): Promise<Response
 		return new Response(JSON.stringify({ error: 'Invalid push subscription payload.' }), { status: 400, headers });
 	}
 
+	const prefs = body?.prefs;
 	const record = await upsertPushSubscriptionRecord(
 		env,
 		subscription,
 		stateCode,
 		request.headers.get('user-agent') || undefined,
+		prefs,
 	);
 
 	return new Response(JSON.stringify({
@@ -2595,10 +2706,125 @@ function buildCurrentConditions(observationProps: any, firstHourly: any): any {
 	};
 }
 
+type RadarFrame = {
+	time: string;
+	label: string;
+};
+
+type RadarPayload = {
+	station: string | null;
+	loopImageUrl: string | null;
+	stillImageUrl: string | null;
+	updated: string;
+	summary: string;
+	frames: RadarFrame[];
+	tileTemplate: string | null;
+	hasLiveTiles: boolean;
+	defaultCenter: {
+		lat: number;
+		lon: number;
+	};
+	defaultZoom: number;
+};
+
+function buildRecentRadarFrames(count = 8, stepMinutes = 2): RadarFrame[] {
+	const now = new Date();
+	const rounded = new Date(now);
+	rounded.setUTCSeconds(0, 0);
+	rounded.setUTCMinutes(Math.floor(rounded.getUTCMinutes() / stepMinutes) * stepMinutes);
+
+	const frames: RadarFrame[] = [];
+
+	for (let i = count - 1; i >= 0; i--) {
+		const d = new Date(rounded);
+		d.setUTCMinutes(d.getUTCMinutes() - i * stepMinutes);
+
+		frames.push({
+			time: d.toISOString(),
+			label: d.toLocaleTimeString('en-US', {
+				hour: 'numeric',
+				minute: '2-digit',
+				timeZone: 'UTC',
+			}),
+		});
+	}
+
+	return frames;
+}
+
+function buildRadarTileTemplate(): string {
+	return [
+		'https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows',
+		'?SERVICE=WMS',
+		'&VERSION=1.1.1',
+		'&REQUEST=GetMap',
+		'&FORMAT=image/png',
+		'&TRANSPARENT=true',
+		'&LAYERS=conus_bref_qcd',
+		'&SRS=EPSG:3857',
+		'&WIDTH=256',
+		'&HEIGHT=256',
+		'&BBOX={bbox-epsg-3857}',
+		'&TIME={time}',
+	].join('');
+}
+
+function buildRadarStillImageUrl(time?: string): string | null {
+	if (!time) return null;
+
+	const params = [
+		'SERVICE=WMS',
+		'VERSION=1.1.1',
+		'REQUEST=GetMap',
+		'FORMAT=image/png',
+		'TRANSPARENT=true',
+		'LAYERS=conus_bref_qcd',
+		'SRS=EPSG:4326',
+		'WIDTH=1200',
+		'HEIGHT=700',
+		'BBOX=24,-126,50,-66',
+		`TIME=${encodeURIComponent(time)}`,
+	];
+
+	return `https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows?${params.join('&')}`;
+}
+
 function radarImagesForStation(_station: string): { loopImageUrl: string | null; stillImageUrl: string | null } {
+	const frames = buildRecentRadarFrames(8, 2);
+	const latest = frames[frames.length - 1]?.time ?? null;
+
 	return {
 		loopImageUrl: null,
-		stillImageUrl: null,
+		stillImageUrl: buildRadarStillImageUrl(latest),
+	};
+}
+
+function buildRadarPayload(input: {
+	lat: number;
+	lon: number;
+	station?: string | null;
+	updated?: string | null;
+	summary?: string | null;
+}): RadarPayload {
+	const frames = buildRecentRadarFrames(8, 2);
+	const latestFrame = frames[frames.length - 1]?.time ?? null;
+	const tileTemplate = buildRadarTileTemplate();
+	const images = radarImagesForStation(input.station || '');
+
+	return {
+		station: input.station || null,
+		loopImageUrl: images.loopImageUrl,
+		stillImageUrl: images.stillImageUrl || buildRadarStillImageUrl(latestFrame),
+		updated: String(input.updated || latestFrame || new Date().toISOString()),
+		summary: String(input.summary || ''),
+		frames,
+		tileTemplate,
+		hasLiveTiles: true,
+		defaultCenter: {
+			lat: input.lat,
+			lon: input.lon,
+		},
+		defaultZoom: 7,
 	};
 }
 
@@ -2632,7 +2858,13 @@ async function handleApiWeather(request: Request): Promise<Response> {
 		const daily = normalizeDailyPeriods(dailyPeriodsRaw);
 		const current = buildCurrentConditions(observation?.properties ?? {}, hourlyPeriodsRaw[0] ?? {});
 		const radarStation = point.radarStation || observation?.stationId || '';
-		const radarImages = radarImagesForStation(radarStation);
+		const radar = buildRadarPayload({
+			lat: point.lat,
+			lon: point.lon,
+			station: radarStation || null,
+			updated: String(observation?.properties?.timestamp || hourly[0]?.startTime || new Date().toISOString()),
+			summary: String(observation?.properties?.textDescription || current.condition || ''),
+		});
 
 		headers.set('Cache-Control', 'public, max-age=120');
 		return new Response(JSON.stringify({
@@ -2651,13 +2883,7 @@ async function handleApiWeather(request: Request): Promise<Response> {
 			current,
 			hourly,
 			daily,
-			radar: {
-				station: radarStation || null,
-				loopImageUrl: radarImages.loopImageUrl,
-				stillImageUrl: radarImages.stillImageUrl,
-				updated: String(observation?.properties?.timestamp || hourly[0]?.startTime || new Date().toISOString()),
-				summary: String(observation?.properties?.textDescription || current.condition || ''),
-			},
+			radar,
 			updated: new Date().toISOString(),
 		}), { status: 200, headers });
 	} catch (error) {

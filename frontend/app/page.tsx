@@ -1,6 +1,16 @@
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
-import { Bell, Map, Menu, ShieldAlert } from "lucide-react";
+import {
+  Bell,
+  Map,
+  Menu,
+  Radar,
+  ShieldAlert,
+  TriangleAlert,
+  CloudRain,
+  CloudFog,
+  Waves,
+} from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import RadarPreviewCard from "@/components/weather/RadarPreviewCard";
@@ -16,9 +26,16 @@ import SingleSecondaryAlertCard from "@/components/alerts/SingleSecondaryAlertCa
 import AlertHeadlineList from "@/components/alerts/AlertHeadlineList";
 import { motion } from "framer-motion";
 
-import { openExternal } from "@/lib/utils";
+import { cn, openExternal } from "@/lib/utils";
 import { fetchWeather, safeJson } from "@/lib/api/client";
-import { subscribeToPush } from "@/lib/push";
+import {
+  buildDefaultPushPreferences,
+  getPushStatus,
+  subscribeToPush,
+  unsubscribeFromPush,
+  updatePushPreferences,
+  type PushPreferences,
+} from "@/lib/push";
 import { formatTime, formatRelative, mapIcon } from "@/lib/weather/formatters";
 import { sortAlerts, getAlertPriority, heroAreaLabel } from "@/lib/alerts/helpers";
 
@@ -54,6 +71,15 @@ type AlertItem = {
   updated: string;
   nwsUrl: string;
 };
+
+type AlertChangeType = "new" | "updated" | null;
+
+type AlertLiveMeta = {
+  changeType: AlertChangeType;
+  detectedAt: number;
+};
+
+type AlertLiveMap = Record<string, AlertLiveMeta>;
 
 type AlertsResponse = {
   alerts: AlertItem[];
@@ -208,6 +234,10 @@ export default function LiveWeatherAlertsHomePage() {
   const [showLocationPrompt, setShowLocationPrompt] = useState(false);
   const [promptDefaultToZip, setPromptDefaultToZip] = useState(false);
   const [alertsResp, setAlertsResp] = useState<AlertsResponse | null>(null);
+  const [alertLiveMap, setAlertLiveMap] = useState<AlertLiveMap>({});
+  const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
+  const [newAlertCount, setNewAlertCount] = useState(0);
+  const [updatedAlertCount, setUpdatedAlertCount] = useState(0);
   const [loadingAlerts, setLoadingAlerts] = useState(true);
   const [weather, setWeather] = useState<WeatherResponse | null>(null);
   const [loadingWeather, setLoadingWeather] = useState(false);
@@ -215,6 +245,9 @@ export default function LiveWeatherAlertsHomePage() {
   const [activeTab, setActiveTab] = useState<"home" | "forecast" | "radar" | "alerts" | "more">("home");
   const [selectedAlert, setSelectedAlert] = useState<AlertItem | null>(null);
   const [showRadarModal, setShowRadarModal] = useState(false);
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushPrefs, setPushPrefs] = useState<PushPreferences | null>(null);
 
   useEffect(() => {
     const savedTab = localStorage.getItem("ACTIVE_TAB") as
@@ -250,6 +283,36 @@ export default function LiveWeatherAlertsHomePage() {
       setShowLocationPrompt(true);
     }
   }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function run() {
+      try {
+        const status = await getPushStatus();
+        if (!active) return;
+
+        setPushEnabled(status.enabled);
+
+        if (status.prefs) {
+          setPushPrefs(status.prefs);
+        } else if (location?.stateCode) {
+          setPushPrefs(buildDefaultPushPreferences(location.stateCode));
+        }
+      } catch {
+        if (!active) return;
+        setPushEnabled(false);
+        if (location?.stateCode) {
+          setPushPrefs(buildDefaultPushPreferences(location.stateCode));
+        }
+      }
+    }
+
+    run();
+    return () => {
+      active = false;
+    };
+  }, [location?.stateCode]);
 
   useEffect(() => {
     let active = true;
@@ -306,10 +369,47 @@ export default function LiveWeatherAlertsHomePage() {
     };
   }, [location?.lat, location?.lon]);
 
+  function didAlertChange(prev: AlertItem | undefined, next: AlertItem) {
+    if (!prev) return "new" as const;
+
+    if (
+      prev.updated !== next.updated ||
+      prev.expires !== next.expires ||
+      prev.headline !== next.headline ||
+      prev.description !== next.description ||
+      prev.instruction !== next.instruction
+    ) {
+      return "updated" as const;
+    }
+
+    return null;
+  }
+
+  function buildAlertMap(alerts: AlertItem[]) {
+    return Object.fromEntries(alerts.map((alert) => [alert.id, alert]));
+  }
+
+  function formatLiveStatusTime(ts?: number | null) {
+    if (!ts) return "—";
+    const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+
+    if (diffSec < 10) return "just now";
+    if (diffSec < 60) return `${diffSec}s ago`;
+
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+
+    const diffHr = Math.floor(diffMin / 60);
+    return `${diffHr}h ago`;
+  }
+
   useEffect(() => {
     let active = true;
-    async function run() {
-      setLoadingAlerts(true);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function run(showLoader = false) {
+      if (showLoader) setLoadingAlerts(true);
+
       try {
         const res = await fetch(`${API_BASE}/api/alerts`, { cache: "no-store" });
         const data = (await safeJson(res)) as AlertsResponse & { error?: string };
@@ -318,25 +418,84 @@ export default function LiveWeatherAlertsHomePage() {
           throw new Error(data?.error || "Unable to load alerts.");
         }
 
-        if (active) {
-          const filtered = location?.stateCode
-            ? data.alerts.filter((a) => a.stateCode === location.stateCode)
-            : data.alerts;
-          setAlertsResp({ ...data, alerts: filtered });
-        }
+        if (!active) return;
+
+        const filtered = location?.stateCode
+          ? data.alerts.filter((a) => a.stateCode === location.stateCode)
+          : data.alerts;
+
+        setAlertsResp((prev) => {
+          const prevAlerts = prev?.alerts || [];
+          const prevMap = buildAlertMap(prevAlerts);
+
+          const liveChanges: AlertLiveMap = {};
+          let newCount = 0;
+          let updatedCount = 0;
+
+          for (const alert of filtered) {
+            const changeType = didAlertChange(prevMap[alert.id], alert);
+
+            if (changeType) {
+              liveChanges[alert.id] = {
+                changeType,
+                detectedAt: Date.now(),
+              };
+
+              if (changeType === "new") newCount += 1;
+              if (changeType === "updated") updatedCount += 1;
+            }
+          }
+
+          setAlertLiveMap((current) => ({
+            ...current,
+            ...liveChanges,
+          }));
+          setNewAlertCount(newCount);
+          setUpdatedAlertCount(updatedCount);
+          setLastCheckedAt(Date.now());
+
+          return { ...data, alerts: filtered };
+        });
       } catch {
-        if (active) {
-          setAlertsResp({ alerts: [], lastPoll: null, syncError: "Unable to load alerts." });
-        }
+        if (!active) return;
+        setAlertsResp({ alerts: [], lastPoll: null, syncError: "Unable to load alerts." });
+        setLastCheckedAt(Date.now());
       } finally {
-        if (active) setLoadingAlerts(false);
+        if (!active) return;
+        setLoadingAlerts(false);
+
+        timer = setTimeout(() => {
+          run(false);
+        }, 60000);
       }
     }
-    run();
+
+    run(true);
+
     return () => {
       active = false;
+      if (timer) clearTimeout(timer);
     };
   }, [location?.stateCode]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setAlertLiveMap((current) => {
+        const next: AlertLiveMap = {};
+        const now = Date.now();
+
+        for (const [id, meta] of Object.entries(current)) {
+          if (now - meta.detectedAt < 10 * 60 * 1000) {
+            next[id] = meta;
+          }
+        }
+
+        return next;
+      });
+    }, 30000);
+
+    return () => clearInterval(timer);
+  }, []);
 
   const sortedAlerts = useMemo(() => sortAlerts(alertsResp?.alerts || []), [alertsResp]);
 
@@ -442,11 +601,47 @@ export default function LiveWeatherAlertsHomePage() {
       return;
     }
 
+    const prefs =
+      pushPrefs && pushPrefs.stateCode === location.stateCode
+        ? pushPrefs
+        : buildDefaultPushPreferences(location.stateCode);
+
+    setPushBusy(true);
     try {
-      await subscribeToPush(location.stateCode);
-      alert("Notifications enabled!");
+      await subscribeToPush(prefs);
+      setPushEnabled(true);
+      setPushPrefs(prefs);
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to enable alerts");
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function handleDisableNotifications() {
+    setPushBusy(true);
+    try {
+      await unsubscribeFromPush();
+      setPushEnabled(false);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to disable alerts");
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function handleSavePushPreferences(next: PushPreferences) {
+    setPushPrefs(next);
+
+    if (!pushEnabled) return;
+
+    setPushBusy(true);
+    try {
+      await updatePushPreferences(next);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to save preferences");
+    } finally {
+      setPushBusy(false);
     }
   }
 
@@ -526,12 +721,43 @@ export default function LiveWeatherAlertsHomePage() {
         </div>
 
         {alertState === "ACTIVE_ALERTS" ? (
-          <div id="alerts-section">
-            <AlertHeadlineList
-              alerts={filteredAlerts}
-              onSelectAlert={(alert) => setSelectedAlert(alert)}
-            />
-          </div>
+          <>
+            <div id="alerts-section">
+              <AlertHeadlineList
+                alerts={filteredAlerts}
+                onSelectAlert={(alert) => setSelectedAlert(alert)}
+              />
+            </div>
+            <Card className="rounded-[24px] border border-white/10 bg-slate-950/70 text-white shadow-xl">
+              <CardContent className="p-4">
+                <div className="text-sm font-black uppercase tracking-wide">
+                  {pushEnabled ? "Alert updates enabled" : "Stay notified"}
+                </div>
+                <div className="mt-2 text-sm text-slate-300">
+                  {pushEnabled
+                    ? "You’ll receive notification updates for new alert activity in your selected area."
+                    : "Turn on notifications to get updates if conditions worsen."}
+                </div>
+                {!pushEnabled ? (
+                  <Button
+                    onClick={handleEnableNotifications}
+                    disabled={pushBusy}
+                    className="mt-4 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
+                  >
+                    {pushBusy ? "Enabling..." : "Stay notified for updates"}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => setActiveTab("more")}
+                    variant="secondary"
+                    className="mt-4 h-11 w-full rounded-2xl font-bold"
+                  >
+                    Manage Alert Settings
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          </>
         ) : (
           <Card className="rounded-[30px] border border-sky-300/15 bg-gradient-to-br from-sky-900/80 to-blue-950 text-white shadow-xl">
             <CardContent className="p-5">
@@ -541,12 +767,23 @@ export default function LiveWeatherAlertsHomePage() {
                 <div>• Check radar again before evening plans</div>
                 <div>• Enable alerts for faster warning coverage</div>
               </div>
-              <Button
-                onClick={handleEnableNotifications}
-                className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
-              >
-                Get notified when conditions change
-              </Button>
+              {pushEnabled ? (
+                <Button
+                  onClick={() => setActiveTab("more")}
+                  variant="secondary"
+                  className="mt-6 h-11 w-full rounded-2xl font-bold"
+                >
+                  Notifications Enabled
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleEnableNotifications}
+                  disabled={pushBusy}
+                  className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
+                >
+                  {pushBusy ? "Enabling..." : "Get notified when conditions change"}
+                </Button>
+              )}
             </CardContent>
           </Card>
         )}
@@ -651,21 +888,44 @@ export default function LiveWeatherAlertsHomePage() {
 
   function renderRadarTab() {
     return (
-      <div className="space-y-4">
-        <RadarPreviewCard
-          alertState={alertState}
-          radar={weather?.radar || null}
-          onViewRadar={() => setShowRadarModal(true)}
-        />
+      <div className="space-y-5">
+        <Card className="overflow-hidden rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+          <CardContent className="p-5">
+            <div className="mb-4 flex items-center gap-2 text-xl font-black uppercase tracking-wide">
+              <Radar className="h-5 w-5 text-red-400" />
+              Live Radar
+            </div>
 
-        <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+            <button
+              type="button"
+              onClick={() => setShowRadarModal(true)}
+              className="flex w-full items-center justify-between rounded-[22px] border border-white/10 bg-white/5 px-4 py-4 text-left transition hover:border-sky-400/40 hover:bg-white/10 active:scale-[0.99]"
+            >
+              <div>
+                <div className="text-lg font-black text-white">Open Full Radar</div>
+                <div className="mt-1 text-sm text-slate-300">
+                  Interactive map with radar loop for {location?.label || "your area"}
+                </div>
+              </div>
+
+              <div className="rounded-full bg-blue-600 px-4 py-2 text-sm font-bold text-white">
+                Open
+              </div>
+            </button>
+          </CardContent>
+        </Card>
+
+        <Card className="overflow-hidden rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
           <CardContent className="p-5">
             <div className="text-xl font-black uppercase tracking-wide">Radar Details</div>
-            <div className="mt-4 text-sm text-slate-300">
-              {weather?.radar?.summary || "Live radar view for your area."}
-            </div>
-            <div className="mt-3 text-sm text-slate-400">
-              Updated {formatRelative(weather?.radar?.updated || weather?.updated)}
+            <div className="mt-4 space-y-2 text-base text-slate-200">
+              <div>{weather?.radar?.summary || "Live radar available"}</div>
+              <div className="text-sm text-slate-400">
+                Updated {formatRelative(weather?.radar?.updated)}
+              </div>
+              {weather?.radar?.station ? (
+                <div className="text-sm text-slate-400">Station: {weather.radar.station}</div>
+              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -673,38 +933,510 @@ export default function LiveWeatherAlertsHomePage() {
     );
   }
 
+  function formatIssuedTime(value?: string) {
+    if (!value) return "—";
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return value;
+
+    return d.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+
+  function getSeverityBucket(severity?: string) {
+    const value = String(severity || "").toLowerCase();
+
+    if (value === "extreme") return "Extreme";
+    if (value === "severe") return "Severe";
+    if (value === "moderate") return "Moderate";
+    if (value === "minor") return "Minor";
+    return "Other";
+  }
+
+  function getSeverityStyles(severity?: string) {
+    const value = String(severity || "").toLowerCase();
+
+    if (value === "extreme") {
+      return {
+        sectionBadge: "bg-red-600 text-white border-red-300/30",
+        card: "from-red-800 to-red-700 border-red-400/30",
+        pill: "bg-red-950 text-white border-red-300/30",
+      };
+    }
+
+    if (value === "severe") {
+      return {
+        sectionBadge: "bg-red-500/15 text-red-200 border-red-400/20",
+        card: "from-red-700 to-red-600 border-red-500/20",
+        pill: "bg-red-950/60 text-red-100 border-red-300/20",
+      };
+    }
+
+    if (value === "moderate") {
+      return {
+        sectionBadge: "bg-amber-500/15 text-amber-200 border-amber-400/20",
+        card: "from-amber-600 to-orange-600 border-amber-400/20",
+        pill: "bg-amber-950/50 text-amber-100 border-amber-300/20",
+      };
+    }
+
+    if (value === "minor") {
+      return {
+        sectionBadge: "bg-yellow-500/15 text-yellow-100 border-yellow-400/20",
+        card: "from-yellow-600 to-yellow-500 border-yellow-300/20",
+        pill: "bg-yellow-950/50 text-yellow-50 border-yellow-200/20",
+      };
+    }
+
+    return {
+      sectionBadge: "bg-slate-700/40 text-slate-200 border-white/10",
+      card: "from-slate-700 to-slate-600 border-white/10",
+      pill: "bg-slate-900/50 text-slate-100 border-white/10",
+    };
+  }
+
+  function getAlertTypeMeta(event?: string) {
+    const text = String(event || "").toLowerCase();
+
+    if (text.includes("fog")) {
+      return {
+        label: "Fog",
+        icon: CloudFog,
+      };
+    }
+
+    if (
+      text.includes("flood") ||
+      text.includes("high surf") ||
+      text.includes("coastal")
+    ) {
+      return {
+        label: "Flood",
+        icon: Waves,
+      };
+    }
+
+    if (
+      text.includes("storm") ||
+      text.includes("thunderstorm") ||
+      text.includes("tornado") ||
+      text.includes("rain")
+    ) {
+      return {
+        label: "Storm",
+        icon: CloudRain,
+      };
+    }
+
+    return {
+      label: "Alert",
+      icon: TriangleAlert,
+    };
+  }
+
+  function groupAlertsBySeverity(alerts: AlertItem[]) {
+    const groups: Record<string, AlertItem[]> = {
+      Extreme: [],
+      Severe: [],
+      Moderate: [],
+      Minor: [],
+      Other: [],
+    };
+
+    alerts.forEach((alert) => {
+      groups[getSeverityBucket(alert.severity)].push(alert);
+    });
+
+    return [
+      { key: "Extreme", items: groups.Extreme },
+      { key: "Severe", items: groups.Severe },
+      { key: "Moderate", items: groups.Moderate },
+      { key: "Minor", items: groups.Minor },
+      { key: "Other", items: groups.Other },
+    ].filter((group) => group.items.length > 0);
+  }
+
+  function formatTimeLeft(expires?: string) {
+    if (!expires) return "";
+    const end = new Date(expires).getTime();
+    if (Number.isNaN(end)) return "";
+    const now = Date.now();
+    const diff = end - now;
+    if (diff <= 0) return "Now";
+
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+
+    if (days > 0) return `${days}d ${hours % 24}h left`;
+    if (hours > 0) return `${hours}h ${minutes % 60}m left`;
+    return `${minutes}m left`;
+  }
+
   function renderAlertsTab() {
+    const groupedAlerts = groupAlertsBySeverity(filteredAlerts);
+
     return (
       <div className="space-y-4">
         {filteredAlerts.length > 0 ? (
-          filteredAlerts.map((alert) => (
-            <button
-              key={alert.id}
-              type="button"
-              onClick={() => setSelectedAlert(alert)}
-              className="w-full rounded-[22px] border border-red-500/20 bg-gradient-to-r from-red-700 to-red-600 px-4 py-4 text-left text-white shadow-lg"
-            >
-              <div className="text-xs font-black uppercase tracking-wide text-red-50">
-                {alert.event}
-              </div>
-              <div className="mt-2 text-xl font-black leading-tight">
-                {heroAreaLabel(alert)}
-              </div>
-              <div className="mt-2 text-sm text-red-50/90">
-                Until {formatTime(alert.expires)}
-              </div>
-            </button>
-          ))
+          <>
+            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+              <CardContent className="p-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-xl font-black uppercase tracking-wide">
+                      Active Alerts
+                      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-black text-emerald-200">
+                        <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                        Live
+                      </span>
+                    </div>
+                    <div className="mt-2 text-sm text-slate-300">
+                      {filteredAlerts.length} active {filteredAlerts.length === 1 ? "alert" : "alerts"} for {locationLabel}
+                    </div>
+                    <div className="mt-2 text-xs text-slate-400">
+                      Last checked {formatLiveStatusTime(lastCheckedAt)}
+                    </div>
+                    {(newAlertCount > 0 || updatedAlertCount > 0) ? (
+                      <div className="mt-2 text-xs font-bold text-sky-200">
+                        {newAlertCount > 0 ? `${newAlertCount} new` : ""}
+                        {newAlertCount > 0 && updatedAlertCount > 0 ? " • " : ""}
+                        {updatedAlertCount > 0 ? `${updatedAlertCount} updated` : ""}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-full border border-red-400/20 bg-red-500/15 px-3 py-1 text-sm font-black text-red-100">
+                    {filteredAlerts.length}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {groupedAlerts.map((group, groupIndex) => {
+              const styles = getSeverityStyles(group.key);
+
+              return (
+                <div
+                  key={group.key}
+                  className={groupIndex === 0 ? "space-y-3" : "mt-6 border-t border-white/10 pt-4"}
+                >
+                  <div className="flex items-center justify-between px-1">
+                    <div className="text-sm font-black uppercase tracking-[0.18em] text-slate-300">
+                      {group.key}
+                    </div>
+                    <div
+                      className={cn(
+                        "rounded-full border px-2.5 py-1 text-xs font-black",
+                        styles.sectionBadge
+                      )}
+                    >
+                      {group.items.length}
+                    </div>
+                  </div>
+
+                  {group.items
+                    .slice()
+                    .sort((a, b) => new Date(a.expires).getTime() - new Date(b.expires).getTime())
+                    .map((alert) => {
+                      const typeMeta = getAlertTypeMeta(alert.event);
+                      const Icon = typeMeta.icon;
+                      const cardStyles = getSeverityStyles(alert.severity);
+                      const liveMeta = alertLiveMap[alert.id];
+
+                      return (
+                        <button
+                          key={alert.id}
+                          type="button"
+                          onClick={() => setSelectedAlert(alert)}
+                          className={cn(
+                            "w-full rounded-[22px] border bg-gradient-to-r px-4 py-4 text-left text-white shadow-lg transition-transform hover:scale-[1.01] active:scale-[0.98]",
+                            cardStyles.card
+                          )}
+                        >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <div
+                                className={cn(
+                                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-black uppercase tracking-wide",
+                                  cardStyles.pill
+                                )}
+                              >
+                                <Icon className="h-3.5 w-3.5" />
+                                {typeMeta.label}
+                              </div>
+
+                              <div className="text-[11px] font-black uppercase tracking-wide text-white/90">
+                                {alert.event}
+                              </div>
+
+                              {liveMeta?.changeType === "new" ? (
+                                <div className="rounded-full border border-emerald-300/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-emerald-100 animate-pulse">
+                                  New
+                                </div>
+                              ) : null}
+
+                              {liveMeta?.changeType === "updated" ? (
+                                <div className="rounded-full border border-sky-300/30 bg-sky-500/15 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-sky-100">
+                                  Updated
+                                </div>
+                              ) : null}
+                            </div>
+
+                            <div className="mt-3 text-xl font-black leading-tight">
+                              {heroAreaLabel(alert)}
+                            </div>
+
+                            <div className="mt-3 grid grid-cols-2 gap-2 text-sm text-white/90">
+                              <div>
+                                <span className="font-black text-white">Issued:</span>{" "}
+                                {formatIssuedTime(alert.sent || alert.effective)}
+                              </div>
+                              <div>
+                                <span className="font-black text-white">Until:</span>{" "}
+                                {formatTime(alert.expires)}
+                              </div>
+                            </div>
+
+                            {alert.headline ? (
+                              <div className="mt-3 line-clamp-2 text-sm text-white/90 font-medium">
+                                {alert.headline}
+                              </div>
+                            ) : null}
+                            <div className="mt-1 text-xs text-white/70">
+                              {formatTimeLeft(alert.expires)}
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </>
         ) : (
           <Card className="rounded-[30px] border border-sky-300/15 bg-gradient-to-br from-sky-900/80 to-blue-950 text-white shadow-xl">
             <CardContent className="p-5">
-              <div className="text-xl font-black uppercase tracking-wide">No Active Alerts</div>
+              <div className="text-xl font-black uppercase tracking-wide">All Clear</div>
               <div className="mt-3 text-sm text-sky-100">
-                There are no active alerts for this location right now.
+                No active weather alerts for your area.
               </div>
             </CardContent>
           </Card>
         )}
+      </div>
+    );
+  }
+
+  function renderMoreTab() {
+    const prefs =
+      pushPrefs ||
+      (location?.stateCode ? buildDefaultPushPreferences(location.stateCode) : null);
+
+    return (
+      <div className="space-y-4">
+
+        {/* HEADER */}
+        <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+          <CardContent className="p-5">
+            <div className="text-xl font-black uppercase tracking-wide">
+              Alerts & Notifications
+            </div>
+            <div className="mt-2 text-sm text-slate-400">
+              Manage weather alerts for your area
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* STATUS CARD */}
+        <Card className="rounded-[30px] border border-blue-500/20 bg-gradient-to-br from-blue-600 to-blue-800 text-white shadow-xl">
+          <CardContent className="p-5">
+            <div className="text-lg font-black">
+              {pushEnabled ? 'Notifications Enabled' : 'Weather Alerts Are Off'}
+            </div>
+            <div className="mt-2 text-sm text-blue-100">
+              {pushEnabled
+                ? 'You’ll receive weather alerts for your selected area.'
+                : 'Turn on notifications to get important weather alerts faster.'}
+            </div>
+            <div className="mt-4 text-sm text-blue-50">
+              Current area: {location?.label || 'Not set'}
+            </div>
+
+            {pushEnabled ? (
+              <Button
+                onClick={handleDisableNotifications}
+                disabled={pushBusy}
+                className="mt-4 h-11 w-full rounded-2xl bg-white font-bold text-blue-700 hover:bg-blue-100"
+              >
+                {pushBusy ? 'Disabling...' : 'Disable Notifications'}
+              </Button>
+            ) : (
+              <Button
+                onClick={handleEnableNotifications}
+                disabled={pushBusy}
+                className="mt-4 h-11 w-full rounded-2xl bg-white font-bold text-blue-700 hover:bg-blue-100"
+              >
+                {pushBusy ? 'Enabling...' : 'Enable Notifications'}
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+
+        {prefs ? (
+          <>
+            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+              <CardContent className="space-y-4 p-5">
+                <div className="text-lg font-black">Alert Types</div>
+
+                {([
+                  ['warnings', 'Warnings'],
+                  ['watches', 'Watches'],
+                  ['advisories', 'Advisories'],
+                  ['statements', 'Statement Updates'],
+                ] as const).map(([key, label]) => (
+                  <label key={key} className="flex items-center justify-between text-sm">
+                    <span>{label}</span>
+                    <input
+                      type="checkbox"
+                      checked={prefs.alertTypes[key]}
+                      onChange={(e) =>
+                        handleSavePushPreferences({
+                          ...prefs,
+                          alertTypes: {
+                            ...prefs.alertTypes,
+                            [key]: e.target.checked,
+                          },
+                        })
+                      }
+                    />
+                  </label>
+                ))}
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+              <CardContent className="space-y-4 p-5">
+                <div className="text-lg font-black">Delivery Scope</div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    variant={prefs.deliveryScope === 'state' ? 'default' : 'secondary'}
+                    onClick={() =>
+                      handleSavePushPreferences({
+                        ...prefs,
+                        deliveryScope: 'state',
+                      })
+                    }
+                    className="h-11 rounded-2xl"
+                  >
+                    Statewide
+                  </Button>
+                  <Button
+                    variant={prefs.deliveryScope === 'county' ? 'default' : 'secondary'}
+                    onClick={() =>
+                      handleSavePushPreferences({
+                        ...prefs,
+                        deliveryScope: 'county',
+                      })
+                    }
+                    className="h-11 rounded-2xl"
+                  >
+                    County
+                  </Button>
+                </div>
+
+                <div className="text-xs text-slate-400">
+                  County mode is wired in the preference model now. Full county-targeted
+                  delivery needs county data added to your location API.
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+              <CardContent className="space-y-4 p-5">
+                <div className="text-lg font-black">Quiet Hours</div>
+
+                <label className="flex items-center justify-between text-sm">
+                  <span>Enable Quiet Hours</span>
+                  <input
+                    type="checkbox"
+                    checked={prefs.quietHours.enabled}
+                    onChange={(e) =>
+                      handleSavePushPreferences({
+                        ...prefs,
+                        quietHours: {
+                          ...prefs.quietHours,
+                          enabled: e.target.checked,
+                        },
+                      })
+                    }
+                  />
+                </label>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="text-sm">
+                    <div className="mb-1 text-slate-400">Start</div>
+                    <input
+                      type="time"
+                      value={prefs.quietHours.start}
+                      onChange={(e) =>
+                        handleSavePushPreferences({
+                          ...prefs,
+                          quietHours: {
+                            ...prefs.quietHours,
+                            start: e.target.value,
+                          },
+                        })
+                      }
+                      className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white"
+                    />
+                  </label>
+                  <label className="text-sm">
+                    <div className="mb-1 text-slate-400">End</div>
+                    <input
+                      type="time"
+                      value={prefs.quietHours.end}
+                      onChange={(e) =>
+                        handleSavePushPreferences({
+                          ...prefs,
+                          quietHours: {
+                            ...prefs.quietHours,
+                            end: e.target.value,
+                          },
+                        })
+                      }
+                      className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white"
+                    />
+                  </label>
+                </div>
+
+                <div className="text-xs text-slate-400">
+                  Tornado and severe warning-level alerts should still break through.
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+              <CardContent className="p-5">
+                <div className="text-lg font-black">Location</div>
+                <div className="mt-2 text-sm text-slate-400">{location?.label || 'Not set'}</div>
+
+                <Button
+                  onClick={() => setShowLocationPrompt(true)}
+                  className="mt-4 h-11 w-full rounded-2xl"
+                >
+                  Change Location
+                </Button>
+              </CardContent>
+            </Card>
+          </>
+        ) : null}
       </div>
     );
   }
@@ -754,6 +1486,7 @@ export default function LiveWeatherAlertsHomePage() {
           {activeTab === "forecast" && renderForecastTab()}
           {activeTab === "radar" && renderRadarTab()}
           {activeTab === "alerts" && renderAlertsTab()}
+          {activeTab === "more" && renderMoreTab()}
 
           {alertsResp?.syncError ? (
             <div className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
@@ -772,11 +1505,6 @@ export default function LiveWeatherAlertsHomePage() {
         alertCount={filteredAlerts.length}
         activeTab={activeTab}
         onChangeTab={(tab) => {
-          if (tab === "more") {
-            setShowLocationPrompt(true);
-            return;
-          }
-
           setActiveTab(tab);
           window.scrollTo({ top: 0, behavior: "smooth" });
         }}
