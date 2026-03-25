@@ -1466,6 +1466,212 @@ export default function LiveWeatherAlertsHomePage() {
     }
   }
 
+  function renderHomeTab() {
+    return (
+      <div className="space-y-4">
+        {alertState === "ACTIVE_ALERTS" && heroAlert ? (
+          <>
+            <BigAlertHero
+              alert={heroAlert}
+              onPrimaryAction={(alert) => openExternal(alert.nwsUrl)}
+              onViewDetails={(alert) => setSelectedAlert(alert)}
+            />
+
+            {secondaryAlerts.length === 1 ? (
+              <div className="space-y-2">
+                <div className="px-1 text-xs font-black uppercase tracking-[0.18em] text-slate-300">
+                  Related Alert
+                </div>
+                <SingleSecondaryAlertCard
+                  alert={secondaryAlerts[0]}
+                  onClick={(alert) => setSelectedAlert(alert)}
+                />
+              </div>
+            ) : secondaryAlerts.length > 1 ? (
+              <div className="no-scrollbar flex gap-3 overflow-x-auto pb-1">
+                {secondaryAlerts.slice(0, 3).map((alert) => (
+                  <SmallAlertCard
+                    key={alert.id}
+                    alert={alert}
+                    onClick={(alert) => setSelectedAlert(alert)}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <AllClearBanner
+            locationLabel={locationLabel}
+            lastPoll={alertsResp?.lastPoll ?? null}
+          />
+        )}
+
+        <CurrentConditionsCard
+          current={currentConditions}
+          locationLabel={locationLabel}
+        />
+
+        <div id="forecast-section">
+          <HourlyStrip
+            points={
+              weather?.hourly?.length
+                ? weather.hourly.map((p, i) => ({
+                    label:
+                      i === 0
+                        ? "Now"
+                        : new Date(p.startTime || Date.now()).toLocaleTimeString([], {
+                            hour: "numeric",
+                          }),
+                    temp: p.temperatureF ?? 0,
+                    icon: mapIcon(p.shortForecast),
+                    precip: p.precipitationChance ?? 0,
+                    startTime: p.startTime,
+                  }))
+                : fallbackHourly
+            }
+            onView10Day={() => setActiveTab("forecast")}
+          />
+        </div>
+
+        <div id="radar-section">
+          <RadarPreviewCard
+            alertState={alertState}
+            radar={weather?.radar || null}
+            onViewRadar={() => setActiveTab("radar")}
+          />
+        </div>
+
+        {alertState === "ACTIVE_ALERTS" ? (
+          <div id="alerts-section">
+            <AlertHeadlineList
+              alerts={filteredAlerts}
+              onSelectAlert={(alert) => setSelectedAlert(alert)}
+            />
+          </div>
+        ) : (
+          <Card className="rounded-[30px] border border-sky-300/15 bg-gradient-to-br from-sky-900/80 to-blue-950 text-white shadow-xl">
+            <CardContent className="p-5">
+              <div className="text-xl font-black uppercase tracking-wide">What to Watch</div>
+              <div className="mt-4 space-y-3 text-sm font-medium leading-6 text-sky-100">
+                <div>• Quiet conditions nearby right now</div>
+                <div>• Check radar again before evening plans</div>
+                <div>• Enable alerts for faster warning coverage</div>
+              </div>
+              <Button className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500">
+                Get notified when conditions change
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    );
+  }
+
+  function renderForecastTab() {
+    return (
+      <div className="space-y-4">
+        <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div className="text-xl font-black uppercase tracking-wide">10-Day Forecast</div>
+              <div className="text-sm text-slate-400">{locationLabel}</div>
+            </div>
+
+            <div className="mt-5 space-y-3">
+              {(weather?.daily || []).slice(0, 10).map((day: any, idx: number) => (
+                <div
+                  key={`${day?.name || "day"}-${idx}`}
+                  className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-4"
+                >
+                  <div>
+                    <div className="text-sm font-bold text-white">
+                      {day?.name || `Day ${idx + 1}`}
+                    </div>
+                    <div className="mt-1 text-sm text-slate-300">
+                      {day?.shortForecast || day?.detailedForecast || "Forecast unavailable"}
+                    </div>
+                  </div>
+
+                  <div className="ml-4 text-right">
+                    <div className="text-2xl font-black text-white">
+                      {day?.temperatureF ?? day?.temperature ?? "—"}°
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {(!weather?.daily || weather.daily.length === 0) && (
+                <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm text-slate-300">
+                  Forecast data is unavailable right now.
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  function renderRadarTab() {
+    return (
+      <div className="space-y-4">
+        <RadarPreviewCard
+          alertState={alertState}
+          radar={weather?.radar || null}
+          onViewRadar={() => {}}
+        />
+
+        <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+          <CardContent className="p-5">
+            <div className="text-xl font-black uppercase tracking-wide">Radar Details</div>
+            <div className="mt-4 text-sm text-slate-300">
+              {weather?.radar?.summary || "Live radar view for your area."}
+            </div>
+            <div className="mt-3 text-sm text-slate-400">
+              Updated {formatRelative(weather?.radar?.updated || weather?.updated)}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  function renderAlertsTab() {
+    return (
+      <div className="space-y-4">
+        {filteredAlerts.length > 0 ? (
+          filteredAlerts.map((alert) => (
+            <button
+              key={alert.id}
+              type="button"
+              onClick={() => setSelectedAlert(alert)}
+              className="w-full rounded-[22px] border border-red-500/20 bg-gradient-to-r from-red-700 to-red-600 px-4 py-4 text-left text-white shadow-lg"
+            >
+              <div className="text-xs font-black uppercase tracking-wide text-red-50">
+                {alert.event}
+              </div>
+              <div className="mt-2 text-xl font-black leading-tight">
+                {heroAreaLabel(alert)}
+              </div>
+              <div className="mt-2 text-sm text-red-50/90">
+                Until {formatTime(alert.expires)}
+              </div>
+            </button>
+          ))
+        ) : (
+          <Card className="rounded-[30px] border border-sky-300/15 bg-gradient-to-br from-sky-900/80 to-blue-950 text-white shadow-xl">
+            <CardContent className="p-5">
+              <div className="text-xl font-black uppercase tracking-wide">No Active Alerts</div>
+              <div className="mt-3 text-sm text-sky-100">
+                There are no active alerts for this location right now.
+              </div>
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[linear-gradient(180deg,#081122_0%,#0b1730_30%,#07101d_100%)] text-white">
       <div className="mx-auto max-w-md px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom))] pt-4">
@@ -1501,110 +1707,10 @@ export default function LiveWeatherAlertsHomePage() {
         </motion.header>
 
         <div className="space-y-4">
-          {alertState === "ACTIVE_ALERTS" && heroAlert ? (
-            <>
-              <BigAlertHero
-                alert={heroAlert}
-                onPrimaryAction={(alert) => openExternal(alert.nwsUrl)}
-                onViewDetails={(alert) => setSelectedAlert(alert)}
-              />
-
-              {secondaryAlerts.length === 1 ? (
-                <div className="space-y-2">
-                  <div className="px-1 text-xs font-black uppercase tracking-[0.18em] text-slate-300">
-                    Related Alert
-                  </div>
-                  <SingleSecondaryAlertCard
-                    alert={secondaryAlerts[0]}
-                    onClick={(alert) => setSelectedAlert(alert)}
-                  />
-                </div>
-              ) : secondaryAlerts.length > 1 ? (
-                <div className="no-scrollbar flex gap-3 overflow-x-auto pb-1">
-                  {secondaryAlerts.slice(0, 3).map((alert) => (
-                    <SmallAlertCard
-                      key={alert.id}
-                      alert={alert}
-                      onClick={(alert) => setSelectedAlert(alert)}
-                    />
-                  ))}
-                </div>
-              ) : null}
-            </>          ) : (
-            <AllClearBanner locationLabel={locationLabel} lastPoll={alertsResp?.lastPoll ?? null} />
-          )}
-
-          <CurrentConditionsCard
-            current={currentConditions}
-            locationLabel={locationLabel}
-          />
-          <div className="flex justify-end">
-            <Button
-              variant="outline"
-              className="border-white/15 bg-transparent text-white hover:bg-white/5"
-              onClick={() => {
-                localStorage.removeItem(STORAGE_KEY);
-                setLocation(null);
-                setWeather(null);
-                setAlertsResp(null);
-                setPromptDefaultToZip(false);
-                setShowLocationPrompt(true);
-              }}
-            >
-              Reset Location
-            </Button>
-          </div>
-          <div id="forecast-section">
-            <HourlyStrip
-            points={
-              weather?.hourly?.length
-                ? weather.hourly.map((p, i) => ({
-                    label:
-                      i === 0
-                        ? "Now"
-                        : new Date(p.startTime || Date.now()).toLocaleTimeString([], {
-                            hour: "numeric",
-                          }),
-                    temp: p.temperatureF ?? 0,
-                    icon: mapIcon(p.shortForecast),
-                    precip: p.precipitationChance ?? 0,
-                    startTime: p.startTime,
-                  }))
-                : fallbackHourly
-            }
-            onView10Day={() => setActiveTab("forecast")}
-          />
-          </div>
-          <div id="radar-section">
-            <RadarPreviewCard
-              alertState={alertState}
-              radar={weather?.radar || null}
-              onViewRadar={() => setActiveTab("radar")}
-            />
-          </div>
-
-          {alertState === "ACTIVE_ALERTS" ? (
-            <div id="alerts-section">
-              <AlertHeadlineList
-                alerts={filteredAlerts}
-                onSelectAlert={(alert) => setSelectedAlert(alert)}
-              />
-            </div>
-          ) : (
-<Card className="rounded-[30px] border border-sky-300/15 bg-gradient-to-br from-sky-900/80 to-blue-950 text-white shadow-xl">
-  <CardContent className="p-5">
-    <div className="text-xl font-black uppercase tracking-wide">What to Watch</div>
-    <div className="mt-4 space-y-3 text-sm font-medium leading-6 text-sky-100">
-      <div>• Quiet conditions nearby right now</div>
-      <div>• Check radar again before evening plans</div>
-      <div>• Enable alerts for faster warning coverage</div>
-    </div>
-    <Button className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500">
-      Get notified when conditions change
-    </Button>
-  </CardContent>
-</Card>
-          )}
+          {activeTab === "home" && renderHomeTab()}
+          {activeTab === "forecast" && renderForecastTab()}
+          {activeTab === "radar" && renderRadarTab()}
+          {activeTab === "alerts" && renderAlertsTab()}
 
           {alertsResp?.syncError ? (
             <div className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
@@ -1618,12 +1724,13 @@ export default function LiveWeatherAlertsHomePage() {
         alertCount={filteredAlerts.length}
         activeTab={activeTab}
         onChangeTab={(tab) => {
+          if (tab === "more") {
+            setShowLocationPrompt(true);
+            return;
+          }
+
           setActiveTab(tab);
-          if (tab === "home") window.scrollTo({ top: 0, behavior: "smooth" });
-          if (tab === "forecast") scrollToSection("forecast-section");
-          if (tab === "radar") scrollToSection("radar-section");
-          if (tab === "alerts") scrollToSection("alerts-section");
-          if (tab === "more") setShowLocationPrompt(true);
+          window.scrollTo({ top: 0, behavior: "smooth" });
         }}
       />
 
