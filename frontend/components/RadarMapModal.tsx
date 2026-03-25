@@ -46,6 +46,7 @@ export default function RadarMapModal({
 }) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<maplibregl.Map | null>(null);
+  const refreshTimerRef = useRef<number | null>(null);
 
   // NOAA/NWS MRMS radar base reflectivity WMS
   // Official service info says this service has WMS capabilities and updates every 5 minutes.
@@ -112,6 +113,16 @@ export default function RadarMapModal({
       new maplibregl.Marker({ color: "#2563eb" })
         .setLngLat([location.lon, location.lat])
         .addTo(map);
+
+      // Refresh MRMS tiles every 5 minutes for near-real-time radar overlay
+      if (refreshTimerRef.current == null) {
+        refreshTimerRef.current = window.setInterval(() => {
+          const source = map.getSource("mrms-radar") as maplibregl.RasterTileSource | undefined;
+          if (source && "setTiles" in source && typeof source.setTiles === "function") {
+            source.setTiles([`${radarWmsTemplate}&t=${Date.now()}`]);
+          }
+        }, 300000);
+      }
     });
 
     mapInstanceRef.current = map;
@@ -119,6 +130,10 @@ export default function RadarMapModal({
     return () => {
       map.remove();
       mapInstanceRef.current = null;
+      if (refreshTimerRef.current != null) {
+        window.clearInterval(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
     };
   }, [open, location.lat, location.lon, radarWmsTemplate]);
 

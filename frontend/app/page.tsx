@@ -897,7 +897,7 @@ function RadarPreviewCard({
                   alertState === "ACTIVE_ALERTS" ? "bg-green-400" : "bg-blue-400"
                 )}
               />
-              {alertState === "ACTIVE_ALERTS" ? "Storm moving NE" : "Quiet in your area"}
+              {radar?.summary || (alertState === "ACTIVE_ALERTS" ? "Storm moving NE" : "Quiet in your area")}
             </div>
             <div className="mt-3 text-xs font-medium leading-5 text-slate-300">
               Updated {formatRelative(radar?.updated)}
@@ -1807,8 +1807,8 @@ export default function LiveWeatherAlertsHomePage() {
         onClose={() => setShowRadarModal(false)}
         location={
           weather?.location || {
-            lat: 41.8781,
-            lon: -87.6298,
+            lat: 38.0406,
+            lon: -84.5037,
             label: "Your Area",
           }
         }
