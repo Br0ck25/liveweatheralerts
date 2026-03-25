@@ -2051,20 +2051,24 @@ async function handlePublicAlertsPage(env: Env): Promise<Response> {
 	});
 }
 
-function apiCorsHeaders(): Headers {
+function apiCorsHeaders(origin?: string | null): Headers {
+	const allowedOrigin = origin === 'https://liveweatheralerts.com' ? origin : '*';
 	return new Headers({
-		'Access-Control-Allow-Origin': '*',
+		'Access-Control-Allow-Origin': allowedOrigin,
 		'Access-Control-Allow-Methods': 'GET, OPTIONS',
 		'Access-Control-Allow-Headers': 'Content-Type',
+		'Access-Control-Max-Age': '86400',
 		'Vary': 'Origin',
 	});
 }
 
-function pushCorsHeaders(): Headers {
+function pushCorsHeaders(origin?: string | null): Headers {
+	const allowedOrigin = origin === 'https://liveweatheralerts.com' ? origin : '*';
 	return new Headers({
-		'Access-Control-Allow-Origin': '*',
+		'Access-Control-Allow-Origin': allowedOrigin,
 		'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 		'Access-Control-Allow-Headers': 'Content-Type',
+		'Access-Control-Max-Age': '86400',
 		'Vary': 'Origin',
 	});
 }
@@ -3026,19 +3030,19 @@ export default {
 		}
 
 		if (url.pathname === '/api/alerts' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
 		}
 		if (url.pathname === '/api/geocode' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
 		}
 		if (url.pathname === '/api/location' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
 		}
 		if (url.pathname === '/api/weather' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
 		}
 		if (url.pathname === '/api/radar' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders() });
+			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
 		}
 		if (url.pathname.startsWith('/api/push/') && request.method === 'OPTIONS') {
 			return new Response(null, { status: 204, headers: pushCorsHeaders() });

@@ -162,7 +162,7 @@ async function fetchWeather(lat: number, lon: number): Promise<WeatherResponse> 
   const res = await fetch(`${API_BASE}/api/weather?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, {
     cache: "no-store",
   });
-  const data = await res.json();
+  const data = await safeJson(res);
   if (!res.ok) {
     throw new Error(data?.error || "Unable to load weather.");
   }
@@ -1080,6 +1080,17 @@ function openExternal(url?: string | null) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+async function safeJson(res: Response) {
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+
+  if (!contentType.includes("application/json")) {
+    throw new Error(`Expected JSON but received: ${text.slice(0, 120)}`);
+  }
+
+  return JSON.parse(text);
+}
+
 function scrollToSection(id: string) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -1430,14 +1441,19 @@ export default function LiveWeatherAlertsHomePage() {
       setLoadingAlerts(true);
       try {
         const res = await fetch(`${API_BASE}/api/alerts`, { cache: "no-store" });
-        const data: AlertsResponse = await res.json();
+        const data = (await safeJson(res)) as AlertsResponse & { error?: string };
+
+        if (!res.ok) {
+          throw new Error(data?.error || "Unable to load alerts.");
+        }
+
         if (active) {
           const filtered = location?.stateCode
             ? data.alerts.filter((a) => a.stateCode === location.stateCode)
             : data.alerts;
           setAlertsResp({ ...data, alerts: filtered });
         }
-      } catch {
+      } catch (err) {
         if (active) {
           setAlertsResp({ alerts: [], lastPoll: null, syncError: "Unable to load alerts." });
         }
@@ -1526,7 +1542,7 @@ export default function LiveWeatherAlertsHomePage() {
       const res = await fetch(`${API_BASE}/api/location?zip=${encodeURIComponent(zip)}`, {
         cache: "no-store",
       });
-      const data = await res.json();
+      const data = await safeJson(res);
 
       if (!res.ok) {
         throw new Error(data?.error || "Unable to find ZIP code.");
