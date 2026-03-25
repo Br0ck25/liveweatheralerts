@@ -18,6 +18,7 @@ import { motion } from "framer-motion";
 
 import { openExternal } from "@/lib/utils";
 import { fetchWeather, safeJson } from "@/lib/api/client";
+import { subscribeToPush } from "@/lib/push";
 import { formatTime, formatRelative, mapIcon } from "@/lib/weather/formatters";
 import { sortAlerts, getAlertPriority, heroAreaLabel } from "@/lib/alerts/helpers";
 
@@ -416,6 +417,20 @@ export default function LiveWeatherAlertsHomePage() {
     }
   }
 
+  async function handleEnableNotifications() {
+    if (!location?.stateCode) {
+      alert("Set your location first.");
+      return;
+    }
+
+    try {
+      await subscribeToPush(location.stateCode);
+      alert("Notifications enabled!");
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to enable alerts");
+    }
+  }
+
   function renderHomeTab() {
     return (
       <div className="space-y-4">
@@ -507,7 +522,10 @@ export default function LiveWeatherAlertsHomePage() {
                 <div>• Check radar again before evening plans</div>
                 <div>• Enable alerts for faster warning coverage</div>
               </div>
-              <Button className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500">
+              <Button
+                onClick={handleEnableNotifications}
+                className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
+              >
                 Get notified when conditions change
               </Button>
             </CardContent>
