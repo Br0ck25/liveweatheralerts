@@ -897,36 +897,35 @@ function RadarPreviewCard({
                   alertState === "ACTIVE_ALERTS" ? "bg-green-400" : "bg-blue-400"
                 )}
               />
-              {radar?.summary || (alertState === "ACTIVE_ALERTS" ? "Storm moving NE" : "Quiet in your area")}
+              {radar?.summary || "Live radar available"}
             </div>
             <div className="mt-3 text-xs font-medium leading-5 text-slate-300">
               Updated {formatRelative(radar?.updated)}
             </div>
           </div>
 
-<div className="relative overflow-hidden rounded-[22px] border border-white/10 bg-slate-900">
-  {radar?.stillImageUrl ? (
-    <img
-      src={radar.stillImageUrl}
-      alt="Live radar"
-      className="absolute inset-0 h-full w-full object-cover"
-    />
-  ) : (
-    <>
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_60%_25%,rgba(255,196,0,0.35),transparent_18%),linear-gradient(135deg,rgba(34,197,94,0.35),transparent_25%),linear-gradient(160deg,rgba(250,204,21,0.28),transparent_45%),linear-gradient(200deg,rgba(239,68,68,0.4),transparent_62%),linear-gradient(180deg,#162033_0%,#101827_100%)]" />
-      <div className="absolute inset-0 bg-gradient-to-br from-green-500/20 via-yellow-400/20 to-red-500/30 blur-[20px] opacity-40" />
-      <div className="absolute inset-0 opacity-40 [background-image:linear-gradient(rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] [background-size:18px_18px]" />
-    </>
-  )}
-  <div className="relative flex h-full min-h-[96px] items-end justify-end p-3">
-    <Button
-      className="rounded-xl bg-blue-600 px-4 font-bold text-white hover:bg-blue-500"
-      onClick={onViewRadar}
-    >
-      View Radar
-    </Button>
-  </div>
-</div>
+          <div className="relative overflow-hidden rounded-[22px] border border-white/10 bg-slate-900">
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_60%_25%,rgba(255,196,0,0.30),transparent_18%),linear-gradient(135deg,rgba(34,197,94,0.28),transparent_25%),linear-gradient(160deg,rgba(250,204,21,0.24),transparent_45%),linear-gradient(200deg,rgba(239,68,68,0.30),transparent_62%),linear-gradient(180deg,#162033_0%,#0b1220_100%)]" />
+            <div className="relative flex h-full min-h-[130px] flex-col justify-between p-4">
+              <div>
+                <div className="text-xs font-black uppercase tracking-[0.18em] text-sky-200/80">
+                  Interactive Radar
+                </div>
+                <div className="mt-2 text-lg font-black leading-tight text-white">
+                  {radar?.summary || "Live radar available"}
+                </div>
+              </div>
+
+              <div className="mt-4 flex items-center justify-between">
+                <div className="text-xs font-medium text-slate-300">
+                  Tap to open full-screen radar
+                </div>
+                <div className="rounded-full bg-white/10 px-3 py-1 text-xs font-bold text-white">
+                  LIVE
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </CardContent>
     </Card>

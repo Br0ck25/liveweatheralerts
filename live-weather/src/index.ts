@@ -2595,14 +2595,10 @@ function buildCurrentConditions(observationProps: any, firstHourly: any): any {
 	};
 }
 
-function radarImagesForStation(station: string): { loopImageUrl: string | null; stillImageUrl: string | null } {
-	const code = String(station || '').trim().toUpperCase();
-	if (!code) {
-		return { loopImageUrl: null, stillImageUrl: null };
-	}
+function radarImagesForStation(_station: string): { loopImageUrl: string | null; stillImageUrl: string | null } {
 	return {
-		loopImageUrl: `https://radar.weather.gov/ridge/standard/${code}_loop.gif`,
-		stillImageUrl: `https://radar.weather.gov/ridge/standard/${code}_0.gif`,
+		loopImageUrl: null,
+		stillImageUrl: null,
 	};
 }
 

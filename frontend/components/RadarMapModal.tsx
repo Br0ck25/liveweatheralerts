@@ -1,87 +1,62 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef } from "react";
-import maplibregl from "maplibre-gl";
+import { useEffect, useRef } from "react";
+import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { X, Layers, MapPin } from "lucide-react";
+import { X, MapPin } from "lucide-react";
 
-type WeatherLocation = {
-  lat: number;
-  lon: number;
-  city?: string | null;
-  state?: string | null;
-  label: string;
+type RadarModalProps = {
+  open: boolean;
+  onClose: () => void;
+  location: {
+    lat: number;
+    lon: number;
+    label: string;
+  };
+  radar?: {
+    station?: string | null;
+    updated?: string;
+    summary?: string;
+  } | null;
 };
 
-type RadarData = {
-  station: string | null;
-  loopImageUrl: string | null;
-  stillImageUrl: string | null;
-  updated: string;
-  summary: string;
-};
-
-function formatRelative(value?: string | null) {
-  if (!value) return "just now";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "recently";
-  const diffMin = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
-  if (diffMin < 1) return "just now";
-  if (diffMin === 1) return "1 min ago";
-  if (diffMin < 60) return `${diffMin} min ago`;
-  const diffHr = Math.round(diffMin / 60);
-  return `${diffHr} hr ago`;
-}
+const RADAR_SOURCE_ID = "nexrad-radar";
+const LOCATION_SOURCE_ID = "location-point";
 
 export default function RadarMapModal({
   open,
   onClose,
   location,
   radar,
-}: {
-  open: boolean;
-  onClose: () => void;
-  location: WeatherLocation;
-  radar: RadarData | null;
-}) {
-  const mapRef = useRef<HTMLDivElement | null>(null);
-  const mapInstanceRef = useRef<maplibregl.Map | null>(null);
+}: RadarModalProps) {
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<Map | null>(null);
   const refreshTimerRef = useRef<number | null>(null);
 
-  // NOAA/NWS MRMS radar base reflectivity WMS
-  // Official service info says this service has WMS capabilities and updates every 5 minutes.
-  const radarWmsTemplate = useMemo(() => {
-    const base =
-      "https://mapservices.weather.noaa.gov/eventdriven/rest/services/radar/radar_base_reflectivity_time/ImageServer/WMSServer";
-    return (
-      `${base}?service=WMS&request=GetMap&version=1.1.1` +
-      `&layers=1&styles=&format=image/png&transparent=true&srs=EPSG:3857` +
-      `&width=256&height=256&bbox={bbox-epsg-3857}`
-    );
-  }, []);
-
   useEffect(() => {
-    if (!open || !mapRef.current || mapInstanceRef.current) return;
+    if (!open || !mapContainerRef.current || mapRef.current) return;
 
     const map = new maplibregl.Map({
-      container: mapRef.current,
+      container: mapContainerRef.current,
       style: {
         version: 8,
         sources: {
-          osm: {
+          "carto-light": {
             type: "raster",
             tiles: [
-              "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+              "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+              "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+              "https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
             ],
             tileSize: 256,
-            attribution: "© OpenStreetMap contributors",
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
           },
         },
         layers: [
           {
-            id: "osm",
+            id: "carto-light",
             type: "raster",
-            source: "osm",
+            source: "carto-light",
           },
         ],
       },
@@ -90,103 +65,159 @@ export default function RadarMapModal({
       attributionControl: false,
     });
 
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    mapRef.current = map;
+
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
 
     map.on("load", () => {
-      if (!map.getSource("mrms-radar")) {
-        map.addSource("mrms-radar", {
-          type: "raster",
-          tiles: [radarWmsTemplate],
-          tileSize: 256,
-        });
+      const radarTiles = [
+        "https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows?" +
+          "SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap" +
+          "&FORMAT=image/png&TRANSPARENT=true" +
+          "&LAYERS=conus_bref_qcd" +
+          "&SRS=EPSG:3857" +
+          "&WIDTH=256&HEIGHT=256" +
+          "&BBOX={bbox-epsg-3857}",
+      ];
 
-        map.addLayer({
-          id: "mrms-radar-layer",
-          type: "raster",
-          source: "mrms-radar",
-          paint: {
-            "raster-opacity": 0.78,
-          },
-        });
+      if (map.getSource(RADAR_SOURCE_ID)) {
+        if (map.getLayer(RADAR_SOURCE_ID)) {
+          map.removeLayer(RADAR_SOURCE_ID);
+        }
+        map.removeSource(RADAR_SOURCE_ID);
       }
 
-      new maplibregl.Marker({ color: "#2563eb" })
-        .setLngLat([location.lon, location.lat])
-        .addTo(map);
+      map.addSource(RADAR_SOURCE_ID, {
+        type: "raster",
+        tiles: radarTiles,
+        tileSize: 256,
+      });
 
-      // Refresh MRMS tiles every 5 minutes for near-real-time radar overlay
-      if (refreshTimerRef.current == null) {
-        refreshTimerRef.current = window.setInterval(() => {
-          const source = map.getSource("mrms-radar") as maplibregl.RasterTileSource | undefined;
-          if (source && "setTiles" in source && typeof source.setTiles === "function") {
-            source.setTiles([`${radarWmsTemplate}&t=${Date.now()}`]);
-          }
-        }, 300000);
-      }
+      map.addLayer({
+        id: RADAR_SOURCE_ID,
+        type: "raster",
+        source: RADAR_SOURCE_ID,
+        paint: {
+          "raster-opacity": 0.78,
+        },
+      });
+
+      map.addSource(LOCATION_SOURCE_ID, {
+        type: "geojson",
+        data: {
+          type: "FeatureCollection",
+          features: [
+            {
+              type: "Feature",
+              geometry: {
+                type: "Point",
+                coordinates: [location.lon, location.lat],
+              },
+              properties: {
+                label: location.label,
+              },
+            },
+          ],
+        },
+      });
+
+      map.addLayer({
+        id: "location-circle",
+        type: "circle",
+        source: LOCATION_SOURCE_ID,
+        paint: {
+          "circle-radius": 7,
+          "circle-color": "#2563eb",
+          "circle-stroke-width": 2,
+          "circle-stroke-color": "#ffffff",
+        },
+      });
+
+      map.addLayer({
+        id: "location-label",
+        type: "symbol",
+        source: LOCATION_SOURCE_ID,
+        layout: {
+          "text-field": ["get", "label"],
+          "text-size": 12,
+          "text-offset": [0, 1.4],
+          "text-anchor": "top",
+        },
+        paint: {
+          "text-color": "#ffffff",
+          "text-halo-color": "#0f172a",
+          "text-halo-width": 2,
+        },
+      });
+
+      refreshTimerRef.current = window.setInterval(() => {
+        const source = map.getSource(RADAR_SOURCE_ID) as maplibregl.RasterTileSource | undefined;
+        if (!source) return;
+
+        source.setTiles([
+          "https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows?" +
+            "SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap" +
+            "&FORMAT=image/png&TRANSPARENT=true" +
+            "&LAYERS=conus_bref_qcd" +
+            "&SRS=EPSG:3857" +
+            "&WIDTH=256&HEIGHT=256" +
+            `&CACHEBUST=${Date.now()}` +
+            "&BBOX={bbox-epsg-3857}",
+        ]);
+      }, 300000);
     });
 
-    mapInstanceRef.current = map;
+    map.on("error", (e: unknown) => {
+      const err = e instanceof Error ? e : { message: String(e) };
+      console.error("Radar map error", err);
+    });
 
     return () => {
-      map.remove();
-      mapInstanceRef.current = null;
-      if (refreshTimerRef.current != null) {
+      if (refreshTimerRef.current) {
         window.clearInterval(refreshTimerRef.current);
         refreshTimerRef.current = null;
       }
+      map.remove();
+      mapRef.current = null;
     };
-  }, [open, location.lat, location.lon, radarWmsTemplate]);
+  }, [open, location.lat, location.lon, location.label]);
 
   useEffect(() => {
-    if (!open) return;
-    const map = mapInstanceRef.current;
-    if (!map) return;
-    map.flyTo({
+    if (!open || !mapRef.current) return;
+    mapRef.current.resize();
+    mapRef.current.flyTo({
       center: [location.lon, location.lat],
       zoom: 7,
-      essential: true,
+      duration: 700,
     });
   }, [open, location.lat, location.lon]);
 
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[90] bg-black/70 backdrop-blur-md">
-      <div className="absolute inset-x-0 bottom-0 top-[4%] overflow-hidden rounded-t-[30px] border border-white/10 bg-slate-950 text-white shadow-2xl">
-        <div className="mx-auto mt-3 h-1.5 w-14 rounded-full bg-white/20" />
-
-        <div className="flex items-center justify-between px-4 pb-4 pt-4">
+    <div className="fixed inset-0 z-100 bg-black/80 backdrop-blur-sm">
+      <div className="absolute inset-0 flex flex-col">
+        <div className="flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 text-white">
           <div>
             <div className="text-lg font-black uppercase tracking-wide">Live Radar</div>
-            <div className="mt-1 flex items-center gap-2 text-sm text-slate-300">
-              <MapPin className="h-4 w-4" />
-              {location.label}
-            </div>
-            <div className="mt-1 text-xs text-slate-400">
-              {radar?.summary || "NOAA MRMS radar overlay"} · Updated {formatRelative(radar?.updated)}
+            <div className="mt-1 flex items-center gap-2 text-xs text-slate-300">
+              <MapPin className="h-3.5 w-3.5" />
+              <span>{location.label}</span>
+              {radar?.updated ? <span>• Updated {new Date(radar.updated).toLocaleTimeString()}</span> : null}
             </div>
           </div>
 
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex items-center gap-2 rounded-xl bg-white/5 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
+            className="rounded-full border border-white/10 bg-white/5 p-2 text-white"
+            aria-label="Close radar"
           >
-            <X className="h-4 w-4" />
-            Close
+            <X className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="px-4 pb-4">
-          <div className="mb-3 flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300">
-            <Layers className="h-4 w-4" />
-            NOAA/NWS MRMS Base Reflectivity overlay on OpenStreetMap
-          </div>
-
-          <div className="overflow-hidden rounded-[24px] border border-white/10">
-            <div ref={mapRef} className="h-[72vh] w-full bg-slate-900" />
-          </div>
-        </div>
+        <div ref={mapContainerRef} className="min-h-0 flex-1" />
       </div>
     </div>
   );
