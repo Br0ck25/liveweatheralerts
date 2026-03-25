@@ -5,6 +5,17 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+export function openExternal(url?: string | null) {
+  if (!url) return
+  window.open(url, "_blank", "noopener,noreferrer")
+}
+
+export function scrollToSection(id: string) {
+  const el = document.getElementById(id)
+  if (!el) return
+  el.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
 export function formatRelative(value?: string | null) {
   if (!value) return "just now"
   const d = new Date(value)

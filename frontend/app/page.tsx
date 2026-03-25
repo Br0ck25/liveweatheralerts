@@ -1,16 +1,25 @@
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
-import { Bell, Map, Menu, ShieldAlert, TriangleAlert, ChevronRight } from "lucide-react";
+import { Bell, Map, Menu, ShieldAlert } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import RadarPreviewCard from "@/components/weather/RadarPreviewCard";
 import CurrentConditionsCard from "@/components/weather/CurrentConditionsCard";
 import HourlyStrip from "@/components/weather/HourlyStrip";
-import AlertDetailsSheet from "@/components/weather/AlertDetailsSheet";
-import BottomNav from "@/components/weather/BottomNav";
-import LocationPrompt from "@/components/weather/LocationPrompt";
+import AlertDetailsSheet from "@/components/alerts/AlertDetailsSheet";
+import BottomNav from "@/components/navigation/BottomNav";
+import LocationPrompt from "@/components/location/LocationPrompt";
 import RadarMapModal from "@/components/RadarMapModal";
+import BigAlertHero from "@/components/alerts/BigAlertHero";
+import SmallAlertCard from "@/components/alerts/SmallAlertCard";
+import SingleSecondaryAlertCard from "@/components/alerts/SingleSecondaryAlertCard";
+import AlertHeadlineList from "@/components/alerts/AlertHeadlineList";
 import { motion } from "framer-motion";
+
+import { openExternal } from "@/lib/utils";
+import { fetchWeather, safeJson } from "@/lib/api/client";
+import { formatTime, formatRelative, mapIcon } from "@/lib/weather/formatters";
+import { sortAlerts, getAlertPriority, heroAreaLabel } from "@/lib/alerts/helpers";
 
 /**
  * Page 1: Mobile Home screen
@@ -96,11 +105,27 @@ type WeatherHourlyPoint = {
   precipitationChance?: number;
 };
 
+type DailyForecast = {
+  name?: string;
+  shortForecast?: string;
+  detailedForecast?: string;
+  highF?: number;
+  temperatureF?: number;
+  temperature?: number;
+  lowF?: number;
+  nightTemperature?: number;
+  nightTemp?: number;
+  precipitationChance?: number;
+  pop?: number;
+  wind?: string;
+  windSpeed?: string;
+};
+
 type WeatherResponse = {
   location: WeatherLocation;
   current: WeatherCurrent;
   hourly: WeatherHourlyPoint[];
-  daily: any[];
+  daily: DailyForecast[];
   radar: {
     station: string | null;
     loopImageUrl: string | null;
@@ -150,490 +175,7 @@ const fallbackHourly: HourlyPoint[] = [
   { label: "8 PM", temp: 65, icon: "night" },
 ];
 
-function cn(...classes: Array<string | false | null | undefined>) {
-  return classes.filter(Boolean).join(" ");
-}
-
-function formatTime(value?: string) {
-  if (!value) return "—";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-}
-
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
-
-async function fetchWeather(lat: number, lon: number): Promise<WeatherResponse> {
-  const res = await fetch(`${API_BASE}/api/weather?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, {
-    cache: "no-store",
-  });
-  const data = await safeJson(res);
-  if (!res.ok) {
-    throw new Error(data?.error || "Unable to load weather.");
-  }
-  return data as WeatherResponse;
-}
-
-function formatRelative(value?: string | null) {
-  if (!value) return "just now";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "recently";
-  const diffMin = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
-  if (diffMin < 1) return "just now";
-  if (diffMin === 1) return "1 min ago";
-  if (diffMin < 60) return `${diffMin} min ago`;
-  const diffHr = Math.round(diffMin / 60);
-  return `${diffHr} hr ago`;
-}
-
-function getAlertPriority(event: string) {
-  const e = String(event || "").toLowerCase();
-
-  if (e.includes("warning")) return 4;
-  if (e.includes("watch")) return 3;
-  if (e.includes("advisory")) return 2;
-  if (e.includes("statement")) return 1;
-
-  return 0;
-}
-
-function getSeverityPriority(severity?: string) {
-  const s = String(severity || "").toLowerCase();
-
-  if (s === "extreme") return 4;
-  if (s === "severe") return 3;
-  if (s === "moderate") return 2;
-  if (s === "minor") return 1;
-
-  return 0;
-}
-
-function sortAlerts(alerts: AlertItem[]) {
-  return [...alerts].sort((a, b) => {
-    const typeDelta = getAlertPriority(b.event) - getAlertPriority(a.event);
-    if (typeDelta !== 0) return typeDelta;
-
-    const severityDelta = getSeverityPriority(b.severity) - getSeverityPriority(a.severity);
-    if (severityDelta !== 0) return severityDelta;
-
-    const urgencyRank: Record<string, number> = {
-      immediate: 3,
-      expected: 2,
-      future: 1,
-      past: 0,
-      unknown: 0,
-    };
-
-    const certaintyRank: Record<string, number> = {
-      observed: 3,
-      likely: 2,
-      possible: 1,
-      unlikely: 0,
-      unknown: 0,
-    };
-
-    const urgencyDelta =
-      (urgencyRank[String(b.urgency || "").toLowerCase()] || 0) -
-      (urgencyRank[String(a.urgency || "").toLowerCase()] || 0);
-    if (urgencyDelta !== 0) return urgencyDelta;
-
-    const certaintyDelta =
-      (certaintyRank[String(b.certainty || "").toLowerCase()] || 0) -
-      (certaintyRank[String(a.certainty || "").toLowerCase()] || 0);
-    if (certaintyDelta !== 0) return certaintyDelta;
-
-    return new Date(a.expires || 0).getTime() - new Date(b.expires || 0).getTime();
-  });
-}
-
-function dedupeArea(areaDesc: string) {
-  const parts = areaDesc.split(";").map((x) => x.trim()).filter(Boolean);
-  if (parts.length <= 2) return areaDesc;
-  return `${parts.slice(0, 2).join(", ")} +${parts.length - 2} more`;
-}
-
-function mapIcon(forecast = "") {
-  const f = forecast.toLowerCase();
-
-  if (f.includes("storm") || f.includes("thunder")) return "storm";
-  if (f.includes("sun") || f.includes("clear")) return "sun";
-  if (f.includes("night")) return "night";
-  if (f.includes("cloud")) return "cloud";
-
-  return "cloud";
-}
-
-function heroAreaLabel(alert: AlertItem) {
-  const first = alert.areaDesc?.split(";")[0]?.trim() || "Your Area";
-  return first.replace(/\b(County|Parish|Area)\b/gi, "").replace(/\s{2,}/g, " ").trim();
-}
-
-function heroThreats(alert: AlertItem) {
-  const text = `${alert.headline || ""} ${alert.description || ""}`.toLowerCase();
-  const threats: string[] = [];
-
-  if (text.includes("minor flooding")) threats.push("Minor Flooding");
-  if (text.includes("flood stage")) threats.push("Near Flood Stage");
-  if (text.includes("river is expected to rise")) threats.push("River Rising");
-  if (text.includes("wind")) threats.push("70 MPH Winds");
-  if (text.includes("hail")) threats.push("Large Hail");
-  if (text.includes("flood")) threats.push("Flooding");
-  if (text.includes("tornado")) threats.push("Rotation Possible");
-
-  if (threats.length === 0) threats.push(alert.event);
-  return threats.slice(0, 3);
-}
-
-function SingleSecondaryAlertCard({
-  alert,
-  onClick,
-}: {
-  alert: AlertItem;
-  onClick: (alert: AlertItem) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onClick(alert)}
-      className={`w-full rounded-[18px] border border-white/10 bg-gradient-to-br ${smallAlertTone(
-        alert.event
-      )} p-4 text-left text-white shadow-lg`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-[11px] font-black uppercase tracking-wide text-white/90">
-            {alert.event}
-          </div>
-          <div className="mt-2 text-xl font-black leading-tight">{heroAreaLabel(alert)}</div>
-          <div className="mt-2 text-sm font-semibold text-white/90">Until {formatTime(alert.expires)}</div>
-        </div>
-
-        <ChevronRight className="mt-1 h-5 w-5 shrink-0 text-white/90" />
-      </div>
-    </button>
-  );
-}
-
-function getAlertCTA(event: string) {
-  const e = event.toLowerCase();
-
-  if (e.includes("tornado")) return "TAKE COVER NOW";
-  if (e.includes("severe thunderstorm")) return "MOVE INDOORS";
-  if (e.includes("flash flood")) return "AVOID FLOODED AREAS";
-  if (e.includes("flood")) return "MOVE TO HIGHER GROUND";
-  if (e.includes("winter")) return "AVOID TRAVEL";
-  if (e.includes("heat")) return "STAY COOL";
-  if (e.includes("fire")) return "EVACUATE IF ADVISED";
-
-  return "STAY ALERT";
-}
-
-function getAlertColor(event: string) {
-  const e = event.toLowerCase();
-
-  if (e.includes("warning")) return "red";
-  if (e.includes("watch")) return "orange";
-  if (e.includes("advisory")) return "yellow";
-  if (e.includes("statement")) return "blue";
-
-  return "red";
-}
-
-function getAlertBackground(event: string) {
-  const e = event.toLowerCase();
-
-  const isWarning = e.includes("warning");
-  const isWatch = e.includes("watch");
-  const isAdvisory = e.includes("advisory");
-
-  if (isWarning) {
-    return `
-      radial-gradient(circle at 70% 40%, rgba(255,120,120,0.35), transparent 20%),
-      linear-gradient(180deg, rgba(120,0,0,0.25), rgba(40,0,0,0.9)),
-      linear-gradient(120deg, #5a0000 0%, #9a0000 40%, #390000 100%)
-    `;
-  }
-
-  if (isWatch) {
-    return `
-      radial-gradient(circle at 70% 40%, rgba(255,180,0,0.35), transparent 20%),
-      linear-gradient(180deg, rgba(120,60,0,0.3), rgba(60,30,0,0.9)),
-      linear-gradient(120deg, #ff8c00 0%, #ff6a00 40%, #5a1a00 100%)
-    `;
-  }
-
-  if (isAdvisory) {
-    return `
-      radial-gradient(circle at 70% 40%, rgba(255,230,120,0.35), transparent 20%),
-      linear-gradient(180deg, rgba(120,100,0,0.3), rgba(60,50,0,0.9)),
-      linear-gradient(120deg, #eab308 0%, #facc15 40%, #a16207 100%)
-    `;
-  }
-
-  return `
-    radial-gradient(circle at 70% 40%, rgba(120,200,255,0.25), transparent 20%),
-    linear-gradient(180deg, rgba(0,40,80,0.4), rgba(0,20,50,0.9)),
-    linear-gradient(120deg, #0b3a5c 0%, #1f6fa5 40%, #09263f 100%)
-  `;
-}
-
-function getHeroVariant(event: string): "tornado" | "flood" | "winter" | "fire" | "default" {
-  const e = event.toLowerCase();
-
-  if (e.includes("tornado") || e.includes("severe thunderstorm")) return "tornado";
-  if (e.includes("flood")) return "flood";
-  if (e.includes("winter") || e.includes("snow") || e.includes("ice") || e.includes("blizzard")) return "winter";
-  if (e.includes("fire") || e.includes("red flag") || e.includes("smoke")) return "fire";
-
-  return "default";
-}
-
-function getHeroVariantStyles(variant: ReturnType<typeof getHeroVariant>) {
-  switch (variant) {
-    case "tornado":
-      return {
-        wrapper: "border-red-500/30 bg-[#140608]",
-        topBar: "bg-red-700",
-        title: "text-[2.2rem] leading-[0.92]",
-        subtitle: "text-white/95",
-        cta: "bg-white text-red-700 hover:bg-red-50",
-        details: "bg-blue-600 hover:bg-blue-500 text-white",
-      };
-
-    case "flood":
-      return {
-        wrapper: "border-red-500/25 bg-[#12090a]",
-        topBar: "bg-red-600",
-        title: "text-[2.05rem] leading-[0.95]",
-        subtitle: "text-white/95",
-        cta: "bg-slate-950/55 text-white hover:bg-slate-900/70",
-        details: "bg-blue-600 hover:bg-blue-500 text-white",
-      };
-
-    case "winter":
-      return {
-        wrapper: "border-blue-200/25 bg-[#0c1520]",
-        topBar: "bg-blue-700",
-        title: "text-[2rem] leading-[0.95]",
-        subtitle: "text-slate-100",
-        cta: "bg-white/90 text-slate-900 hover:bg-white",
-        details: "bg-sky-600 hover:bg-sky-500 text-white",
-      };
-
-    case "fire":
-      return {
-        wrapper: "border-orange-400/25 bg-[#1a0d05]",
-        topBar: "bg-orange-600",
-        title: "text-[2.1rem] leading-[0.94]",
-        subtitle: "text-orange-50",
-        cta: "bg-white text-orange-700 hover:bg-orange-50",
-        details: "bg-orange-500 hover:bg-orange-400 text-white",
-      };
-
-    default:
-      return {
-        wrapper: "border-red-500/25 bg-[#13090a]",
-        topBar: "bg-red-600",
-        title: "text-[2.05rem] leading-[0.95]",
-        subtitle: "text-white/95",
-        cta: "bg-white text-red-700 hover:bg-red-50",
-        details: "bg-blue-600 hover:bg-blue-500 text-white",
-      };
-  }
-}
-
-function BigAlertHero({
-  alert,
-  onPrimaryAction,
-  onViewDetails,
-}: {
-  alert: AlertItem;
-  onPrimaryAction: (alert: AlertItem) => void;
-  onViewDetails: (alert: AlertItem) => void;
-}) {
-  const area = heroAreaLabel(alert);
-  const threats = heroThreats(alert);
-  const variant = getHeroVariant(alert.event);
-  const styles = getHeroVariantStyles(variant);
-
-  const subtitle =
-    variant === "flood"
-      ? "RIVER FLOODING"
-      : variant === "winter"
-      ? "HAZARDOUS WINTER WEATHER"
-      : "& SURROUNDING AREAS";
-
-  return (
-    <div className={cn("overflow-hidden rounded-[22px] border shadow-2xl", styles.wrapper)}>
-      <div className={cn("px-3 py-2 text-sm font-black uppercase tracking-wide text-white", styles.topBar)}>
-        <div className="flex items-center gap-2">
-          <TriangleAlert className="h-4 w-4" />
-          {alert.event}
-        </div>
-      </div>
-
-      <div className="relative min-h-[250px] overflow-hidden">
-        <div
-          className="absolute inset-0"
-          style={{
-            background: getAlertBackground(alert.event),
-          }}
-        />
-
-        {variant === "tornado" && (
-          <>
-            <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.05),rgba(0,0,0,0.55))]" />
-            <div className="absolute right-16 top-8 h-28 w-[2px] bg-white/85 blur-[1px]" />
-            <div className="absolute right-20 top-20 h-20 w-[2px] rotate-[22deg] bg-white/70 blur-[1px]" />
-            <div className="absolute right-28 top-16 h-16 w-[2px] -rotate-[25deg] bg-white/55 blur-[1px]" />
-            <div className="absolute right-10 top-10 h-24 w-24 rounded-full bg-white/20 blur-2xl" />
-          </>
-        )}
-
-        {variant === "flood" && (
-          <>
-            <div className="absolute inset-0 opacity-20 [background:radial-gradient(circle_at_center,rgba(255,255,255,0.2)_1px,transparent_1px)] [background-size:12px_12px]" />
-            <div className="absolute inset-x-0 bottom-0 h-20 bg-[linear-gradient(180deg,transparent,rgba(80,160,255,0.18))]" />
-          </>
-        )}
-
-        {variant === "winter" && (
-          <>
-            <div className="absolute inset-0 opacity-20 [background-image:radial-gradient(rgba(255,255,255,0.8)_1px,transparent_1px)] [background-size:14px_14px]" />
-            <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.08))]" />
-          </>
-        )}
-
-        {variant === "fire" && (
-          <>
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_78%_30%,rgba(255,190,60,0.25),transparent_14%)]" />
-            <div className="absolute right-10 top-10 h-20 w-20 rounded-full bg-orange-300/25 blur-2xl" />
-            <div className="absolute inset-x-0 bottom-0 h-20 bg-[linear-gradient(180deg,transparent,rgba(255,120,0,0.16))]" />
-          </>
-        )}
-
-        {variant === "default" && (
-          <div className="absolute inset-0 opacity-20 animate-pulse bg-[radial-gradient(circle_at_80%_30%,rgba(255,255,255,0.15),transparent_20%)]" />
-        )}
-
-        <div className="relative flex min-h-[250px] flex-col justify-between p-4">
-          <div>
-            <div className={cn("font-black tracking-tight text-white", styles.title)}>
-              {area}
-            </div>
-            <div className={cn("mt-1 text-lg font-extrabold leading-none", styles.subtitle)}>
-              {subtitle}
-            </div>
-
-            <div className="mt-4 flex flex-wrap items-center gap-4 text-sm font-bold text-white">
-              {threats.map((item) => (
-                <div key={item} className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-white/90" />
-                  <span>{item}</span>
-                </div>
-              ))}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => onPrimaryAction(alert)}
-              className={cn("mt-4 inline-flex rounded-lg px-3 py-2 text-sm font-black text-white shadow-lg hover:bg-black/40", styles.cta)}
-            >
-              {getAlertCTA(alert.event)}
-            </button>
-          </div>
-
-          <div className="mt-4 flex items-end justify-between gap-3">
-            <div className="rounded-lg bg-black/35 px-3 py-2 text-sm font-bold text-white">
-              Until {formatTime(alert.expires)}
-            </div>
-            <Button
-              className={cn("h-10 rounded-lg px-5 font-black", styles.details)}
-              onClick={() => onViewDetails(alert)}
-            >
-              View Details
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function smallAlertTone(event: string) {
-  const level = getAlertColor(event);
-
-  if (level === "red") return "from-red-600 to-red-800";
-  if (level === "orange") return "from-orange-500 to-orange-700";
-  if (level === "yellow") return "from-yellow-400 to-yellow-600";
-  if (level === "blue") return "from-blue-500 to-blue-700";
-
-  return "from-red-600 to-red-800";
-}
-
-function SmallAlertCard({
-  alert,
-  onClick,
-}: {
-  alert: AlertItem;
-  onClick: (alert: AlertItem) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onClick(alert)}
-      className={`min-w-[140px] rounded-[16px] border border-white/10 bg-gradient-to-br ${smallAlertTone(
-        alert.event
-      )} p-3 text-left text-white shadow-lg`}
-    >
-      <div className="text-[10px] font-black uppercase leading-4 tracking-wide">
-        {alert.event}
-      </div>
-      <div className="mt-2 line-clamp-2 text-base font-black leading-tight">
-        {heroAreaLabel(alert)}
-      </div>
-      <div className="mt-2 text-xs font-semibold text-white/90">
-        Until {formatTime(alert.expires)}
-      </div>
-    </button>
-  );
-}
-
-function AlertHeadlineList({
-  alerts,
-  onSelectAlert,
-}: {
-  alerts: AlertItem[];
-  onSelectAlert: (alert: AlertItem) => void;
-}) {
-  return (
-    <Card className="rounded-[28px] border border-slate-800 bg-slate-950 text-white shadow-xl">
-      <CardContent className="p-4">
-        <div className="mb-4 flex items-center gap-2 text-xl font-black uppercase tracking-wide">
-          <ShieldAlert className="h-5 w-5 text-red-400" />
-          Alert Headlines
-        </div>
-
-        <div className="space-y-3">
-          {alerts.slice(0, 4).map((alert) => (
-            <button
-              key={alert.id}
-              type="button"
-              onClick={() => onSelectAlert(alert)}
-              className="flex w-full items-center justify-between rounded-[20px] border border-red-500/20 bg-gradient-to-r from-red-700 to-red-600 px-4 py-3 text-left shadow-lg"
-            >
-              <div className="min-w-0">
-                <div className="truncate text-sm font-black uppercase tracking-wide text-white">{alert.event}</div>
-                <div className="truncate text-sm text-red-50">{alert.headline || dedupeArea(alert.areaDesc)}</div>
-              </div>
-              <ChevronRight className="ml-3 h-5 w-5 shrink-0 text-white" />
-            </button>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
 
 function AllClearBanner({
   locationLabel,
@@ -659,29 +201,6 @@ function AllClearBanner({
     </Card>
   );
 }
-
-function openExternal(url?: string | null) {
-  if (!url) return;
-  window.open(url, "_blank", "noopener,noreferrer");
-}
-
-async function safeJson(res: Response) {
-  const contentType = res.headers.get("content-type") || "";
-  const text = await res.text();
-
-  if (!contentType.includes("application/json")) {
-    throw new Error(`Expected JSON but received: ${text.slice(0, 120)}`);
-  }
-
-  return JSON.parse(text);
-}
-
-function scrollToSection(id: string) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
 
 export default function LiveWeatherAlertsHomePage() {
   const [location, setLocation] = useState<SavedLocation | null>(null);
@@ -785,7 +304,7 @@ export default function LiveWeatherAlertsHomePage() {
             : data.alerts;
           setAlertsResp({ ...data, alerts: filtered });
         }
-      } catch (err) {
+      } catch {
         if (active) {
           setAlertsResp({ alerts: [], lastPoll: null, syncError: "Unable to load alerts." });
         }
@@ -999,21 +518,21 @@ export default function LiveWeatherAlertsHomePage() {
   }
 
   function renderForecastTab() {
-    const forecastDays = (weather?.daily || []).slice(0, 10);
+    const forecastDays = (weather?.daily || []).slice(0, 10) as DailyForecast[];
 
-    const warmest = forecastDays.reduce((best: any, day: any) => {
+    const warmest = forecastDays.reduce((best: DailyForecast | null, day: DailyForecast) => {
       const hi = day?.highF ?? day?.temperatureF ?? day?.temperature ?? 0;
       const bestHi = best ? best.highF ?? best.temperatureF ?? best.temperature ?? 0 : 0;
       return hi > bestHi ? day : best;
     }, null);
 
-    const stormiest = forecastDays.reduce((best: any, day: any) => {
+    const stormiest = forecastDays.reduce((best: DailyForecast | null, day: DailyForecast) => {
       const precip = day?.precipitationChance ?? day?.pop ?? 0;
       const bestPrecip = best ? best.precipitationChance ?? best.pop ?? 0 : 0;
       return precip > bestPrecip ? day : best;
     }, null);
 
-    const bestDay = forecastDays.reduce((best: any, day: any) => {
+    const bestDay = forecastDays.reduce((best: (DailyForecast & { _score?: number }) | null, day: DailyForecast) => {
       const precip = day?.precipitationChance ?? day?.pop ?? 0;
       const hi = day?.highF ?? day?.temperatureF ?? day?.temperature ?? 0;
       const score = (hi ?? 0) - precip;
@@ -1056,7 +575,7 @@ export default function LiveWeatherAlertsHomePage() {
               Forecast data is unavailable right now.
             </div>
           ) : (
-            forecastDays.map((day: any, idx: number) => {
+            forecastDays.map((day: DailyForecast, idx: number) => {
               const name = day?.name || `Day ${idx + 1}`;
               const text = day?.shortForecast || day?.detailedForecast || "Forecast unavailable";
               const high = day?.highF ?? day?.temperatureF ?? day?.temperature ?? null;
@@ -1163,7 +682,13 @@ export default function LiveWeatherAlertsHomePage() {
             </div>
             <div>
               <div className="text-lg font-black uppercase tracking-tight">Live Weather Alerts</div>
-              <div className="text-xs text-slate-400">{loadingAlerts ? "Loading alerts..." : `Synced ${formatRelative(alertsResp?.lastPoll)}`}</div>
+              <div className="text-xs text-slate-400">
+                {loadingWeather
+                  ? "Loading weather..."
+                  : loadingAlerts
+                  ? "Loading alerts..."
+                  : `Synced ${formatRelative(alertsResp?.lastPoll)}`}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-2 text-slate-300">
@@ -1196,6 +721,11 @@ export default function LiveWeatherAlertsHomePage() {
           {alertsResp?.syncError ? (
             <div className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
               {alertsResp.syncError}
+            </div>
+          ) : null}
+          {weatherError ? (
+            <div className="rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+              {weatherError}
             </div>
           ) : null}
         </div>

@@ -2,7 +2,7 @@
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { CloudRain, CloudSun } from "lucide-react";
+import { iconForHourly } from "@/lib/weather/formatters";
 
 export type HourlyPoint = {
   label: string;
@@ -11,13 +11,6 @@ export type HourlyPoint = {
   precip?: number;
   startTime?: string;
 };
-
-function iconForHourly(icon: HourlyPoint["icon"]) {
-  if (icon === "storm") return <CloudRain className="h-6 w-6" />;
-  if (icon === "sun") return <CloudSun className="h-6 w-6" />;
-  if (icon === "night") return <CloudSun className="h-6 w-6 opacity-70" />;
-  return <CloudSun className="h-6 w-6" />;
-}
 
 export default function HourlyStrip({
   points,

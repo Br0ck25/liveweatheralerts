@@ -2,7 +2,8 @@
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Radar } from "lucide-react";
-import { cn, formatRelative } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { formatRelative } from "@/lib/weather/formatters";
 
 type AlertState = "ACTIVE_ALERTS" | "NO_ALERTS";
 
