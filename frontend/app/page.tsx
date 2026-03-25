@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 
 /**
  * Page 1: Mobile Home screen
@@ -899,7 +899,7 @@ function RadarPreviewCard({
               {alertState === "ACTIVE_ALERTS" ? "Storm moving NE" : "Quiet in your area"}
             </div>
             <div className="mt-3 text-xs font-medium leading-5 text-slate-300">
-              Updated 2 min ago
+              Updated {formatRelative(radar?.updated)}
             </div>
           </div>
 
@@ -929,6 +929,88 @@ function RadarPreviewCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function RadarModal({
+  open,
+  onClose,
+  radar,
+  locationLabel,
+}: {
+  open: boolean;
+  onClose: () => void;
+  radar: WeatherResponse["radar"] | null;
+  locationLabel: string;
+}) {
+  if (!open) return null;
+
+  const imageUrl = radar?.loopImageUrl || radar?.stillImageUrl || null;
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-md"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+      >
+        <motion.div
+          className="absolute inset-x-0 bottom-0 top-[6%] rounded-t-[30px] border border-white/10 bg-slate-950 text-white shadow-2xl"
+          initial={{ y: 80, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: 80, opacity: 0 }}
+          transition={{ type: "spring", stiffness: 260, damping: 24 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="mx-auto mt-3 h-1.5 w-14 rounded-full bg-white/20" />
+
+          <div className="flex items-center justify-between px-5 pb-4 pt-4">
+            <div>
+              <div className="text-lg font-black uppercase tracking-wide">Live Radar</div>
+              <div className="mt-1 text-sm text-slate-400">{locationLabel}</div>
+            </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-xl bg-white/5 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
+            >
+              Close
+            </button>
+          </div>
+
+          <div className="px-4 pb-5">
+            <div className="overflow-hidden rounded-[24px] border border-white/10 bg-slate-900">
+              <div className="relative aspect-[9/14] w-full bg-slate-950">
+                {imageUrl ? (
+                  <img
+                    src={imageUrl}
+                    alt="Full radar"
+                    className="absolute inset-0 h-full w-full object-cover"
+                  />
+                ) : (
+                  <>
+                    <div className="absolute inset-0 bg-[radial-gradient(circle_at_65%_20%,rgba(255,200,0,0.35),transparent_18%),linear-gradient(135deg,rgba(34,197,94,0.35),transparent_25%),linear-gradient(160deg,rgba(250,204,21,0.28),transparent_45%),linear-gradient(200deg,rgba(239,68,68,0.4),transparent_62%),linear-gradient(180deg,#162033_0%,#101827_100%)]" />
+                    <div className="absolute inset-0 bg-gradient-to-br from-green-500/20 via-yellow-400/20 to-red-500/30 blur-[26px] opacity-50" />
+                    <div className="absolute inset-0 opacity-40 [background-image:linear-gradient(rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] [background-size:20px_20px]" />
+                  </>
+                )}
+
+                <div className="absolute left-3 top-3 rounded-full border border-white/15 bg-black/40 px-3 py-1 text-xs font-semibold text-white backdrop-blur-md">
+                  {radar?.summary || "Live radar"}
+                </div>
+
+                <div className="absolute bottom-3 right-3 rounded-full border border-white/15 bg-black/40 px-3 py-1 text-xs text-white/90 backdrop-blur-md">
+                  Updated {formatRelative(radar?.updated)}
+                </div>
+              </div>
+            </div>
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
   );
 }
 
@@ -1269,6 +1351,7 @@ export default function LiveWeatherAlertsHomePage() {
   const [weatherError, setWeatherError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"home" | "forecast" | "radar" | "alerts" | "more">("home");
   const [selectedAlert, setSelectedAlert] = useState<AlertItem | null>(null);
+  const [showRadarModal, setShowRadarModal] = useState(false);
 
   useEffect(() => {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -1568,6 +1651,28 @@ export default function LiveWeatherAlertsHomePage() {
   }
 
   function renderForecastTab() {
+    const forecastDays = (weather?.daily || []).slice(0, 10);
+
+    const warmest = forecastDays.reduce((best: any, day: any) => {
+      const hi = day?.highF ?? day?.temperatureF ?? day?.temperature ?? 0;
+      const bestHi = best ? best.highF ?? best.temperatureF ?? best.temperature ?? 0 : 0;
+      return hi > bestHi ? day : best;
+    }, null);
+
+    const stormiest = forecastDays.reduce((best: any, day: any) => {
+      const precip = day?.precipitationChance ?? day?.pop ?? 0;
+      const bestPrecip = best ? best.precipitationChance ?? best.pop ?? 0 : 0;
+      return precip > bestPrecip ? day : best;
+    }, null);
+
+    const bestDay = forecastDays.reduce((best: any, day: any) => {
+      const precip = day?.precipitationChance ?? day?.pop ?? 0;
+      const hi = day?.highF ?? day?.temperatureF ?? day?.temperature ?? 0;
+      const score = (hi ?? 0) - precip;
+      if (!best) return { ...day, _score: score };
+      return score > (best._score ?? -Infinity) ? { ...day, _score: score } : best;
+    }, null);
+
     return (
       <div className="space-y-4">
         <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
@@ -1577,37 +1682,65 @@ export default function LiveWeatherAlertsHomePage() {
               <div className="text-sm text-slate-400">{locationLabel}</div>
             </div>
 
-            <div className="mt-5 space-y-3">
-              {(weather?.daily || []).slice(0, 10).map((day: any, idx: number) => (
-                <div
-                  key={`${day?.name || "day"}-${idx}`}
-                  className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-4"
-                >
-                  <div>
-                    <div className="text-sm font-bold text-white">
-                      {day?.name || `Day ${idx + 1}`}
-                    </div>
-                    <div className="mt-1 text-sm text-slate-300">
-                      {day?.shortForecast || day?.detailedForecast || "Forecast unavailable"}
-                    </div>
-                  </div>
-
-                  <div className="ml-4 text-right">
-                    <div className="text-2xl font-black text-white">
-                      {day?.temperatureF ?? day?.temperature ?? "—"}°
-                    </div>
-                  </div>
+            <div className="mt-3 flex flex-wrap gap-2 text-sm">
+              {warmest ? (
+                <div className="rounded-xl bg-yellow-500/10 px-3 py-1 font-semibold text-yellow-200">
+                  Warmest: {warmest?.name || "Day"}
                 </div>
-              ))}
-
-              {(!weather?.daily || weather.daily.length === 0) && (
-                <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm text-slate-300">
-                  Forecast data is unavailable right now.
+              ) : null}
+              {stormiest ? (
+                <div className="rounded-xl bg-red-500/10 px-3 py-1 font-semibold text-red-200">
+                  Stormiest: {stormiest?.name || "Day"}
                 </div>
-              )}
+              ) : null}
+              {bestDay ? (
+                <div className="rounded-xl bg-sky-500/10 px-3 py-1 font-semibold text-sky-200">
+                  Best: {bestDay?.name || "Day"}
+                </div>
+              ) : null}
             </div>
           </CardContent>
         </Card>
+
+        <div className="space-y-3">
+          {forecastDays.length === 0 ? (
+            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm text-slate-300">
+              Forecast data is unavailable right now.
+            </div>
+          ) : (
+            forecastDays.map((day: any, idx: number) => {
+              const name = day?.name || `Day ${idx + 1}`;
+              const text = day?.shortForecast || day?.detailedForecast || "Forecast unavailable";
+              const high = day?.highF ?? day?.temperatureF ?? day?.temperature ?? null;
+              const low = day?.lowF ?? day?.nightTemperature ?? day?.nightTemp ?? null;
+              const precip = day?.precipitationChance ?? day?.pop ?? 0;
+              const wind = day?.wind || day?.windSpeed || "—";
+
+              return (
+                <div
+                  key={`${name}-${idx}`}
+                  className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4"
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-base font-black text-white">{name}</div>
+                      <div className="mt-1 text-sm text-slate-300">{text}</div>
+                      <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-400">
+                        <span>Rain {precip}%</span>
+                        <span>Wind {wind}</span>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <div className="text-2xl font-black text-white">{high ?? "—"}°</div>
+                      <div className="text-sm text-slate-400">Low {low ?? "—"}°</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
       </div>
     );
   }
@@ -1618,7 +1751,7 @@ export default function LiveWeatherAlertsHomePage() {
         <RadarPreviewCard
           alertState={alertState}
           radar={weather?.radar || null}
-          onViewRadar={() => {}}
+          onViewRadar={() => setShowRadarModal(true)}
         />
 
         <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
@@ -1732,6 +1865,13 @@ export default function LiveWeatherAlertsHomePage() {
           setActiveTab(tab);
           window.scrollTo({ top: 0, behavior: "smooth" });
         }}
+      />
+
+      <RadarModal
+        open={showRadarModal}
+        onClose={() => setShowRadarModal(false)}
+        radar={weather?.radar || null}
+        locationLabel={locationLabel}
       />
 
       {selectedAlert ? (
