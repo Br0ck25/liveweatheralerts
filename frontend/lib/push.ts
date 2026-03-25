@@ -5,7 +5,12 @@ export async function subscribeToPush(stateCode: string) {
     throw new Error("Service workers not supported");
   }
 
+  if (!("PushManager" in window)) {
+    throw new Error("Push messaging is not supported in this browser.");
+  }
+
   const reg = await navigator.serviceWorker.register("/sw.js");
+  await navigator.serviceWorker.ready;
 
   const permission = await Notification.requestPermission();
   if (permission !== "granted") {
@@ -32,37 +37,46 @@ export async function subscribeToPush(stateCode: string) {
     throw new Error("Push public key missing from server response.");
   }
 
-  const existingSub = await reg.pushManager.getSubscription();
-  const subscription =
-    existingSub ||
-    (await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(publicKey),
-    }));
+  try {
+    const existingSub = await reg.pushManager.getSubscription();
 
-  const subRes = await fetch(`${API_BASE}/api/push/subscribe`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      subscription,
-      stateCode,
-    }),
-  });
+    const subscription =
+      existingSub ||
+      (await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      }));
 
-  const subText = await subRes.text();
-  if (!subRes.ok) {
-    throw new Error(`Subscribe failed: ${subRes.status} ${subText}`);
+    const subRes = await fetch(`${API_BASE}/api/push/subscribe`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        subscription,
+        stateCode,
+      }),
+    });
+
+    const subText = await subRes.text();
+    if (!subRes.ok) {
+      throw new Error(`Subscribe failed: ${subRes.status} ${subText}`);
+    }
+
+    return true;
+  } catch (err) {
+    console.error("Push subscribe failure:", err);
+    const message =
+      err instanceof Error
+        ? `${err.name}: ${err.message}`
+        : "Unknown push subscription error";
+    throw new Error(message);
   }
-
-  return true;
 }
 
 function urlBase64ToUint8Array(base64String: string) {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
-
   const rawData = window.atob(base64);
   return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
 }

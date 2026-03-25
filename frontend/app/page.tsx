@@ -217,6 +217,25 @@ export default function LiveWeatherAlertsHomePage() {
   const [showRadarModal, setShowRadarModal] = useState(false);
 
   useEffect(() => {
+    const savedTab = localStorage.getItem("ACTIVE_TAB") as
+      | "home"
+      | "forecast"
+      | "radar"
+      | "alerts"
+      | "more"
+      | null;
+
+    const validTabs = ["home", "forecast", "radar", "alerts", "more"] as const;
+    if (savedTab && validTabs.includes(savedTab)) {
+      setActiveTab(savedTab);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("ACTIVE_TAB", activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
     const raw = localStorage.getItem(STORAGE_KEY);
     console.log("STORAGE_KEY", STORAGE_KEY);
     console.log("raw location", raw);
