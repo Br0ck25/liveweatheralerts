@@ -199,15 +199,15 @@ export function getHeroVariantBackgroundImage(event: string): string | null {
 
   switch (variant) {
     case "tornado":
-      return "/images/alerts/tornado.jpg";
+      return "/images/website/tornado.jpg";
     case "flood":
-      return "/images/alerts/flood.jpg";
+      return "/images/website/flood.jpg";
     case "winter":
-      return "/images/alerts/winter.jpg";
+      return "/images/website/winter.jpg";
     case "fire":
-      return "/images/alerts/fire.jpg";
+      return "/images/website/fire.jpg";
     default:
-      return "/images/alerts/default.jpg";
+      return "/images/website/default.jpg";
   }
 }
 
