@@ -63,6 +63,12 @@ export default function RadarMapModal({
       center: [location.lon, location.lat],
       zoom: 7,
       attributionControl: false,
+      interactive: true,
+      dragPan: true,
+      scrollZoom: true,
+      doubleClickZoom: true,
+      touchZoomRotate: true,
+      dragRotate: false,
     });
 
     mapRef.current = map;
@@ -184,18 +190,23 @@ export default function RadarMapModal({
 
   useEffect(() => {
     if (!open || !mapRef.current) return;
-    mapRef.current.resize();
-    mapRef.current.flyTo({
-      center: [location.lon, location.lat],
-      zoom: 7,
-      duration: 700,
-    });
+
+    const id = window.setTimeout(() => {
+      mapRef.current?.resize();
+      mapRef.current?.flyTo({
+        center: [location.lon, location.lat],
+        zoom: 7,
+        duration: 700,
+      });
+    }, 100);
+
+    return () => window.clearTimeout(id);
   }, [open, location.lat, location.lon]);
 
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-100 bg-black/80 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm">
       <div className="absolute inset-0 flex flex-col">
         <div className="flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 text-white">
           <div>
@@ -217,7 +228,11 @@ export default function RadarMapModal({
           </button>
         </div>
 
-        <div ref={mapContainerRef} className="min-h-0 flex-1" />
+        <div
+          ref={mapContainerRef}
+          className="min-h-0 flex-1 touch-none"
+          style={{ width: "100%", height: "100%" }}
+        />
       </div>
     </div>
   );
