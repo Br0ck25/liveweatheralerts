@@ -182,13 +182,18 @@ export function getAlertBackground(event: string) {
   `;
 }
 
-export function getHeroVariant(event: string): "tornado" | "flood" | "winter" | "fire" | "default" {
+export function getHeroVariant(event: string): "tornado" | "flood" | "winter" | "fire" | "thunderstorm" | "dense-fog" | "extreme-cold" | "extreme-heat" | "freezing-rain" | "wind" | "default" {
   const e = event.toLowerCase();
 
-  if (e.includes("tornado") || e.includes("severe thunderstorm")) return "tornado";
+  if (e.includes("tornado")) return "tornado";
+  if (e.includes("severe thunderstorm") || e.includes("thunderstorm")) return "thunderstorm";
   if (e.includes("flood")) return "flood";
-  if (e.includes("winter") || e.includes("snow") || e.includes("ice") || e.includes("blizzard"))
-    return "winter";
+  if (e.includes("freezing rain")) return "freezing-rain";
+  if (e.includes("dense fog") || e.includes("fog")) return "dense-fog";
+  if (e.includes("extreme cold") || e.includes("cold")) return "extreme-cold";
+  if (e.includes("extreme heat") || e.includes("heat")) return "extreme-heat";
+  if (e.includes("winter") || e.includes("snow") || e.includes("ice") || e.includes("blizzard")) return "winter";
+  if (e.includes("wind") || e.includes("high wind")) return "wind";
   if (e.includes("fire") || e.includes("red flag") || e.includes("smoke")) return "fire";
 
   return "default";
@@ -200,14 +205,26 @@ export function getHeroVariantBackgroundImage(event: string): string | null {
   switch (variant) {
     case "tornado":
       return "/images/website/tornado.jpg";
+    case "thunderstorm":
+      return "/images/website/thunderstorm.jpg";
     case "flood":
       return "/images/website/flood.jpg";
+    case "freezing-rain":
+      return "/images/website/freezing-rain.jpg";
+    case "dense-fog":
+      return "/images/website/dense-fog.jpg";
+    case "extreme-cold":
+      return "/images/website/extreme-cold.jpg";
+    case "extreme-heat":
+      return "/images/website/extreme-heat.jpg";
+    case "wind":
+      return "/images/website/wind.jpg";
     case "winter":
       return "/images/website/winter.jpg";
     case "fire":
       return "/images/website/fire.jpg";
     default:
-      return "/images/website/default.jpg";
+      return "/images/website/aaaadefault.jpg";
   }
 }
 

@@ -2,9 +2,8 @@
 
 import { Card, CardContent } from "@/components/ui/card";
 import { ShieldAlert, ChevronRight, TriangleAlert, CloudRain, CloudFog, Waves } from "lucide-react";
-import { dedupeArea } from "@/lib/alerts/helpers";
+import { dedupeArea, getAlertBackground, getHeroVariantBackgroundImageIfExists, AlertItem } from "@/lib/alerts/helpers";
 import { formatTime } from "@/lib/weather/formatters";
-import { AlertItem } from "@/lib/alerts/helpers";
 
 function formatIssuedTime(value?: string) {
   if (!value) return "—";
@@ -48,24 +47,33 @@ export default function AlertHeadlineList({
             const typeMeta = getAlertTypeMeta(alert.event);
             const Icon = typeMeta.icon;
 
+            const cardBgImage = getHeroVariantBackgroundImageIfExists(alert.event);
+            const tone = getAlertBackground(alert.event);
+
             return (
               <button
                 key={alert.id}
                 type="button"
                 onClick={() => onSelectAlert(alert)}
-                className="flex w-full items-center justify-between rounded-[20px] border border-red-500/20 bg-gradient-to-r from-red-700 to-red-600 px-4 py-3 text-left shadow-lg"
+                className="relative flex w-full items-center justify-between rounded-[20px] border border-red-500/20 px-4 py-3 text-left text-white shadow-lg overflow-hidden"
+                style={{
+                  backgroundImage: cardBgImage ? `url(${cardBgImage})` : undefined,
+                  backgroundSize: "cover",
+                  backgroundPosition: "center",
+                }}
               >
-                <div className="min-w-0">
+                <div className="absolute inset-0" style={{ background: tone, opacity: 0.7 }} />
+                <div className="relative z-10 min-w-0">
                   <div className="flex items-center gap-1.5 text-sm font-black uppercase tracking-wide text-white">
                     <Icon className="h-4 w-4" />
                     {typeMeta.label}
                   </div>
-                  <div className="truncate text-sm text-red-50">{alert.headline || dedupeArea(alert.areaDesc)}</div>
+                  <div className="truncate text-sm text-white/90">{alert.headline || dedupeArea(alert.areaDesc)}</div>
                   <div className="mt-1 text-xs text-white/80">
                     Issued {formatIssuedTime(alert.sent || alert.effective)} • Until {formatTime(alert.expires)}
                   </div>
                 </div>
-                <ChevronRight className="ml-3 h-5 w-5 shrink-0 text-white" />
+                <ChevronRight className="relative z-10 ml-3 h-5 w-5 shrink-0 text-white" />
               </button>
             );
           })}

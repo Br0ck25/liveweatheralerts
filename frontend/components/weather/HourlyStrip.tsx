@@ -23,7 +23,7 @@ export default function HourlyStrip({
     <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
       <CardContent className="pt-6 pb-5 px-5">
         <div className="mb-5 flex items-center justify-between">
-          <div className="text-xl font-black uppercase tracking-wide">Hourly Forecast</div>
+          <div className="text-xl font-black uppercase tracking-wide">Next 18 Hours</div>
           <Button
             variant="secondary"
             className="h-9 rounded-xl bg-blue-600 px-4 text-sm font-bold text-white hover:bg-blue-500"

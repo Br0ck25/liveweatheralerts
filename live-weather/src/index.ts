@@ -2577,50 +2577,129 @@ async function fetchPointWeatherContext(lat: number, lon: number): Promise<any> 
 	};
 }
 
-async function fetchLatestObservation(observationStationsUrl: string): Promise<{ stationId: string; properties: any } | null> {
-	if (!observationStationsUrl) return null;
+function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
+	const toRad = (deg: number) => (deg * Math.PI) / 180;
+	const R = 3958.7613;
+	const dLat = toRad(lat2 - lat1);
+	const dLon = toRad(lon2 - lon1);
+	const a =
+		Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+		Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+		Math.sin(dLon / 2) * Math.sin(dLon / 2);
+	const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+	return R * c;
+}
+
+function observationAgeMs(timestamp?: string | null): number {
+	if (!timestamp) return Number.POSITIVE_INFINITY;
+	const ms = Date.parse(String(timestamp));
+	if (!Number.isFinite(ms)) return Number.POSITIVE_INFINITY;
+	return Math.max(0, Date.now() - ms);
+}
+
+async function fetchStationLatestObservation(stationId: string): Promise<any | null> {
 	try {
-		const stationsPayload = await fetchNwsJson(observationStationsUrl, 'Observation stations');
-		const features = Array.isArray(stationsPayload?.features) ? stationsPayload.features : [];
-		const first = features[0];
-		const stationId = String(
-			first?.properties?.stationIdentifier
-			|| first?.properties?.station
-			|| ''
-		).trim();
-		if (!stationId) return null;
 		const obsPayload = await fetchNwsJson(
 			`https://api.weather.gov/stations/${encodeURIComponent(stationId)}/observations/latest`,
 			'Latest observation',
 		);
-		return {
-			stationId,
-			properties: obsPayload?.properties ?? {},
-		};
+		return obsPayload?.properties ?? null;
+	} catch {
+		return null;
+	}
+}
+
+async function fetchLatestObservation(
+	observationStationsUrl: string,
+	lat: number,
+	lon: number,
+): Promise<{ stationId: string; properties: any; distanceMiles: number | null } | null> {
+	if (!observationStationsUrl) return null;
+	try {
+		const stationsPayload = await fetchNwsJson(observationStationsUrl, 'Observation stations');
+		const features = Array.isArray(stationsPayload?.features) ? stationsPayload.features : [];
+		const candidates = features
+			.slice(0, 8)
+			.map((feature: any) => {
+				const stationId = String(
+					feature?.properties?.stationIdentifier
+					|| feature?.properties?.station
+					|| ''
+				).trim();
+				const coords = Array.isArray(feature?.geometry?.coordinates) ? feature.geometry.coordinates : [];
+				const stationLon = Number(coords?.[0]);
+				const stationLat = Number(coords?.[1]);
+				const distanceMiles = Number.isFinite(stationLat) && Number.isFinite(stationLon)
+					? haversineMiles(lat, lon, stationLat, stationLon)
+					: Number.POSITIVE_INFINITY;
+				return { stationId, distanceMiles };
+			})
+			.filter((x: any) => Boolean(x.stationId));
+
+		if (candidates.length === 0) return null;
+
+		const observed = await Promise.all(
+			candidates.map(async (candidate: any) => ({
+				stationId: candidate.stationId,
+				distanceMiles: Number.isFinite(candidate.distanceMiles) ? candidate.distanceMiles : null,
+				properties: await fetchStationLatestObservation(candidate.stationId),
+			})),
+		);
+
+		const usable = observed.filter((item: any) => item.properties);
+		if (usable.length === 0) return null;
+
+		usable.sort((a: any, b: any) => {
+			const aHasTemp = Number.isFinite(toTemperatureF(a.properties?.temperature) as number) ? 1 : 0;
+			const bHasTemp = Number.isFinite(toTemperatureF(b.properties?.temperature) as number) ? 1 : 0;
+			if (aHasTemp !== bHasTemp) return bHasTemp - aHasTemp;
+
+			const aRecent = isRecentObservation(a.properties?.timestamp) ? 1 : 0;
+			const bRecent = isRecentObservation(b.properties?.timestamp) ? 1 : 0;
+			if (aRecent !== bRecent) return bRecent - aRecent;
+
+			const aDist = Number.isFinite(a.distanceMiles as number) ? Number(a.distanceMiles) : Number.POSITIVE_INFINITY;
+			const bDist = Number.isFinite(b.distanceMiles as number) ? Number(b.distanceMiles) : Number.POSITIVE_INFINITY;
+			if (aDist !== bDist) return aDist - bDist;
+
+			const aAge = observationAgeMs(a.properties?.timestamp);
+			const bAge = observationAgeMs(b.properties?.timestamp);
+			return aAge - bAge;
+		});
+
+		return usable[0] ?? null;
 	} catch {
 		return null;
 	}
 }
 
 function normalizeHourlyPeriods(hourlyPeriods: any[]): any[] {
-	return hourlyPeriods.slice(0, 18).map((period: any, index: number) => {
-		const temperatureF = forecastTemperatureToF(period);
-		return {
-			startTime: String(period?.startTime || ''),
-			isNow: index === 0,
-			temperatureF: roundTo(temperatureF, 0),
-			shortForecast: String(period?.shortForecast || ''),
-			icon: String(period?.icon || ''),
-			windSpeedMph: roundTo(parseWindSpeedTextMph(String(period?.windSpeed || '')), 0),
-			windDirection: String(period?.windDirection || ''),
-			precipitationChance: roundTo(
-				Number.isFinite(Number(period?.probabilityOfPrecipitation?.value))
-					? Number(period?.probabilityOfPrecipitation?.value)
-					: null,
-				0,
-			),
-		};
-	});
+	const now = Date.now();
+
+	return hourlyPeriods
+		.filter((period: any) => {
+			const startMs = Date.parse(String(period?.startTime || ''));
+			return Number.isFinite(startMs) && startMs > now;
+		})
+		.slice(0, 18)
+		.map((period: any) => {
+			const temperatureF = forecastTemperatureToF(period);
+			return {
+				startTime: String(period?.startTime || ''),
+				isNow: false,
+				temperatureF: roundTo(temperatureF, 0),
+				shortForecast: String(period?.shortForecast || ''),
+				icon: String(period?.icon || ''),
+				windSpeedMph: roundTo(parseWindSpeedTextMph(String(period?.windSpeed || '')), 0),
+				windDirection: String(period?.windDirection || ''),
+				precipitationChance: roundTo(
+					Number.isFinite(Number(period?.probabilityOfPrecipitation?.value))
+						? Number(period?.probabilityOfPrecipitation?.value)
+						: null,
+					0,
+				),
+			};
+		});
 }
 
 function normalizeDailyPeriods(periods: any[]): any[] {
@@ -2665,51 +2744,139 @@ function isRecentObservation(timestamp?: string | null): boolean {
 	if (!timestamp) return false;
 	const ms = Date.parse(String(timestamp));
 	if (!Number.isFinite(ms)) return false;
-	return Date.now() - ms <= 15 * 60 * 1000; // 15 minutes freshness window
+	return Date.now() - ms <= 90 * 60 * 1000; // 90 minutes keeps valid NWS station obs from falling back too early
 }
 
-function computeFeelsLike(observedTempF: number | null, heatIndexF: number | null, windChillF: number | null, fallbackTempF: number | null): number | null {
-	if (Number.isFinite(heatIndexF as number) && Number.isFinite(observedTempF as number) && (observedTempF as number) >= 80) {
-		return heatIndexF;
+function parseIsoMs(value?: string | null): number | null {
+	if (!value) return null;
+	const ms = Date.parse(String(value));
+	return Number.isFinite(ms) ? ms : null;
+}
+
+function buildSunTimesFromDailyPeriods(dailyPeriods: any[], nowMs = Date.now()) {
+	const dayPeriods = (Array.isArray(dailyPeriods) ? dailyPeriods : [])
+		.filter((p: any) => p?.isDaytime && p?.startTime && p?.endTime)
+		.map((p: any) => ({
+			startTime: String(p.startTime),
+			endTime: String(p.endTime),
+			startMs: parseIsoMs(p.startTime),
+			endMs: parseIsoMs(p.endTime),
+		}))
+		.filter((p: any) => p.startMs !== null && p.endMs !== null)
+		.sort((a: any, b: any) => a.startMs - b.startMs);
+
+	let sunrise: string | null = null;
+	let sunset: string | null = null;
+	let isNight = false;
+
+	const activeDay = dayPeriods.find((p: any) => nowMs >= p.startMs && nowMs < p.endMs);
+	if (activeDay) {
+		sunrise = activeDay.startTime;
+		sunset = activeDay.endTime;
+		isNight = false;
+	} else {
+		const previousDay = [...dayPeriods].reverse().find((p: any) => p.endMs <= nowMs);
+		const nextDay = dayPeriods.find((p: any) => p.startMs > nowMs);
+
+		sunset = previousDay?.endTime ?? null;
+		sunrise = nextDay?.startTime ?? null;
+		isNight = true;
 	}
-	if (Number.isFinite(windChillF as number) && Number.isFinite(observedTempF as number) && (observedTempF as number) <= 50) {
-		return windChillF;
-	}
+
+	return { sunrise, sunset, isNight };
+}
+
+function computeHeatIndexF(tempF: number | null, humidity: number | null): number | null {
+	if (!Number.isFinite(tempF as number) || !Number.isFinite(humidity as number)) return null;
+	const T = Number(tempF);
+	const R = Number(humidity);
+	if (T < 80 || R < 40) return null;
+	const hi =
+		-42.379 +
+		2.04901523 * T +
+		10.14333127 * R -
+		0.22475541 * T * R -
+		0.00683783 * T * T -
+		0.05481717 * R * R +
+		0.00122874 * T * T * R +
+		0.00085282 * T * R * R -
+		0.00000199 * T * T * R * R;
+	return hi;
+}
+
+function computeWindChillF(tempF: number | null, windMph: number | null): number | null {
+	if (!Number.isFinite(tempF as number) || !Number.isFinite(windMph as number)) return null;
+	const T = Number(tempF);
+	const V = Number(windMph);
+	if (T > 50 || V < 3) return null;
+	return 35.74 + 0.6215 * T - 35.75 * Math.pow(V, 0.16) + 0.4275 * T * Math.pow(V, 0.16);
+}
+
+function computeFeelsLike(
+	observedTempF: number | null,
+	heatIndexF: number | null,
+	windChillF: number | null,
+	humidity: number | null,
+	windMph: number | null,
+	fallbackTempF: number | null,
+): number | null {
 	if (Number.isFinite(observedTempF as number)) {
-		return observedTempF;
+		const observed = Number(observedTempF);
+
+		if (observed >= 80) {
+			return firstFinite(heatIndexF, computeHeatIndexF(observed, humidity), observed, fallbackTempF);
+		}
+
+		if (observed <= 50) {
+			return firstFinite(windChillF, computeWindChillF(observed, windMph), observed, fallbackTempF);
+		}
+
+		return observed;
 	}
-	return firstFinite(heatIndexF, windChillF, fallbackTempF);
+
+	return firstFinite(fallbackTempF, heatIndexF, windChillF);
 }
 
-function buildCurrentConditions(observationProps: any, firstHourly: any): any {
+function buildCurrentConditions(
+	observationProps: any,
+	firstHourly: any,
+	sun?: { sunrise: string | null; sunset: string | null; isNight: boolean },
+): any {
+	const observationIsFresh = isRecentObservation(observationProps?.timestamp);
 	const observedTempF = toTemperatureF(observationProps?.temperature);
 	const hourlyTempF = forecastTemperatureToF(firstHourly);
 	const temperatureF = firstFinite(
-		isRecentObservation(observationProps?.timestamp) ? observedTempF : null,
+		observationIsFresh ? observedTempF : null,
 		hourlyTempF,
 		observedTempF,
 	);
 
-	const heatIndexF = toTemperatureF(observationProps?.heatIndex);
-	const windChillF = toTemperatureF(observationProps?.windChill);
-	const feelsLikeF = computeFeelsLike(temperatureF, heatIndexF, windChillF, hourlyTempF);
-
-	const humidity = toPercent(observationProps?.relativeHumidity);
-	const pressureInHg = toPressureInHg(observationProps?.barometricPressure);
-	const visibilityMi = toMiles(observationProps?.visibility);
-	const dewpointF = toTemperatureF(observationProps?.dewpoint);
+	const humidity = observationIsFresh ? toPercent(observationProps?.relativeHumidity) : null;
+	const pressureInHg = observationIsFresh ? toPressureInHg(observationProps?.barometricPressure) : null;
+	const visibilityMi = observationIsFresh ? toMiles(observationProps?.visibility) : null;
+	const dewpointF = observationIsFresh ? toTemperatureF(observationProps?.dewpoint) : null;
 	const windMph = firstFinite(
-		toSpeedMph(observationProps?.windSpeed),
+		observationIsFresh ? toSpeedMph(observationProps?.windSpeed) : null,
 		parseWindSpeedTextMph(String(firstHourly?.windSpeed || '')),
 	);
-	const windDirection = firstFinite(
-		measurementValue(observationProps?.windDirection),
-		null,
+	const windDirection = observationIsFresh
+		? firstFinite(measurementValue(observationProps?.windDirection), null)
+		: null;
+	const heatIndexF = observationIsFresh ? toTemperatureF(observationProps?.heatIndex) : null;
+	const windChillF = observationIsFresh ? toTemperatureF(observationProps?.windChill) : null;
+	const feelsLikeF = computeFeelsLike(
+		observationIsFresh ? observedTempF : temperatureF,
+		heatIndexF,
+		windChillF,
+		humidity,
+		windMph,
+		temperatureF,
 	);
 
 	const condition = String(
-		observationProps?.textDescription
+		(observationIsFresh ? observationProps?.textDescription : null)
 		|| firstHourly?.shortForecast
+		|| observationProps?.textDescription
 		|| 'Conditions unavailable',
 	);
 
@@ -2723,8 +2890,12 @@ function buildCurrentConditions(observationProps: any, firstHourly: any): any {
 		dewpointF: roundTo(dewpointF, 0),
 		pressureInHg: roundTo(pressureInHg, 2),
 		visibilityMi: roundTo(visibilityMi, 1),
-		icon: String(observationProps?.icon || firstHourly?.icon || ''),
-		timestamp: String(observationProps?.timestamp || firstHourly?.startTime || ''),
+		icon: String((observationIsFresh ? observationProps?.icon : null) || firstHourly?.icon || observationProps?.icon || ''),
+		timestamp: String((observationIsFresh ? observationProps?.timestamp : null) || firstHourly?.startTime || observationProps?.timestamp || ''),
+		isObservationFresh: observationIsFresh,
+		sunrise: sun?.sunrise ?? null,
+		sunset: sun?.sunset ?? null,
+		isNight: !!sun?.isNight,
 	};
 }
 
@@ -2866,7 +3037,7 @@ async function handleApiWeather(request: Request): Promise<Response> {
 		const [forecastPayload, hourlyPayload, observation] = await Promise.all([
 			fetchNwsJson(point.forecast, 'Daily forecast'),
 			fetchNwsJson(point.forecastHourly, 'Hourly forecast'),
-			fetchLatestObservation(point.observationStations),
+			fetchLatestObservation(point.observationStations, point.lat, point.lon),
 		]);
 
 		const hourlyPeriodsRaw = Array.isArray(hourlyPayload?.properties?.periods)
@@ -2878,7 +3049,27 @@ async function handleApiWeather(request: Request): Promise<Response> {
 
 		const hourly = normalizeHourlyPeriods(hourlyPeriodsRaw);
 		const daily = normalizeDailyPeriods(dailyPeriodsRaw);
-		const current = buildCurrentConditions(observation?.properties ?? {}, hourlyPeriodsRaw[0] ?? {});
+		const sun = buildSunTimesFromDailyPeriods(dailyPeriodsRaw);
+		let current = buildCurrentConditions(
+			observation?.properties ?? {},
+			hourlyPeriodsRaw[0] ?? {},
+			sun,
+		);
+
+		const now = Date.now();
+		let isNight = true;
+		if (sun?.sunrise && sun?.sunset) {
+			const sunrise = Date.parse(String(sun.sunrise));
+			const sunset = Date.parse(String(sun.sunset));
+			if (Number.isFinite(sunrise) && Number.isFinite(sunset)) {
+				if (now >= sunrise && now < sunset) {
+					isNight = false;
+				}
+			}
+		}
+
+		current = { ...current, isNight };
+
 		const radarStation = point.radarStation || observation?.stationId || '';
 		const radar = buildRadarPayload({
 			lat: point.lat,
@@ -2888,7 +3079,10 @@ async function handleApiWeather(request: Request): Promise<Response> {
 			summary: String(observation?.properties?.textDescription || current.condition || ''),
 		});
 
-		headers.set('Cache-Control', 'public, max-age=120');
+		console.log("SUN DATA", sun);
+		console.log("CURRENT OUTPUT", current);
+
+		headers.set('Cache-Control', 'public, max-age=30, must-revalidate');
 		return new Response(JSON.stringify({
 			location: {
 				lat: point.lat,
@@ -2923,12 +3117,12 @@ async function handleApiRadar(request: Request): Promise<Response> {
 	try {
 		const { lat, lon } = parseLatLonForWeather(request);
 		const point = await fetchPointWeatherContext(lat, lon);
-		const observation = await fetchLatestObservation(point.observationStations);
+		const observation = await fetchLatestObservation(point.observationStations, point.lat, point.lon);
 		const radarStation = point.radarStation || observation?.stationId || '';
 		const images = radarImagesForStation(radarStation);
 		const direction = toCompassDirection(measurementValue(observation?.properties?.windDirection));
 
-		headers.set('Cache-Control', 'public, max-age=120');
+		headers.set('Cache-Control', 'public, max-age=30, must-revalidate');
 		return new Response(JSON.stringify({
 			location: {
 				lat: point.lat,

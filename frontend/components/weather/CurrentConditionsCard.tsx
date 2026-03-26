@@ -1,7 +1,8 @@
 "use client";
 
 import { Card, CardContent } from "@/components/ui/card";
-import { CloudRain, CloudSun, Compass } from "lucide-react";
+import { Compass } from "lucide-react";
+import { iconForHourly } from "@/lib/weather/formatters";
 
 type CurrentConditions = {
   temp: number;
@@ -10,6 +11,10 @@ type CurrentConditions = {
   wind: string;
   humidity: number;
   uv: string;
+  icon: "storm" | "sun" | "cloud" | "night";
+  sunrise?: string | null;
+  sunset?: string | null;
+  isNight?: boolean;
 };
 
 export default function CurrentConditionsCard({
@@ -34,7 +39,9 @@ export default function CurrentConditionsCard({
 
         <div className="grid grid-cols-[120px_1fr] gap-4">
           <div className="rounded-[24px] bg-white/5 p-4 text-center">
-            <CloudSun className="mx-auto h-16 w-16 text-yellow-300" />
+            <div className="mx-auto flex h-16 w-16 items-center justify-center">
+              {iconForHourly(current.icon)}
+            </div>
             <div className="mt-4 text-6xl font-black leading-none">{current.temp}°</div>
             <div className="mt-2 text-sm font-medium text-blue-100">
               Feels like {current.feelsLike}°
@@ -43,7 +50,9 @@ export default function CurrentConditionsCard({
 
           <div className="space-y-4 rounded-[24px] bg-white/5 p-4">
             <div className="flex items-center gap-2 text-base font-semibold text-white">
-              <CloudRain className="h-5 w-5 text-sky-300" />
+              <span className="flex h-5 w-5 items-center justify-center">
+                {iconForHourly(current.icon)}
+              </span>
               {current.condition}
             </div>
 

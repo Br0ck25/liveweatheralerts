@@ -1,7 +1,7 @@
 "use client";
 
 import { TriangleAlert, CloudRain, CloudFog, Waves } from "lucide-react";
-import { heroAreaLabel, smallAlertTone, AlertItem } from "@/lib/alerts/helpers";
+import { heroAreaLabel, smallAlertTone, getHeroVariantBackgroundImageIfExists, AlertItem } from "@/lib/alerts/helpers";
 import { formatTime } from "@/lib/weather/formatters";
 
 function formatIssuedTime(value?: string) {
@@ -33,28 +33,38 @@ export default function SmallAlertCard({
   alert: AlertItem;
   onClick: (alert: AlertItem) => void;
 }) {
+  const bgImage = getHeroVariantBackgroundImageIfExists(alert.event);
+
   return (
     <button
       type="button"
       onClick={() => onClick(alert)}
-      className={`min-w-[140px] rounded-[16px] border border-white/10 bg-gradient-to-br ${smallAlertTone(alert.event)} p-3 text-left text-white shadow-lg`}
+      className={`relative overflow-hidden min-w-[140px] rounded-[16px] border border-white/10 p-3 text-left text-white shadow-lg`}
+      style={{
+        backgroundImage: bgImage ? `url(${bgImage})` : undefined,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+      }}
     >
-      <div className="flex items-center gap-1 text-[10px] font-black uppercase leading-4 tracking-wide text-white/90">
-        {(() => {
-          const typeMeta = getAlertTypeMeta(alert.event);
-          const Icon = typeMeta.icon;
-          return (
-            <>
-              <Icon className="h-3.5 w-3.5" />
-              {typeMeta.label}
-            </>
-          );
-        })()}
-      </div>
-      <div className="mt-2 line-clamp-2 text-base font-black leading-tight">{heroAreaLabel(alert)}</div>
-      <div className="mt-2 text-xs text-white/90">
-        <div>Issued {formatIssuedTime(alert.sent || alert.effective)}</div>
-        <div>Until {formatTime(alert.expires)}</div>
+      <div className={`absolute inset-0 bg-gradient-to-br ${smallAlertTone(alert.event)}/80`} />
+      <div className="relative z-10">
+        <div className="flex items-center gap-1 text-[10px] font-black uppercase leading-4 tracking-wide text-white/90">
+          {(() => {
+            const typeMeta = getAlertTypeMeta(alert.event);
+            const Icon = typeMeta.icon;
+            return (
+              <>
+                <Icon className="h-3.5 w-3.5" />
+                {typeMeta.label}
+              </>
+            );
+          })()}
+        </div>
+        <div className="mt-2 line-clamp-2 text-base font-black leading-tight">{heroAreaLabel(alert)}</div>
+        <div className="mt-2 text-xs text-white/90">
+          <div>Issued {formatIssuedTime(alert.sent || alert.effective)}</div>
+          <div>Until {formatTime(alert.expires)}</div>
+        </div>
       </div>
     </button>
   );

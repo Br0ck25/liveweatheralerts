@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronRight, TriangleAlert, CloudRain, CloudFog, Waves } from "lucide-react";
-import { heroAreaLabel, smallAlertTone, AlertItem } from "@/lib/alerts/helpers";
+import { heroAreaLabel, smallAlertTone, getHeroVariantBackgroundImageIfExists, AlertItem } from "@/lib/alerts/helpers";
 import { formatTime } from "@/lib/weather/formatters";
 
 function formatIssuedTime(value?: string) {
@@ -41,13 +41,22 @@ export default function SingleSecondaryAlertCard({
   alert: AlertItem;
   onClick: (alert: AlertItem) => void;
 }) {
+  const bgImage = getHeroVariantBackgroundImageIfExists(alert.event);
+
   return (
     <button
       type="button"
       onClick={() => onClick(alert)}
-      className={`w-full rounded-[18px] border border-white/10 bg-gradient-to-br ${smallAlertTone(alert.event)} p-4 text-left text-white shadow-lg`}
+      className="relative overflow-hidden w-full rounded-[18px] border border-white/10 p-4 text-left text-white shadow-lg"
+      style={{
+        backgroundImage: bgImage ? `url(${bgImage})` : undefined,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+      }}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div className={`absolute inset-0 bg-gradient-to-br ${smallAlertTone(alert.event)}/80`} />
+      <div className="relative z-10">
+        <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 text-[11px] font-black uppercase tracking-wide text-white/90">
             {(() => {
@@ -73,6 +82,7 @@ export default function SingleSecondaryAlertCard({
         </div>
 
         <ChevronRight className="mt-1 h-5 w-5 shrink-0 text-white/90" />
+      </div>
       </div>
     </button>
   );

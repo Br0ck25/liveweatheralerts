@@ -37,7 +37,7 @@ import {
   type PushPreferences,
 } from "@/lib/push";
 import { formatTime, formatRelative, mapIcon } from "@/lib/weather/formatters";
-import { sortAlerts, getAlertPriority, heroAreaLabel } from "@/lib/alerts/helpers";
+import { sortAlerts, getAlertPriority, heroAreaLabel, getAlertBackground, getHeroVariantBackgroundImageIfExists } from "@/lib/alerts/helpers";
 
 /**
  * Page 1: Mobile Home screen
@@ -119,6 +119,9 @@ type WeatherCurrent = {
   wind: string;
   humidity: number | null;
   uv: string;
+  sunrise?: string | null;
+  sunset?: string | null;
+  isNight?: boolean;
 };
 
 type WeatherHourlyPoint = {
@@ -172,6 +175,10 @@ type CurrentConditions = {
   wind: string;
   humidity: number;
   uv: string;
+  icon: "storm" | "sun" | "cloud" | "night";
+  sunrise?: string | null;
+  sunset?: string | null;
+  isNight?: boolean;
 };
 
 type HourlyPoint = {
@@ -191,6 +198,10 @@ const fallbackCurrent: CurrentConditions = {
   wind: "S 18 mph",
   humidity: 64,
   uv: "6 (High)",
+  icon: "storm",
+  sunrise: null,
+  sunset: null,
+  isNight: false,
 };
 
 const fallbackHourly: HourlyPoint[] = [
@@ -203,6 +214,45 @@ const fallbackHourly: HourlyPoint[] = [
 ];
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
+
+function resolveCurrentIcon(
+  condition: string | undefined,
+  isNight: boolean | undefined,
+): "storm" | "sun" | "cloud" | "night" {
+  const text = String(condition || "").toLowerCase();
+
+  if (
+    text.includes("thunder") ||
+    text.includes("storm") ||
+    text.includes("tornado") ||
+    text.includes("lightning")
+  ) {
+    return "storm";
+  }
+
+  if (
+    text.includes("rain") ||
+    text.includes("shower") ||
+    text.includes("drizzle") ||
+    text.includes("snow") ||
+    text.includes("sleet") ||
+    text.includes("ice") ||
+    text.includes("freezing") ||
+    text.includes("fog") ||
+    text.includes("mist") ||
+    text.includes("haze") ||
+    text.includes("smoke") ||
+    text.includes("cloud")
+  ) {
+    return "cloud";
+  }
+
+  if (isNight) {
+    return "night";
+  }
+
+  return "sun";
+}
 
 function AllClearBanner({
   locationLabel,
@@ -366,11 +416,23 @@ export default function LiveWeatherAlertsHomePage() {
     run();
     const refreshInterval = setInterval(() => {
       run();
-    }, 2 * 60 * 1000); // refresh every 2 minutes to keep mobile up-to-date
+    }, 2 * 60 * 1000); // refresh every 2 minutes for mobile and desktop
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        run();
+      }
+    };
+
+    const onFocus = () => run();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("focus", onFocus);
 
     return () => {
       active = false;
       clearInterval(refreshInterval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("focus", onFocus);
     };
   }, [location?.lat, location?.lon]);
 
@@ -525,6 +587,13 @@ export default function LiveWeatherAlertsHomePage() {
     wind: weather?.current?.wind || fallbackCurrent.wind,
     humidity: weather?.current?.humidity ?? fallbackCurrent.humidity,
     uv: weather?.current?.uv || fallbackCurrent.uv,
+    icon: resolveCurrentIcon(
+      weather?.current?.condition || fallbackCurrent.condition,
+      weather?.current?.isNight ?? fallbackCurrent.isNight,
+    ),
+    sunrise: weather?.current?.sunrise ?? fallbackCurrent.sunrise,
+    sunset: weather?.current?.sunset ?? fallbackCurrent.sunset,
+    isNight: weather?.current?.isNight ?? fallbackCurrent.isNight,
   };
 
   async function handleUseGeo() {
@@ -700,12 +769,9 @@ export default function LiveWeatherAlertsHomePage() {
             points={
               weather?.hourly?.length
                 ? weather.hourly.map((p, i) => ({
-                    label:
-                      i === 0
-                        ? "Now"
-                        : new Date(p.startTime || Date.now()).toLocaleTimeString([], {
-                            hour: "numeric",
-                          }),
+                    label: new Date(p.startTime || Date.now()).toLocaleTimeString([], {
+                      hour: "numeric",
+                    }),
                     temp: p.temperatureF ?? 0,
                     icon: mapIcon(p.shortForecast),
                     precip: p.precipitationChance ?? 0,
@@ -1158,11 +1224,19 @@ export default function LiveWeatherAlertsHomePage() {
                           type="button"
                           onClick={() => setSelectedAlert(alert)}
                           className={cn(
-                            "w-full rounded-[22px] border bg-gradient-to-r px-4 py-4 text-left text-white shadow-lg transition-transform hover:scale-[1.01] active:scale-[0.98]",
+                            "relative overflow-hidden w-full rounded-[22px] border px-4 py-4 text-left text-white shadow-lg transition-transform hover:scale-[1.01] active:scale-[0.98]",
                             cardStyles.card
                           )}
+                          style={{
+                            backgroundImage: getHeroVariantBackgroundImageIfExists(alert.event)
+                              ? `url(${getHeroVariantBackgroundImageIfExists(alert.event)})`
+                              : undefined,
+                            backgroundSize: "cover",
+                            backgroundPosition: "center",
+                          }}
                         >
-                        <div className="flex items-start justify-between gap-3">
+                          <div className="absolute inset-0" style={{ background: getAlertBackground(alert.event), opacity: 0.75 }} />
+                          <div className="relative z-10 flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <div
