@@ -23,6 +23,17 @@
 		"directory": "./images",
 		"binding": "ASSETS"
 	},
+	"routes": [
+		{
+			"pattern": "liveweatheralerts.com/api/*",
+			"zone_name": "liveweatheralerts.com"
+		},
+		{
+			"pattern": "www.liveweatheralerts.com/api/*",
+			"zone_name": "liveweatheralerts.com"
+		}
+	],
+	"workers_dev": true,
 	/**
 	 * Cron Triggers
 	 * Polls NWS every 2 minutes using ETags — 304 responses cost almost nothing.

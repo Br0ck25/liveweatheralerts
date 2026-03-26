@@ -14,8 +14,6 @@ type SeverityFilter =
 type SortMode = "priority" | "expires" | "latest";
 type LoadState = "loading" | "ready" | "error";
 
-const REFRESH_INTERVAL_MS = 120_000;
-
 const alertTypeLabel: Record<AlertTypeFilter, string> = {
   all: "All alert types",
   warning: "Warnings",
@@ -800,9 +798,6 @@ export default function App() {
   const [payload, setPayload] = useState<AlertsPayload | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [manualRefreshToken, setManualRefreshToken] = useState(0);
   const [savedPreference, setSavedPreference] =
     useState<SavedLocationPreference | null>(null);
   const [showLocationModal, setShowLocationModal] = useState(false);
@@ -868,11 +863,9 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    let intervalId = 0;
 
-    const load = async (background = false) => {
-      if (background) setIsRefreshing(true);
-      if (!background) setLoadState("loading");
+    const load = async () => {
+      setLoadState("loading");
 
       try {
         const data = await fetchAlerts();
@@ -880,7 +873,6 @@ export default function App() {
         setPayload(data);
         setErrorMessage(null);
         setLoadState("ready");
-        setLastRefresh(new Date());
       } catch (error) {
         if (cancelled) return;
         const message =
@@ -889,21 +881,15 @@ export default function App() {
             : "Unable to load weather alerts.";
         setErrorMessage(message);
         setLoadState("error");
-      } finally {
-        if (!cancelled) setIsRefreshing(false);
       }
     };
 
     void load();
-    intervalId = window.setInterval(() => {
-      void load(true);
-    }, REFRESH_INTERVAL_MS);
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
     };
-  }, [manualRefreshToken]);
+  }, []);
 
   const alerts = payload?.alerts ?? [];
 
@@ -1014,30 +1000,6 @@ export default function App() {
       }).length,
     [alerts]
   );
-
-  const lastPollLabel = payload?.lastPoll
-    ? formatDateTime(payload.lastPoll)
-    : "Waiting for first sync";
-
-  const localRefreshLabel = lastRefresh
-    ? new Intl.DateTimeFormat("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        second: "2-digit"
-      }).format(lastRefresh)
-    : "Not yet loaded";
-
-  const selectedStateLabel =
-    stateFilter === "all"
-      ? "All states"
-      : `${stateFilter} (${formatLabel(STATE_NAME_BY_CODE[stateFilter] ?? stateFilter)})`;
-  const savedLocationLabel = savedPreference
-    ? `${savedPreference.label} (${savedPreference.stateCode}${savedPreference.countyName ? `, ${savedPreference.countyName}` : ""})`
-    : "Not set";
-  const countyFocusLabel =
-    activeCountyName || activeCountyCode
-      ? activeCountyName || `County ${activeCountyCode}`
-      : "Statewide";
 
   const installPwa = async () => {
     if (!installPromptEvent) return;
@@ -1162,13 +1124,6 @@ export default function App() {
               Focused, readable, real-time severe weather alerts from NOAA/NWS.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => setManualRefreshToken((value) => value + 1)}
-            className="refresh-btn"
-          >
-            {isRefreshing ? "Refreshing..." : "Refresh Now"}
-          </button>
         </header>
 
         {showInstallPrompt ? (
@@ -1299,47 +1254,20 @@ export default function App() {
                   </select>
                 </label>
               </div>
+
+              <div className="filters-actions">
+                <button type="button" className="text-btn" onClick={openLocationModal}>
+                  Change Default Location
+                </button>
+                {activeCountyName || activeCountyCode ? (
+                  <button type="button" className="text-btn" onClick={clearCountyFocus}>
+                    Clear County Focus
+                  </button>
+                ) : null}
+              </div>
             </>
           ) : null}
         </section>
-
-        <section className="status-row">
-          <p>
-            Worker sync: <strong>{lastPollLabel}</strong>
-          </p>
-          <p>
-            Frontend refresh: <strong>{localRefreshLabel}</strong>
-          </p>
-          <p>
-            Showing <strong>{sortedAlerts.length}</strong> of{" "}
-            <strong>{alerts.length}</strong> alerts
-          </p>
-          <p>
-            Current filter: <strong>{selectedStateLabel}</strong>
-          </p>
-          <p>
-            Default location: <strong>{savedLocationLabel}</strong>
-          </p>
-          <p>
-            County focus: <strong>{countyFocusLabel}</strong>
-          </p>
-          <div className="status-actions">
-            <button type="button" className="text-btn" onClick={openLocationModal}>
-              Change Location
-            </button>
-            {activeCountyName || activeCountyCode ? (
-              <button type="button" className="text-btn" onClick={clearCountyFocus}>
-                Clear County Focus
-              </button>
-            ) : null}
-          </div>
-        </section>
-
-        {payload?.syncError ? (
-          <section className="message warning-message" role="status">
-            <strong>Sync warning:</strong> {payload.syncError}
-          </section>
-        ) : null}
 
         {errorMessage ? (
           <section className="message error-message" role="alert">
@@ -1373,8 +1301,7 @@ export default function App() {
 
         <footer className="site-footer">
           <p>
-            Data source: NOAA/NWS active alerts feed. Auto-refresh runs every 2
-            minutes.
+            Data source: NOAA/NWS active alerts feed.
           </p>
         </footer>
 

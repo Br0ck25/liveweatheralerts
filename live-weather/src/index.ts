@@ -2296,7 +2296,13 @@ async function handlePushUnsubscribe(request: Request, env: Env): Promise<Respon
 }
 
 async function handleApiAlerts(env: Env): Promise<Response> {
-	const { map, error } = await syncAlerts(env);
+	let map = await readAlertMap(env);
+	let error: string | undefined;
+	if (Object.keys(map).length === 0) {
+		const syncResult = await syncAlerts(env);
+		map = syncResult.map;
+		error = syncResult.error;
+	}
 	const alerts = Object.values(map).map((feature: any) => {
 		const p = feature?.properties ?? {};
 		const id = String(feature?.id ?? p.id ?? '');
