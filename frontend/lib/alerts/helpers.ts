@@ -19,6 +19,20 @@ export type AlertItem = {
   nwsUrl: string;
 };
 
+export type HeroVariant =
+  | "tornado"
+  | "thunderstorm"
+  | "flood"
+  | "winter"
+  | "ice"
+  | "wind"
+  | "fog"
+  | "heat"
+  | "cold"
+  | "fire"
+  | "marine" // 👈 NEW
+  | "default";
+
 // Severity and alert ordering utilities
 export function severityTone(severity?: string) {
   const s = String(severity || "").toLowerCase();
@@ -145,98 +159,224 @@ export function getAlertColor(event: string) {
   return "red";
 }
 
-export function getAlertBackground(event: string) {
-  const e = event.toLowerCase();
-  const isWarning = e.includes("warning");
-  const isWatch = e.includes("watch");
-  const isAdvisory = e.includes("advisory");
+export function getAlertBackground(event?: string): string {
+  switch (getHeroVariant(event)) {
+    case "tornado":
+      return "linear-gradient(135deg, rgba(90,20,20,0.72), rgba(20,20,20,0.78))";
 
-  if (isWarning) {
-    return `
-      radial-gradient(circle at 70% 40%, rgba(255,120,120,0.35), transparent 20%),
-      linear-gradient(180deg, rgba(120,0,0,0.25), rgba(40,0,0,0.9)),
-      linear-gradient(120deg, #5a0000 0%, #9a0000 40%, #390000 100%)
-    `;
+    case "thunderstorm":
+      return "linear-gradient(135deg, rgba(30,64,175,0.72), rgba(15,23,42,0.82))";
+
+    case "flood":
+      return "linear-gradient(135deg, rgba(8,47,73,0.70), rgba(3,105,161,0.70))";
+
+    case "winter":
+    case "ice":
+      return "linear-gradient(135deg, rgba(71,85,105,0.66), rgba(148,163,184,0.58))";
+
+    case "wind":
+      return "linear-gradient(135deg, rgba(55,65,81,0.70), rgba(107,114,128,0.62))";
+
+    case "marine":
+      return "linear-gradient(135deg, rgba(2,132,199,0.70), rgba(3,37,65,0.80))";
+
+    case "fog":
+      return "linear-gradient(135deg, rgba(100,116,139,0.72), rgba(148,163,184,0.60))";
+
+    case "heat":
+      return "linear-gradient(135deg, rgba(180,83,9,0.70), rgba(239,68,68,0.64))";
+
+    case "cold":
+      return "linear-gradient(135deg, rgba(30,64,175,0.68), rgba(56,189,248,0.52))";
+
+    case "fire":
+      return "linear-gradient(135deg, rgba(153,27,27,0.72), rgba(234,88,12,0.60))";
+
+    default:
+      return "linear-gradient(135deg, rgba(15,23,42,0.72), rgba(51,65,85,0.64))";
   }
-
-  if (isWatch) {
-    return `
-      radial-gradient(circle at 70% 40%, rgba(255,180,0,0.35), transparent 20%),
-      linear-gradient(180deg, rgba(120,60,0,0.3), rgba(60,30,0,0.9)),
-      linear-gradient(120deg, #ff8c00 0%, #ff6a00 40%, #5a1a00 100%)
-    `;
-  }
-
-  if (isAdvisory) {
-    return `
-      radial-gradient(circle at 70% 40%, rgba(255,230,120,0.35), transparent 20%),
-      linear-gradient(180deg, rgba(120,100,0,0.3), rgba(60,50,0,0.9)),
-      linear-gradient(120deg, #eab308 0%, #facc15 40%, #a16207 100%)
-    `;
-  }
-
-  return `
-    radial-gradient(circle at 70% 40%, rgba(120,200,255,0.25), transparent 20%),
-    linear-gradient(180deg, rgba(0,40,80,0.4), rgba(0,20,50,0.9)),
-    linear-gradient(120deg, #0b3a5c 0%, #1f6fa5 40%, #09263f 100%)
-  `;
 }
 
-export function getHeroVariant(event: string): "tornado" | "flood" | "winter" | "fire" | "thunderstorm" | "dense-fog" | "extreme-cold" | "extreme-heat" | "freezing-rain" | "wind" | "default" {
-  const e = event.toLowerCase();
+export function getHeroVariant(event?: string): HeroVariant {
+  const text = String(event || "").toLowerCase();
 
-  if (e.includes("tornado")) return "tornado";
-  if (e.includes("severe thunderstorm") || e.includes("thunderstorm")) return "thunderstorm";
-  if (e.includes("flood")) return "flood";
-  if (e.includes("freezing rain")) return "freezing-rain";
-  if (e.includes("dense fog") || e.includes("fog")) return "dense-fog";
-  if (e.includes("extreme cold") || e.includes("cold")) return "extreme-cold";
-  if (e.includes("extreme heat") || e.includes("heat")) return "extreme-heat";
-  if (e.includes("winter") || e.includes("snow") || e.includes("ice") || e.includes("blizzard")) return "winter";
-  if (e.includes("wind") || e.includes("high wind")) return "wind";
-  if (e.includes("fire") || e.includes("red flag") || e.includes("smoke")) return "fire";
+  if (text.includes("tornado")) return "tornado";
+
+  if (
+    text.includes("thunderstorm") ||
+    text.includes("storm") ||
+    text.includes("lightning")
+  ) {
+    return "thunderstorm";
+  }
+
+  if (
+    text.includes("flood") ||
+    text.includes("flash flood") ||
+    text.includes("coastal flood") ||
+    text.includes("high surf")
+  ) {
+    return "flood";
+  }
+
+  if (
+    text.includes("freezing rain") ||
+    text.includes("ice storm") ||
+    text.includes("icy") ||
+    text.includes("glaze")
+  ) {
+    return "ice";
+  }
+
+  if (
+    text.includes("winter") ||
+    text.includes("snow") ||
+    text.includes("blizzard") ||
+    text.includes("sleet") ||
+    text.includes("wind chill")
+  ) {
+    return "winter";
+  }
+
+  // wind (expanded marine coverage)
+  // marine / ocean conditions (detect first)
+  if (
+    text.includes("hazardous seas") ||
+    text.includes("small craft") ||
+    text.includes("gale warning") ||
+    (text.includes("storm warning") && text.includes("marine"))
+  ) {
+    return "marine";
+  }
+
+  // wind (expanded coverage)
+  if (
+    text.includes("wind advisory") ||
+    text.includes("high wind") ||
+    text.includes("strong wind") ||
+    text.includes("gust") ||
+    text.includes("gale") ||
+    text.includes("storm warning") || // marine storm warning
+    text.includes("hazardous seas") ||
+    text.includes("small craft")
+  ) {
+    return "wind";
+  }
+
+  if (
+    text.includes("fog") ||
+    text.includes("dense fog") ||
+    text.includes("smoke") ||
+    text.includes("haze")
+  ) {
+    return "fog";
+  }
+
+  if (
+    text.includes("heat advisory") ||
+    text.includes("excessive heat") ||
+    text.includes("heat")
+  ) {
+    return "heat";
+  }
+
+  if (
+    text.includes("extreme cold") ||
+    text.includes("cold weather") ||
+    text.includes("hard freeze") ||
+    text.includes("freeze warning") ||
+    text.includes("freeze watch") ||
+    text.includes("frost advisory") ||
+    text.includes("cold")
+  ) {
+    return "cold";
+  }
+
+  if (
+    text.includes("red flag") ||
+    text.includes("fire weather") ||
+    text.includes("fire danger")
+  ) {
+    return "fire";
+  }
 
   return "default";
 }
 
-export function getHeroVariantBackgroundImage(event: string): string | null {
-  const variant = getHeroVariant(event);
-
-  switch (variant) {
+export function getHeroVariantBackgroundImage(event?: string): string | null {
+  switch (getHeroVariant(event)) {
     case "tornado":
       return "/images/website/tornado.jpg";
+
     case "thunderstorm":
       return "/images/website/thunderstorm.jpg";
+
     case "flood":
       return "/images/website/flood.jpg";
-    case "freezing-rain":
-      return "/images/website/freezing-rain.jpg";
-    case "dense-fog":
-      return "/images/website/dense-fog.jpg";
-    case "extreme-cold":
-      return "/images/website/extreme-cold.jpg";
-    case "extreme-heat":
-      return "/images/website/extreme-heat.jpg";
-    case "wind":
-      return "/images/website/wind.jpg";
+
     case "winter":
       return "/images/website/winter.jpg";
+
+    case "ice":
+      return "/images/website/freezing-rain.jpg";
+
+    case "wind":
+      return "/images/website/wind.jpg";
+
+    case "marine":
+      return "/images/website/hazardous-seas-warning.jpg";
+
+    case "fog":
+      return "/images/website/dense-fog.jpg";
+
+    case "heat":
+      return "/images/website/extreme-heat.jpg";
+
+    case "cold":
+      return "/images/website/extreme-cold.jpg";
+
     case "fire":
       return "/images/website/fire.jpg";
+
     default:
-      return "/images/website/aaaadefault.jpg";
+      return null;
   }
 }
 
-export function getHeroVariantBackgroundImageIfExists(event: string): string | null {
-  const path = getHeroVariantBackgroundImage(event);
-  // fallback support for missing files
-  // (in this environment we cannot test filesystem at runtime in browser,
-  // so keep this as the declarative API, and make BigAlertHero handle null.)
-  return path || null;
+export function getHeroVariantBackgroundImageIfExists(event?: string): string | null {
+  return getHeroVariantBackgroundImage(event);
 }
 
-export function getHeroVariantStyles(variant: ReturnType<typeof getHeroVariant>) {
+export function smallAlertTone(event?: string): string {
+  switch (getHeroVariant(event)) {
+    case "tornado":
+      return "from-red-950 to-slate-950";
+    case "thunderstorm":
+      return "from-blue-900 to-slate-950";
+    case "flood":
+      return "from-sky-900 to-blue-950";
+    case "winter":
+    case "ice":
+      return "from-slate-500 to-slate-900";
+    case "wind":
+      return "from-slate-700 to-slate-950";
+    case "marine":
+      return "from-cyan-700 to-blue-950";
+    case "fog":
+      return "from-slate-400 to-slate-800";
+    case "heat":
+      return "from-orange-700 to-red-900";
+    case "cold":
+      return "from-blue-700 to-cyan-900";
+    case "fire":
+      return "from-red-800 to-orange-900";
+    default:
+      return "from-slate-800 to-slate-950";
+  }
+}
+
+
+export function getHeroVariantStyles(variant: HeroVariant) {
   switch (variant) {
     case "tornado":
       return {
@@ -247,16 +387,26 @@ export function getHeroVariantStyles(variant: ReturnType<typeof getHeroVariant>)
         cta: "bg-white text-red-700 hover:bg-red-50",
         details: "bg-blue-600 hover:bg-blue-500 text-white",
       };
+    case "thunderstorm":
+      return {
+        wrapper: "border-blue-500/30 bg-[#0f1d3a]",
+        topBar: "bg-blue-700",
+        title: "text-[2.2rem] leading-[0.92]",
+        subtitle: "text-white/95",
+        cta: "bg-blue-600 text-white hover:bg-blue-500",
+        details: "bg-cyan-500 hover:bg-cyan-400 text-white",
+      };
     case "flood":
       return {
-        wrapper: "border-red-500/25 bg-[#12090a]",
-        topBar: "bg-red-600",
+        wrapper: "border-sky-500/25 bg-[#0a1b2f]",
+        topBar: "bg-blue-600",
         title: "text-[2.05rem] leading-[0.95]",
         subtitle: "text-white/95",
         cta: "bg-slate-950/55 text-white hover:bg-slate-900/70",
         details: "bg-blue-600 hover:bg-blue-500 text-white",
       };
     case "winter":
+    case "ice":
       return {
         wrapper: "border-blue-200/25 bg-[#0c1520]",
         topBar: "bg-blue-700",
@@ -264,6 +414,51 @@ export function getHeroVariantStyles(variant: ReturnType<typeof getHeroVariant>)
         subtitle: "text-slate-100",
         cta: "bg-white/90 text-slate-900 hover:bg-white",
         details: "bg-sky-600 hover:bg-sky-500 text-white",
+      };
+    case "wind":
+      return {
+        wrapper: "border-slate-500/25 bg-[#1a202e]",
+        topBar: "bg-slate-700",
+        title: "text-[2rem] leading-[0.95]",
+        subtitle: "text-slate-200",
+        cta: "bg-slate-900/80 text-white hover:bg-slate-800",
+        details: "bg-cyan-600 hover:bg-cyan-500 text-white",
+      };
+    case "marine":
+      return {
+        wrapper: "border-cyan-500/30 bg-[#052139]",
+        topBar: "bg-cyan-700",
+        title: "text-[2rem] leading-[0.95]",
+        subtitle: "text-cyan-100",
+        cta: "bg-cyan-600 text-white hover:bg-cyan-500",
+        details: "bg-blue-600 hover:bg-blue-500 text-white",
+      };
+    case "fog":
+      return {
+        wrapper: "border-slate-400/25 bg-[#1f2937]",
+        topBar: "bg-slate-600",
+        title: "text-[2rem] leading-[0.95]",
+        subtitle: "text-slate-200",
+        cta: "bg-slate-800/80 text-white hover:bg-slate-700",
+        details: "bg-slate-600 hover:bg-slate-500 text-white",
+      };
+    case "heat":
+      return {
+        wrapper: "border-orange-600/25 bg-[#2a100a]",
+        topBar: "bg-orange-700",
+        title: "text-[2.05rem] leading-[0.95]",
+        subtitle: "text-orange-100",
+        cta: "bg-orange-500 text-white hover:bg-orange-400",
+        details: "bg-red-600 hover:bg-red-500 text-white",
+      };
+    case "cold":
+      return {
+        wrapper: "border-blue-600/25 bg-[#0a1320]",
+        topBar: "bg-blue-700",
+        title: "text-[2.05rem] leading-[0.95]",
+        subtitle: "text-cyan-100",
+        cta: "bg-blue-500 text-white hover:bg-blue-400",
+        details: "bg-cyan-600 hover:bg-cyan-500 text-white",
       };
     case "fire":
       return {
@@ -284,15 +479,6 @@ export function getHeroVariantStyles(variant: ReturnType<typeof getHeroVariant>)
         details: "bg-blue-600 hover:bg-blue-500 text-white",
       };
   }
-}
-
-export function smallAlertTone(event: string) {
-  const level = getAlertColor(event);
-  if (level === "red") return "from-red-600 to-red-800";
-  if (level === "orange") return "from-orange-500 to-orange-700";
-  if (level === "yellow") return "from-yellow-400 to-yellow-600";
-  if (level === "blue") return "from-blue-500 to-blue-700";
-  return "from-red-600 to-red-800";
 }
 
 export function cleanSectionText(value?: string | null) {
