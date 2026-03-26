@@ -10,6 +10,7 @@ export type HourlyPoint = {
   icon: "storm" | "sun" | "cloud" | "night";
   precip?: number;
   startTime?: string;
+  shortForecast?: string;
 };
 
 export default function HourlyStrip({

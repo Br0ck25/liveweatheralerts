@@ -194,6 +194,7 @@ type HourlyPoint = {
   icon: "storm" | "sun" | "cloud" | "night";
   precip?: number;
   startTime?: string;
+  shortForecast?: string;
 };
 
 const STORAGE_KEY = "lwa-location-v1";
@@ -787,6 +788,27 @@ export default function LiveWeatherAlertsHomePage() {
     const tone = getRiskTone(filteredAlerts);
     const dynamicCta = getDynamicCta(tone);
 
+    const hourlyPoints: HourlyPoint[] = weather?.hourly?.length
+      ? weather.hourly.map((p) => {
+          const isNightHour = isNightForHour(
+            p.startTime,
+            weather?.current?.sunrise,
+            weather?.current?.sunset
+          );
+
+          return {
+            label: new Date(p.startTime || Date.now()).toLocaleTimeString([], {
+              hour: "numeric",
+            }),
+            temp: p.temperatureF ?? p.temp ?? 0,
+            icon: resolveWeatherIcon(p.shortForecast, isNightHour),
+            precip: p.precipitationChance ?? p.precip ?? 0,
+            startTime: p.startTime,
+            shortForecast: p.shortForecast,
+          };
+        })
+      : fallbackHourly;
+
     return (
       <div className={cn("space-y-4", alertState === "NO_ALERTS" && "space-y-3")}>
         {alertState === "ACTIVE_ALERTS" && heroAlert ? (
@@ -841,27 +863,7 @@ export default function LiveWeatherAlertsHomePage() {
 
         <div id="forecast-section">
           <HourlyStrip
-            points={
-              weather?.hourly?.length
-                ? weather.hourly.map((p) => {
-                    const isNightHour = isNightForHour(
-                      p.startTime,
-                      weather?.current?.sunrise,
-                      weather?.current?.sunset
-                    );
-
-                    return {
-                      label: new Date(p.startTime || Date.now()).toLocaleTimeString([], {
-                        hour: "numeric",
-                      }),
-                      temp: p.temperatureF ?? p.temp ?? 0,
-                      icon: resolveWeatherIcon(p.shortForecast, isNightHour),
-                      precip: p.precipitationChance ?? p.precip ?? 0,
-                      startTime: p.startTime,
-                    };
-                  })
-                : fallbackHourly
-            }
+            points={hourlyPoints}
             onView10Day={() => setActiveTab("forecast")}
           />
         </div>
@@ -930,7 +932,7 @@ export default function LiveWeatherAlertsHomePage() {
                 const watchLines = buildWhatToWatch({
                   alerts: filteredAlerts,
                   current: currentConditions,
-                  hourly: weather?.hourly || [],
+                  hourly: hourlyPoints,
                   locationLabel,
                 });
 
