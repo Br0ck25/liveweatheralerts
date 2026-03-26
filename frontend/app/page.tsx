@@ -272,7 +272,7 @@ function AllClearBanner({
   backgroundImage,
 }: {
   locationLabel: string;
-  lastPoll: string | null;
+  lastPoll: number | null;
   backgroundImage?: string;
 }) {
   return (
