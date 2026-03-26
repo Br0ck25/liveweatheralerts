@@ -1,36 +1,82 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Live Weather Alerts Frontend
 
-## Getting Started
+Alerts-only frontend for `liveweatheralerts.com`.
 
-First, run the development server:
+## Stack
+
+- Vite
+- React + TypeScript
+- vite-plugin-pwa
+- Cloudflare Pages deployment target
+
+## PWA support
+
+- Installable on supported mobile/desktop browsers
+- Service worker with runtime caching for:
+  - app assets
+  - alert/geocode API responses
+  - images
+- Manifest includes standalone display mode and app icons
+
+## Location onboarding
+
+On first visit, users see a location modal and can enter:
+
+- `City, State` (example: `Columbus, OH`)
+- `State` (example: `Ohio` or `OH`)
+- `ZIP code` (example: `43215`)
+
+The app resolves and saves the chosen state in browser local storage and automatically applies that state filter on future visits. If county data is available from city/ZIP lookup, county-level filtering is also applied.
+
+## Local development
+
+1. Start the worker API in a separate terminal:
 
 ```bash
+cd "C:\Users\James\Desktop\Live Weather Alerts\live-weather"
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Start the frontend:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cd "C:\Users\James\Desktop\Live Weather Alerts\frontend"
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The Vite dev server proxies `/api/*` to `http://127.0.0.1:8787`, so the app uses your local worker automatically.
 
-## Learn More
+## Environment variable
 
-To learn more about Next.js, take a look at the following resources:
+Copy `.env.example` to `.env` only if you need a non-default API host:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+VITE_ALERTS_API_BASE=https://api.liveweatheralerts.com
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+If empty, the frontend calls `/api/alerts` on the same origin.
 
-## Deploy on Vercel
+## Build
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npm run build
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Cloudflare deployment
+
+1. Deploy the worker (`live-weather`) first.
+2. Route worker API traffic to `/api/*` on your domain (recommended):
+   - `liveweatheralerts.com/api/*` -> `live-weather` Worker
+3. Deploy the frontend to Cloudflare Pages:
+
+```bash
+cd "C:\Users\James\Desktop\Live Weather Alerts\frontend"
+npm run build
+npx wrangler pages deploy dist --project-name liveweatheralerts-frontend
+```
+
+4. Attach custom domain `liveweatheralerts.com` to the Pages project.
+
+This keeps frontend and alerts API on one domain while preserving clean `/api/alerts` calls.

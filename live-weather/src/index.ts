@@ -96,6 +96,8 @@ interface SavedLocation {
 	city?: string;
 	state?: string;
 	zip?: string;
+	county?: string;
+	countyCode?: string;
 	label: string;
 }
 
@@ -532,6 +534,24 @@ function getEventSlugVariants(event: string, eventSlug: string): string[] {
 
 function stateCodeToName(code: string): string {
 	return STATE_CODE_TO_NAME[String(code || '').toUpperCase()] || '';
+}
+
+function stateNameToCode(nameOrCode: string): string {
+	const raw = String(nameOrCode || '').trim();
+	if (!raw) return '';
+	const maybeCode = raw.toUpperCase();
+	if (STATE_CODE_TO_NAME[maybeCode]) return maybeCode;
+	const normalized = raw
+		.toLowerCase()
+		.replace(/\./g, '')
+		.replace(/\s+/g, '-');
+	for (const [code, slug] of Object.entries(STATE_CODE_TO_NAME)) {
+		if (slug === normalized) return code;
+		if (slug.replace(/-/g, ' ') === normalized.replace(/-/g, ' ')) return code;
+	}
+	if (normalized === 'washington-dc' || normalized === 'washington-d-c') return 'DC';
+	if (normalized === 'district-of-columbia' || normalized === 'district columbia') return 'DC';
+	return '';
 }
 
 function expandEventSlugs(eventSlug: string): string[] {
@@ -2298,6 +2318,7 @@ async function handleApiAlerts(env: Env): Promise<Response> {
 			expires: String(p.expires ?? ''),
 			updated: String(p.updated ?? ''),
 			nwsUrl: String(p['@id'] ?? ''),
+			ugc: Array.isArray(p.geocode?.UGC) ? p.geocode.UGC : [],
 		};
 	});
 	const lastPoll = await env.WEATHER_KV.get(KV_LAST_POLL);
@@ -2314,6 +2335,104 @@ async function handleApiAlerts(env: Env): Promise<Response> {
 		status: 200,
 		headers,
 	});
+}
+
+async function lookupCountyByLatLon(lat: number, lon: number): Promise<{ county?: string; countyCode?: string }> {
+	try {
+		const endpoint = new URL('https://geo.fcc.gov/api/census/block/find');
+		endpoint.searchParams.set('latitude', lat.toFixed(6));
+		endpoint.searchParams.set('longitude', lon.toFixed(6));
+		endpoint.searchParams.set('showall', 'true');
+		endpoint.searchParams.set('format', 'json');
+
+		const response = await fetch(endpoint.toString(), {
+			headers: {
+				Accept: 'application/json',
+			},
+		});
+
+		if (!response.ok) return {};
+
+		const payload = await response.json() as any;
+		const county = String(payload?.County?.name || '').trim() || undefined;
+		const rawFips = String(payload?.County?.FIPS || '').trim();
+		const countyCode = /^\d+$/.test(rawFips)
+			? rawFips.padStart(3, '0').slice(-3)
+			: undefined;
+
+		return { county, countyCode };
+	} catch {
+		return {};
+	}
+}
+
+async function geocodePlaceQuery(query: string): Promise<SavedLocation> {
+	const endpoint = new URL('https://nominatim.openstreetmap.org/search');
+	endpoint.searchParams.set('q', query);
+	endpoint.searchParams.set('countrycodes', 'us');
+	endpoint.searchParams.set('format', 'jsonv2');
+	endpoint.searchParams.set('addressdetails', '1');
+	endpoint.searchParams.set('limit', '1');
+
+	const response = await fetch(endpoint.toString(), {
+		headers: {
+			'User-Agent': NWS_USER_AGENT,
+			Accept: 'application/json',
+		},
+	});
+
+	if (response.status === 404) {
+		throw new HttpError(404, 'Location not found.');
+	}
+	if (!response.ok) {
+		throw new HttpError(502, `Location lookup failed: ${response.status} ${response.statusText}`);
+	}
+
+	const payload = await response.json() as any;
+	const top = Array.isArray(payload) ? payload[0] : null;
+	if (!top) {
+		throw new HttpError(404, 'Location not found.');
+	}
+
+	const lat = Number(top?.lat);
+	const lon = Number(top?.lon);
+	if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+		throw new HttpError(502, 'Location lookup returned invalid coordinates.');
+	}
+
+	const address = top?.address ?? {};
+	const city = String(
+		address?.city
+		|| address?.town
+		|| address?.village
+		|| address?.hamlet
+		|| address?.municipality
+		|| ''
+	).trim() || undefined;
+
+	const isoState = String(address?.['ISO3166-2-lvl4'] || '').trim();
+	let state = '';
+	if (/^US-[A-Z]{2}$/i.test(isoState)) {
+		state = isoState.slice(3).toUpperCase();
+	}
+	if (!state) {
+		state = stateNameToCode(String(address?.state || '').trim());
+	}
+
+	const fccCounty = await lookupCountyByLatLon(lat, lon);
+	const county = fccCounty.county || String(address?.county || '').trim() || undefined;
+	const countyCode = fccCounty.countyCode;
+	const label = city && state ? `${city}, ${state}` : (state || query);
+
+	return {
+		lat,
+		lon,
+		city,
+		state: state || undefined,
+		county,
+		countyCode,
+		label,
+	};
 }
 
 async function geocodeZip(zip: string): Promise<SavedLocation> {
@@ -2346,8 +2465,18 @@ async function geocodeZip(zip: string): Promise<SavedLocation> {
 	const city = String(place?.['place name'] || '').trim() || undefined;
 	const state = String(place?.['state abbreviation'] || '').trim() || undefined;
 	const label = city && state ? `${city}, ${state}` : zip;
+	const county = await lookupCountyByLatLon(lat, lon);
 
-	return { lat, lon, city, state, zip, label };
+	return {
+		lat,
+		lon,
+		city,
+		state,
+		zip,
+		county: county.county,
+		countyCode: county.countyCode,
+		label,
+	};
 }
 
 async function reverseGeocodePoint(lat: number, lon: number): Promise<SavedLocation> {
@@ -2371,8 +2500,17 @@ async function reverseGeocodePoint(lat: number, lon: number): Promise<SavedLocat
 	const city = String(relative?.city || '').trim() || undefined;
 	const state = String(relative?.state || '').trim() || undefined;
 	const label = city && state ? `${city}, ${state}` : `Lat ${lat.toFixed(2)}, Lon ${lon.toFixed(2)}`;
+	const county = await lookupCountyByLatLon(lat, lon);
 
-	return { lat, lon, city, state, label };
+	return {
+		lat,
+		lon,
+		city,
+		state,
+		county: county.county,
+		countyCode: county.countyCode,
+		label,
+	};
 }
 
 function parseCoordinate(raw: string, min: number, max: number, fieldLabel: string): number {
@@ -3172,6 +3310,7 @@ async function handleApiGeocode(request: Request): Promise<Response> {
 
 	const url = new URL(request.url);
 	const zip = String(url.searchParams.get('zip') || '').trim();
+	const query = String(url.searchParams.get('query') || url.searchParams.get('q') || '').trim();
 	const latRaw = String(url.searchParams.get('lat') || '').trim();
 	const lonRaw = String(url.searchParams.get('lon') || '').trim();
 
@@ -3185,8 +3324,14 @@ async function handleApiGeocode(request: Request): Promise<Response> {
 			return new Response(JSON.stringify(location), { status: 200, headers });
 		}
 
+		if (query) {
+			const location = await geocodePlaceQuery(query);
+			headers.set('Cache-Control', 'public, max-age=3600');
+			return new Response(JSON.stringify(location), { status: 200, headers });
+		}
+
 		if (!latRaw || !lonRaw) {
-			throw new HttpError(400, 'Provide either ?zip=##### or both ?lat= and ?lon=.');
+			throw new HttpError(400, 'Provide ?zip=##### or ?query=city,state or both ?lat= and ?lon=.');
 		}
 
 		const lat = parseCoordinate(latRaw, -90, 90, 'Latitude');
