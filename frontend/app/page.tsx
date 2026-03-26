@@ -820,6 +820,7 @@ export default function LiveWeatherAlertsHomePage() {
               label: weather?.location?.label || locationLabel,
             }}
             onViewRadar={() => setShowRadarModal(true)}
+            modalOpen={showRadarModal}
           />
         </div>
 

@@ -42,8 +42,8 @@ const OSM_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_ATTRIBUTION = "&copy; OpenStreetMap contributors";
 const RADAR_COLOR = 2;
 const RADAR_OPTIONS = "1_1";
-const MODAL_ZOOM = 5;
-const FRAME_INTERVAL_MS = 6_000;
+const MODAL_ZOOM = 6;
+const FRAME_INTERVAL_MS = 1_700;
 
 function formatFrameTime(unixSeconds?: number) {
   if (!unixSeconds) return "Latest";
@@ -64,10 +64,10 @@ export default function RadarMapModal({
   radar,
 }: RadarModalProps) {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<any>(null);
-  const radarLayerRef = useRef<any>(null);
-  const markerRef = useRef<any>(null);
-  const leafletRef = useRef<any>(null);
+  const mapRef = useRef<import("leaflet").Map | null>(null);
+  const radarLayerRef = useRef<import("leaflet").TileLayer | null>(null);
+  const markerRef = useRef<import("leaflet").CircleMarker | null>(null);
+  const leafletRef = useRef<typeof import("leaflet") | null>(null);
 
   const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -77,6 +77,7 @@ export default function RadarMapModal({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // Fetch radar frames when modal opens
   useEffect(() => {
     if (!open) return;
 
@@ -91,22 +92,19 @@ export default function RadarMapModal({
           "https://api.rainviewer.com/public/weather-maps.json",
           { cache: "no-store" }
         );
-
         if (!res.ok) throw new Error("RainViewer request failed");
 
         const data = (await res.json()) as RainViewerResponse;
         const nextHost = data.host || "https://tilecache.rainviewer.com";
-        const nextFrames = data.radar?.past?.slice(-6) ?? [];
+        const nextFrames = data.radar?.past?.slice(-4) ?? [];
 
         if (!active) return;
-
         setHost(nextHost);
         setFrames(nextFrames);
         setFrameIndex(Math.max(0, nextFrames.length - 1));
         setLoading(false);
-      } catch (err) {
+      } catch {
         if (!active) return;
-        console.error("RainViewer modal load error:", err);
         setLoadError("Radar unavailable");
         setFrames([]);
         setLoading(false);
@@ -114,55 +112,55 @@ export default function RadarMapModal({
     }
 
     loadRainViewer();
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [open]);
 
-  // Initialise Leaflet map when modal opens; destroy when it closes
+  // Init Leaflet — deferred one rAF so the preview map's cleanup runs first
   useEffect(() => {
     if (!open || !mapContainerRef.current || mapRef.current) return;
 
     let mounted = true;
-
-    async function initMap() {
-      const module = await import("leaflet");
-      const L = module.default || module;
-      leafletRef.current = L;
-
+    const rafId = requestAnimationFrame(() => {
       if (!mounted || !mapContainerRef.current) return;
 
-      const map = L.map(mapContainerRef.current, {
-        zoomControl: false,
-        attributionControl: true,
-      }).setView([location.lat, location.lon], MODAL_ZOOM);
+      async function initMap() {
+        const leafletModule = await import("leaflet");
+        const L = leafletModule.default || leafletModule;
+        leafletRef.current = L;
 
-      L.tileLayer(OSM_URL, {
-        attribution: OSM_ATTRIBUTION,
-        maxZoom: 19,
-      }).addTo(map);
+        if (!mounted || !mapContainerRef.current) return;
 
-      const marker = L.circleMarker([location.lat, location.lon], {
-        radius: 7,
-        color: "#ffffff",
-        weight: 2,
-        fillColor: "#3b82f6",
-        fillOpacity: 1,
-      }).addTo(map);
+        const map = L.map(mapContainerRef.current, {
+          zoomControl: false,
+          attributionControl: true,
+        }).setView([location.lat, location.lon], MODAL_ZOOM);
 
-      mapRef.current = map;
-      markerRef.current = marker;
-      setIsLeafletLoaded(true);
-      setTimeout(() => map.invalidateSize(), 0);
-    }
+        L.tileLayer(OSM_URL, {
+          attribution: OSM_ATTRIBUTION,
+          maxZoom: 19,
+        }).addTo(map);
 
-    initMap();
+        const marker = L.circleMarker([location.lat, location.lon], {
+          radius: 7,
+          color: "#ffffff",
+          weight: 2,
+          fillColor: "#3b82f6",
+          fillOpacity: 1,
+        }).addTo(map);
+
+        mapRef.current = map;
+        markerRef.current = marker;
+        setIsLeafletLoaded(true);
+        setTimeout(() => map.invalidateSize(), 0);
+      }
+
+      initMap();
+    });
 
     return () => {
       mounted = false;
-      if (mapRef.current) {
-        mapRef.current.remove();
-      }
+      cancelAnimationFrame(rafId);
+      mapRef.current?.remove();
       mapRef.current = null;
       radarLayerRef.current = null;
       markerRef.current = null;
@@ -171,20 +169,19 @@ export default function RadarMapModal({
     };
   }, [open, location.lat, location.lon]);
 
+  // Update map center if location changes while open
   useEffect(() => {
     if (!open || !mapRef.current) return;
-    mapRef.current.setView([location.lat, location.lon], MODAL_ZOOM, {
-      animate: false,
-    });
+    mapRef.current.setView([location.lat, location.lon], MODAL_ZOOM, { animate: false });
     markerRef.current?.setLatLng([location.lat, location.lon]);
     setTimeout(() => mapRef.current?.invalidateSize(), 0);
   }, [open, location.lat, location.lon]);
 
   const currentFramePath = frames[frameIndex]?.path ?? "";
 
+  // Add / update radar tile layer
   useEffect(() => {
-    if (!open || !mapRef.current || !host || !currentFramePath || !isLeafletLoaded)
-      return;
+    if (!open || !mapRef.current || !host || !currentFramePath || !isLeafletLoaded) return;
 
     const L = leafletRef.current;
     if (!L) return;
@@ -193,7 +190,7 @@ export default function RadarMapModal({
 
     if (!radarLayerRef.current) {
       const layer = L.tileLayer(nextUrl, {
-        opacity: 0.8,
+        opacity: 0.9,
         attribution: "",
         maxZoom: MODAL_ZOOM,
         minZoom: 1,
@@ -203,15 +200,15 @@ export default function RadarMapModal({
         keepBuffer: 1,
       });
 
-      layer.on("tileerror", (event: any) => {
-        const errText = String(event?.error || "");
-        if (errText.includes("429")) {
+      layer.on("tileerror", (event: { error?: unknown }) => {
+        const errStr = String(event?.error || "");
+        if (errStr.includes("429")) {
           setIsPlaying(false);
-          setLoadError("Radar temporarily rate-limited. Retrying in 15 s…");
+          setLoadError("Radar busy — updating shortly...");
           setTimeout(() => {
             setLoadError(null);
             setIsPlaying(true);
-          }, 15_000);
+          }, 30_000);
         }
       });
 
@@ -222,13 +219,12 @@ export default function RadarMapModal({
     }
   }, [open, host, currentFramePath, isLeafletLoaded]);
 
+  // Animation loop
   useEffect(() => {
     if (!open || !isPlaying || frames.length <= 1) return;
-
     const timer = window.setInterval(() => {
       setFrameIndex((prev) => (prev + 1) % frames.length);
     }, FRAME_INTERVAL_MS);
-
     return () => window.clearInterval(timer);
   }, [open, isPlaying, frames.length]);
 
@@ -249,13 +245,11 @@ export default function RadarMapModal({
   const currentFrame = frames[frameIndex] ?? null;
 
   return (
-    <div className="fixed inset-0 z-[200] bg-black/80 backdrop-blur-sm">
+    <div className="fixed inset-0 z-200 bg-black/80 backdrop-blur-sm">
       <div className="absolute inset-0 flex flex-col">
         <div className="flex items-center justify-between border-b border-white/10 bg-slate-950/95 px-4 py-3 text-white">
           <div className="min-w-0">
-            <div className="text-lg font-black uppercase tracking-wide">
-              Live Radar
-            </div>
+            <div className="text-lg font-black uppercase tracking-wide">Live Radar</div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-300">
               <MapPin className="h-3.5 w-3.5" />
               <span className="truncate">{location.label}</span>
@@ -263,63 +257,42 @@ export default function RadarMapModal({
               {radar?.updated ? (
                 <span>
                   • Updated{" "}
-                  {new Date(radar.updated).toLocaleTimeString([], {
-                    hour: "numeric",
-                    minute: "2-digit",
-                  })}
+                  {new Date(radar.updated).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
                 </span>
               ) : null}
-              {radar?.summary ? (
-                <span className="truncate">• {radar.summary}</span>
-              ) : null}
+              <span className="text-xs text-slate-300 block w-full">
+                {radar?.summary || "No precipitation nearby"}
+              </span>
+              {radar?.summary ? <span className="truncate">• {radar.summary}</span> : null}
             </div>
           </div>
 
           <div className="ml-3 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handlePrevFrame}
+            <button type="button" onClick={handlePrevFrame}
               className="rounded-full border border-white/10 bg-white/5 p-2 text-white hover:bg-white/10"
-              aria-label="Previous radar frame"
-            >
+              aria-label="Previous radar frame">
               <ChevronLeft className="h-5 w-5" />
             </button>
-
-            <button
-              type="button"
-              onClick={() => setIsPlaying((v) => !v)}
+            <button type="button" onClick={() => setIsPlaying((v) => !v)}
               className="rounded-full border border-white/10 bg-white/5 p-2 text-white hover:bg-white/10"
-              aria-label={isPlaying ? "Pause radar loop" : "Play radar loop"}
-            >
-              {isPlaying ? (
-                <Pause className="h-5 w-5" />
-              ) : (
-                <Play className="h-5 w-5" />
-              )}
+              aria-label={isPlaying ? "Pause radar loop" : "Play radar loop"}>
+              {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
             </button>
-
-            <button
-              type="button"
-              onClick={handleNextFrame}
+            <button type="button" onClick={handleNextFrame}
               className="rounded-full border border-white/10 bg-white/5 p-2 text-white hover:bg-white/10"
-              aria-label="Next radar frame"
-            >
+              aria-label="Next radar frame">
               <ChevronRight className="h-5 w-5" />
             </button>
-
-            <button
-              type="button"
-              onClick={onClose}
+            <button type="button" onClick={onClose}
               className="rounded-full border border-white/10 bg-white/5 p-2 text-white hover:bg-white/10"
-              aria-label="Close radar"
-            >
+              aria-label="Close radar">
               <X className="h-5 w-5" />
             </button>
           </div>
         </div>
 
-        <div className="relative min-h-0 flex-1 bg-black">
-          <div ref={mapContainerRef} className="absolute inset-0" />
+        <div className="relative min-h-0 flex-1 bg-black pb-28">
+          <div ref={mapContainerRef} className="absolute inset-x-0 top-0 bottom-24" />
 
           {loading ? (
             <div className="pointer-events-none absolute left-4 top-4 animate-pulse rounded-2xl border border-white/10 bg-slate-950/85 px-4 py-3 text-sm font-semibold text-white shadow-xl">
@@ -334,12 +307,11 @@ export default function RadarMapModal({
             </div>
           ) : null}
 
-          <div className="absolute bottom-4 left-1/2 w-[min(92%,700px)] -translate-x-1/2 rounded-[24px] border border-white/10 bg-slate-950/85 p-3 text-white shadow-2xl backdrop-blur">
+          <div className="absolute bottom-4 left-1/2 z-500 w-[min(92%,700px)] -translate-x-1/2 rounded-[24px] border border-white/10 bg-slate-950/92 p-3 text-white shadow-2xl backdrop-blur-md">
             <div className="mb-2 flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-slate-300">
               <span>Radar timeline</span>
               <span>{formatFrameTime(currentFrame?.time)}</span>
             </div>
-
             <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
               {frames.map((frame, index) => {
                 const active = index === frameIndex;
@@ -347,14 +319,9 @@ export default function RadarMapModal({
                   <button
                     key={`${frame.time}-${index}`}
                     type="button"
-                    onClick={() => {
-                      setIsPlaying(false);
-                      setFrameIndex(index);
-                    }}
+                    onClick={() => { setIsPlaying(false); setFrameIndex(index); }}
                     className={`rounded-xl px-2 py-2 text-center text-[11px] font-bold transition ${
-                      active
-                        ? "bg-blue-600 text-white"
-                        : "bg-white/5 text-slate-300 hover:bg-white/10"
+                      active ? "bg-blue-600 text-white" : "bg-white/5 text-slate-300 hover:bg-white/10"
                     }`}
                     aria-label={`Show radar frame ${formatFrameTime(frame.time)}`}
                   >
