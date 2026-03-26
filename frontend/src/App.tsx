@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { buildApiUrl, fetchAlerts } from "./lib/alerts";
 import type { AlertRecord, AlertsPayload } from "./types";
 
 type AlertType = "warning" | "watch" | "advisory" | "statement" | "other";
 type AlertTypeFilter = AlertType | "all";
+type AppTab = "alerts" | "forecast" | "more";
 type SeverityFilter =
   | "all"
   | "extreme"
@@ -13,6 +14,7 @@ type SeverityFilter =
   | "unknown";
 type SortMode = "priority" | "expires" | "latest";
 type LoadState = "loading" | "ready" | "error";
+type ForecastLoadState = "idle" | "loading" | "ready" | "error";
 
 const alertTypeLabel: Record<AlertTypeFilter, string> = {
   all: "All alert types",
@@ -62,6 +64,8 @@ interface SavedLocationPreference {
   label: string;
   countyName?: string;
   countyCode?: string;
+  lat?: number;
+  lon?: number;
   savedAt: string;
 }
 
@@ -71,6 +75,46 @@ interface GeocodeLocationPayload {
   label?: string;
   county?: string;
   countyCode?: string;
+  lat?: number;
+  lon?: number;
+  error?: string;
+}
+
+interface WeatherPayload {
+  location?: {
+    label?: string;
+    city?: string;
+    state?: string;
+    lat?: number;
+    lon?: number;
+  };
+  current?: {
+    temperatureF?: number | null;
+    feelsLikeF?: number | null;
+    condition?: string;
+    windMph?: number | null;
+    windDirection?: string | null;
+    humidity?: number | null;
+    icon?: string;
+    isNight?: boolean;
+  };
+  hourly?: Array<{
+    startTime?: string;
+    temperatureF?: number | null;
+    shortForecast?: string;
+    icon?: string;
+    precipitationChance?: number | null;
+  }>;
+  daily?: Array<{
+    name?: string;
+    startTime?: string;
+    highF?: number | null;
+    lowF?: number | null;
+    shortForecast?: string;
+    icon?: string;
+    precipitationChance?: number | null;
+  }>;
+  updated?: string;
   error?: string;
 }
 
@@ -84,6 +128,7 @@ interface BeforeInstallPromptEvent extends Event {
 
 const LOCATION_STORAGE_KEY = "lwa:preferred-state:v1";
 const LOCATION_MODAL_DISMISSED_KEY = "lwa:location-modal-dismissed:v1";
+const ACTIVE_TAB_STORAGE_KEY = "lwa:active-tab:v1";
 
 const STATE_NAME_BY_CODE: Record<string, string> = {
   AL: "alabama",
@@ -170,6 +215,11 @@ function cleanCountyToken(value: string): string {
     )
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function toFiniteNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function normalizeCountyCode(value: string): string {
@@ -266,7 +316,8 @@ function readSavedLocationPreference(): SavedLocationPreference | null {
   try {
     const raw = window.localStorage.getItem(LOCATION_STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as SavedLocationPreference;
+    const parsed = JSON.parse(raw) as Partial<SavedLocationPreference> &
+      Record<string, unknown>;
     if (!parsed || typeof parsed !== "object") return null;
     const stateCode = toStateCode(parsed.stateCode || "");
     if (!stateCode) return null;
@@ -278,6 +329,8 @@ function readSavedLocationPreference(): SavedLocationPreference | null {
       countyCode: parsed.countyCode
         ? normalizeCountyCode(String(parsed.countyCode))
         : undefined,
+      lat: toFiniteNumber(parsed.lat),
+      lon: toFiniteNumber(parsed.lon),
       savedAt: String(parsed.savedAt || "")
     };
   } catch {
@@ -306,6 +359,28 @@ function setLocationModalDismissed(dismissed: boolean): void {
     }
   } catch {
     // Ignore localStorage failures in private mode or restricted contexts.
+  }
+}
+
+function readSavedActiveTab(): AppTab {
+  if (typeof window === "undefined") return "alerts";
+  try {
+    const value = window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY);
+    if (value === "alerts" || value === "forecast" || value === "more") {
+      return value;
+    }
+  } catch {
+    // Ignore localStorage failures.
+  }
+  return "alerts";
+}
+
+function saveActiveTab(tab: AppTab): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab);
+  } catch {
+    // Ignore localStorage failures.
   }
 }
 
@@ -346,6 +421,8 @@ async function resolveStateFromZip(
   label: string;
   countyName?: string;
   countyCode?: string;
+  lat?: number;
+  lon?: number;
 }> {
   const endpoint = buildApiUrl(`/api/geocode?zip=${encodeURIComponent(zip)}`);
   const response = await fetch(endpoint, {
@@ -364,11 +441,15 @@ async function resolveStateFromZip(
   const city = (payload.city ?? "").trim();
   const countyName = (payload.county ?? "").trim();
   const countyCode = normalizeCountyCode(payload.countyCode ?? "");
+  const lat = toFiniteNumber(payload.lat);
+  const lon = toFiniteNumber(payload.lon);
   return {
     stateCode,
     label: city ? `${city}, ${stateCode}` : stateCode,
     countyName: countyName || undefined,
-    countyCode: countyCode || undefined
+    countyCode: countyCode || undefined,
+    lat,
+    lon
   };
 }
 
@@ -379,6 +460,8 @@ async function resolveLocationFromQuery(
   label: string;
   countyName?: string;
   countyCode?: string;
+  lat?: number;
+  lon?: number;
 }> {
   const endpoint = buildApiUrl(`/api/geocode?query=${encodeURIComponent(query)}`);
   const response = await fetch(endpoint, {
@@ -397,13 +480,105 @@ async function resolveLocationFromQuery(
   const countyName = (payload.county ?? "").trim();
   const countyCode = normalizeCountyCode(payload.countyCode ?? "");
   const label = (payload.label ?? "").trim() || `${query}, ${stateCode}`;
+  const lat = toFiniteNumber(payload.lat);
+  const lon = toFiniteNumber(payload.lon);
 
   return {
     stateCode,
     label,
     countyName: countyName || undefined,
-    countyCode: countyCode || undefined
+    countyCode: countyCode || undefined,
+    lat,
+    lon
   };
+}
+
+async function resolveForecastCoordinates(
+  preference: SavedLocationPreference | null
+): Promise<{ lat: number; lon: number } | null> {
+  if (
+    preference &&
+    typeof preference.lat === "number" &&
+    Number.isFinite(preference.lat) &&
+    typeof preference.lon === "number" &&
+    Number.isFinite(preference.lon)
+  ) {
+    return { lat: preference.lat, lon: preference.lon };
+  }
+
+  if (!preference?.rawInput.trim()) {
+    return null;
+  }
+
+  const rawInput = preference.rawInput.trim();
+  try {
+    if (/^\d{5}$/.test(rawInput)) {
+      const resolved = await resolveStateFromZip(rawInput);
+      if (
+        typeof resolved.lat === "number" &&
+        Number.isFinite(resolved.lat) &&
+        typeof resolved.lon === "number" &&
+        Number.isFinite(resolved.lon)
+      ) {
+        return { lat: resolved.lat, lon: resolved.lon };
+      }
+    } else {
+      const resolved = await resolveLocationFromQuery(rawInput);
+      if (
+        typeof resolved.lat === "number" &&
+        Number.isFinite(resolved.lat) &&
+        typeof resolved.lon === "number" &&
+        Number.isFinite(resolved.lon)
+      ) {
+        return { lat: resolved.lat, lon: resolved.lon };
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function fetchForecast(
+  preference: SavedLocationPreference | null
+): Promise<WeatherPayload> {
+  const coordinates = await resolveForecastCoordinates(preference);
+  let endpoint = buildApiUrl("/api/weather");
+  if (coordinates) {
+    const params = new URLSearchParams({
+      lat: String(coordinates.lat),
+      lon: String(coordinates.lon)
+    });
+    endpoint = `${endpoint}?${params.toString()}`;
+  }
+
+  const response = await fetch(endpoint, {
+    method: "GET",
+    headers: {
+      Accept: "application/json"
+    }
+  });
+
+  const raw = await response.text();
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  const looksLikeHtml = /^\s*</.test(raw);
+  if (!contentType.includes("application/json") || looksLikeHtml) {
+    throw new Error("Forecast is unavailable right now.");
+  }
+
+  let payload: WeatherPayload;
+  try {
+    payload = JSON.parse(raw) as WeatherPayload;
+  } catch {
+    throw new Error("Forecast response was invalid.");
+  }
+
+  if (!response.ok) {
+    throw new Error(payload.error || "Unable to load forecast.");
+  }
+
+  return payload;
 }
 
 function normalizeSeverity(value: string): SeverityFilter {
@@ -479,6 +654,267 @@ function formatLabel(value: string): string {
   const cleaned = value.trim();
   if (!cleaned) return "Unknown";
   return cleaned.replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatTemp(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
+  return `${Math.round(value)}°`;
+}
+
+function formatMph(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
+  return `${Math.round(value)} mph`;
+}
+
+function toDate(value: string | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function formatHourLabel(value: string | undefined, index: number): string {
+  if (index === 0) return "Now";
+  const date = toDate(value);
+  if (!date) return "--";
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric"
+  }).format(date);
+}
+
+function formatDayLabel(value: string | undefined, index: number): string {
+  if (index === 0) return "Today";
+  const date = toDate(value);
+  if (!date) return "Day";
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short"
+  }).format(date);
+}
+
+function formatMonthDay(value: string | undefined): string {
+  const date = toDate(value);
+  if (!date) return "--";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "numeric",
+    day: "numeric"
+  }).format(date);
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "\u00A0";
+  return `${Math.round(value)}%`;
+}
+
+type ForecastIconKind =
+  | "sun"
+  | "moon"
+  | "cloud"
+  | "partly-day"
+  | "partly-night"
+  | "rain"
+  | "storm"
+  | "snow"
+  | "fog"
+  | "wind";
+
+function inferNightFromStartTime(value: string | undefined): boolean {
+  const date = toDate(value);
+  if (!date) return false;
+  const hour = date.getHours();
+  return hour < 6 || hour >= 18;
+}
+
+function inferNightFromCondition(value: string | undefined): boolean {
+  const text = String(value || "").toLowerCase();
+  return /(night|overnight|tonight|evening|late)/.test(text);
+}
+
+function resolveForecastIconKind(
+  condition: string | undefined,
+  isNight: boolean
+): ForecastIconKind {
+  const text = String(condition || "").toLowerCase();
+  if (/(thunder|t-?storm|lightning)/.test(text)) return "storm";
+  if (/(snow|flurr|sleet|blizzard|ice pellets|freezing drizzle)/.test(text)) {
+    return "snow";
+  }
+  if (/(rain|showers|drizzle|sprinkles|downpour)/.test(text)) return "rain";
+  if (/(fog|haze|mist|smoke)/.test(text)) return "fog";
+  if (/(wind|breezy|gust)/.test(text) && !/(rain|snow|storm)/.test(text)) {
+    return "wind";
+  }
+
+  const partly =
+    /(partly|mostly|few|scattered|broken)/.test(text) &&
+    /(cloud|sun|clear)/.test(text);
+  if (partly) return isNight ? "partly-night" : "partly-day";
+
+  if (/(cloud|overcast)/.test(text)) return "cloud";
+  if (/(clear|fair|sunny)/.test(text)) return isNight ? "moon" : "sun";
+
+  return isNight ? "partly-night" : "partly-day";
+}
+
+function WeatherIcon({
+  condition,
+  isNight,
+  className
+}: {
+  condition?: string;
+  isNight: boolean;
+  className?: string;
+}) {
+  const kind = resolveForecastIconKind(condition, isNight);
+  const classes = `weather-symbol${className ? ` ${className}` : ""}`;
+
+  if (kind === "sun") {
+    return (
+      <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="32" cy="32" r="13" fill="#f7b500" stroke="#e06a00" strokeWidth="3" />
+        <g stroke="#f4a100" strokeWidth="3" strokeLinecap="round">
+          <line x1="32" y1="6" x2="32" y2="14" />
+          <line x1="32" y1="50" x2="32" y2="58" />
+          <line x1="6" y1="32" x2="14" y2="32" />
+          <line x1="50" y1="32" x2="58" y2="32" />
+          <line x1="14" y1="14" x2="19" y2="19" />
+          <line x1="45" y1="45" x2="50" y2="50" />
+          <line x1="14" y1="50" x2="19" y2="45" />
+          <line x1="45" y1="19" x2="50" y2="14" />
+        </g>
+      </svg>
+    );
+  }
+
+  if (kind === "moon") {
+    return (
+      <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="30" cy="32" r="15" fill="#2f66dd" />
+        <circle cx="38" cy="26" r="14" fill="#f8fbff" />
+      </svg>
+    );
+  }
+
+  if (kind === "partly-day" || kind === "partly-night") {
+    return (
+      <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+        {kind === "partly-day" ? (
+          <>
+            <circle cx="23" cy="24" r="11" fill="#f7b500" stroke="#e06a00" strokeWidth="3" />
+          </>
+        ) : (
+          <>
+            <circle cx="24" cy="25" r="11" fill="#2f66dd" />
+            <circle cx="30" cy="21" r="10" fill="#f8fbff" />
+          </>
+        )}
+        <path
+          d="M14 40c0-5.2 4.2-9.4 9.4-9.4 1.5 0 3 .4 4.2 1.1 1.8-3.4 5.3-5.8 9.5-5.8 6 0 10.9 4.8 10.9 10.9 0 .4 0 .8-.1 1.2 3.2.8 5.5 3.7 5.5 7.2 0 4.1-3.3 7.4-7.4 7.4H22.1c-4.5 0-8.1-3.6-8.1-8.1 0-1.8.6-3.3 1.6-4.5z"
+          fill="#edf2f7"
+          stroke="#6f7f95"
+          strokeWidth="3"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+
+  if (kind === "rain") {
+    return (
+      <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+        <path
+          d="M14 35.5c0-5 4.1-9.1 9.1-9.1 1.5 0 2.9.3 4.2 1 1.8-3.3 5.2-5.5 9.2-5.5 5.9 0 10.7 4.7 10.7 10.6v.9c3.3.7 5.8 3.7 5.8 7.3 0 4.1-3.3 7.4-7.4 7.4H22c-4.4 0-8-3.6-8-8 0-1.8.6-3.4 1.8-4.6z"
+          fill="#eef3f8"
+          stroke="#71849c"
+          strokeWidth="3"
+        />
+        <g fill="#2f7be8">
+          <circle cx="25" cy="54" r="2.4" />
+          <circle cx="34" cy="57" r="2.4" />
+          <circle cx="43" cy="54" r="2.4" />
+        </g>
+      </svg>
+    );
+  }
+
+  if (kind === "storm") {
+    return (
+      <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+        <path
+          d="M14 35.5c0-5 4.1-9.1 9.1-9.1 1.5 0 2.9.3 4.2 1 1.8-3.3 5.2-5.5 9.2-5.5 5.9 0 10.7 4.7 10.7 10.6v.9c3.3.7 5.8 3.7 5.8 7.3 0 4.1-3.3 7.4-7.4 7.4H22c-4.4 0-8-3.6-8-8 0-1.8.6-3.4 1.8-4.6z"
+          fill="#e9eef6"
+          stroke="#6f819a"
+          strokeWidth="3"
+        />
+        <path
+          d="M33 48l-5 9h4l-3 7 10-12h-4l4-8z"
+          fill="#f6b600"
+          stroke="#d97f00"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+
+  if (kind === "snow") {
+    return (
+      <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+        <path
+          d="M14 35.5c0-5 4.1-9.1 9.1-9.1 1.5 0 2.9.3 4.2 1 1.8-3.3 5.2-5.5 9.2-5.5 5.9 0 10.7 4.7 10.7 10.6v.9c3.3.7 5.8 3.7 5.8 7.3 0 4.1-3.3 7.4-7.4 7.4H22c-4.4 0-8-3.6-8-8 0-1.8.6-3.4 1.8-4.6z"
+          fill="#eef3f8"
+          stroke="#71849c"
+          strokeWidth="3"
+        />
+        <g stroke="#4f8ee8" strokeWidth="2" strokeLinecap="round">
+          <line x1="25" y1="53" x2="25" y2="58" />
+          <line x1="22.5" y1="55.5" x2="27.5" y2="55.5" />
+          <line x1="34" y1="52" x2="34" y2="57" />
+          <line x1="31.5" y1="54.5" x2="36.5" y2="54.5" />
+          <line x1="43" y1="53" x2="43" y2="58" />
+          <line x1="40.5" y1="55.5" x2="45.5" y2="55.5" />
+        </g>
+      </svg>
+    );
+  }
+
+  if (kind === "fog") {
+    return (
+      <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+        <path
+          d="M14 34.5c0-5 4.1-9.1 9.1-9.1 1.5 0 2.9.3 4.2 1 1.8-3.3 5.2-5.5 9.2-5.5 5.9 0 10.7 4.7 10.7 10.6v.9c3.3.7 5.8 3.7 5.8 7.3 0 4.1-3.3 7.4-7.4 7.4H22c-4.4 0-8-3.6-8-8 0-1.8.6-3.4 1.8-4.6z"
+          fill="#eef3f8"
+          stroke="#71849c"
+          strokeWidth="3"
+        />
+        <g stroke="#8a99ad" strokeWidth="2.5" strokeLinecap="round">
+          <line x1="17" y1="53" x2="49" y2="53" />
+          <line x1="21" y1="58" x2="45" y2="58" />
+        </g>
+      </svg>
+    );
+  }
+
+  if (kind === "wind") {
+    return (
+      <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+        <g fill="none" stroke="#4f79a6" strokeWidth="3.2" strokeLinecap="round">
+          <path d="M12 26h26c4 0 6-2.8 6-5.8 0-2.9-2-5.3-5.2-5.3-3 0-5.1 2.1-5.1 4.8" />
+          <path d="M12 35h34c3.6 0 6.4 2.6 6.4 5.9 0 3.1-2.4 5.6-5.4 5.6-2.8 0-4.9-1.9-4.9-4.5" />
+          <path d="M12 45h17" />
+        </g>
+      </svg>
+    );
+  }
+
+  return (
+    <svg className={classes} viewBox="0 0 64 64" aria-hidden="true">
+      <path
+        d="M14 35.5c0-5 4.1-9.1 9.1-9.1 1.5 0 2.9.3 4.2 1 1.8-3.3 5.2-5.5 9.2-5.5 5.9 0 10.7 4.7 10.7 10.6v.9c3.3.7 5.8 3.7 5.8 7.3 0 4.1-3.3 7.4-7.4 7.4H22c-4.4 0-8-3.6-8-8 0-1.8.6-3.4 1.8-4.6z"
+        fill="#edf2f7"
+        stroke="#6f7f95"
+        strokeWidth="3"
+      />
+    </svg>
+  );
 }
 
 const SECTION_LABEL_ALIASES: Record<string, string> = {
@@ -795,9 +1231,14 @@ function AlertCard({ alert, index }: { alert: AlertRecord; index: number }) {
 }
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<AppTab>(() => readSavedActiveTab());
   const [payload, setPayload] = useState<AlertsPayload | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [forecastData, setForecastData] = useState<WeatherPayload | null>(null);
+  const [forecastLoadState, setForecastLoadState] =
+    useState<ForecastLoadState>("idle");
+  const [forecastError, setForecastError] = useState<string | null>(null);
   const [savedPreference, setSavedPreference] =
     useState<SavedLocationPreference | null>(null);
   const [showLocationModal, setShowLocationModal] = useState(false);
@@ -806,7 +1247,6 @@ export default function App() {
   const [isSavingLocation, setIsSavingLocation] = useState(false);
   const [installPromptEvent, setInstallPromptEvent] =
     useState<BeforeInstallPromptEvent | null>(null);
-  const [showInstallPrompt, setShowInstallPrompt] = useState(false);
   const [isOffline, setIsOffline] = useState(
     typeof navigator !== "undefined" ? !navigator.onLine : false
   );
@@ -818,6 +1258,8 @@ export default function App() {
     useState<SeverityFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("priority");
   const [showFilters, setShowFilters] = useState(true);
+  const hourlyStripRef = useRef<HTMLDivElement | null>(null);
+  const dailyStripRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const storedPreference = readSavedLocationPreference();
@@ -837,12 +1279,10 @@ export default function App() {
     const handleBeforeInstallPrompt = (event: Event) => {
       event.preventDefault();
       setInstallPromptEvent(event as BeforeInstallPromptEvent);
-      setShowInstallPrompt(true);
     };
 
     const handleAppInstalled = () => {
       setInstallPromptEvent(null);
-      setShowInstallPrompt(false);
     };
 
     const handleOnline = () => setIsOffline(false);
@@ -860,6 +1300,10 @@ export default function App() {
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
+
+  useEffect(() => {
+    saveActiveTab(activeTab);
+  }, [activeTab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -890,6 +1334,35 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== "forecast") return;
+
+    let cancelled = false;
+
+    const loadForecast = async () => {
+      setForecastLoadState("loading");
+      setForecastError(null);
+      try {
+        const forecast = await fetchForecast(savedPreference);
+        if (cancelled) return;
+        setForecastData(forecast);
+        setForecastLoadState("ready");
+      } catch (error) {
+        if (cancelled) return;
+        setForecastError(
+          error instanceof Error ? error.message : "Unable to load forecast."
+        );
+        setForecastLoadState("error");
+      }
+    };
+
+    void loadForecast();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, savedPreference]);
 
   const alerts = payload?.alerts ?? [];
 
@@ -1001,18 +1474,28 @@ export default function App() {
     [alerts]
   );
 
+  const scrollForecastStrip = (
+    ref: { current: HTMLDivElement | null },
+    direction: "left" | "right"
+  ) => {
+    const target = ref.current;
+    if (!target) return;
+    const amount = Math.max(220, Math.round(target.clientWidth * 0.72));
+    target.scrollBy({
+      left: direction === "left" ? -amount : amount,
+      behavior: "smooth"
+    });
+  };
+
   const installPwa = async () => {
     if (!installPromptEvent) return;
     try {
       await installPromptEvent.prompt();
       const result = await installPromptEvent.userChoice;
       if (result.outcome === "accepted") {
-        setShowInstallPrompt(false);
         setInstallPromptEvent(null);
       }
-    } catch {
-      setShowInstallPrompt(false);
-    }
+    } catch {}
   };
 
   const openLocationModal = () => {
@@ -1024,16 +1507,14 @@ export default function App() {
     setShowLocationModal(true);
   };
 
-  const clearCountyFocus = () => {
-    if (!savedPreference) return;
-    const updatedPreference: SavedLocationPreference = {
-      ...savedPreference,
-      countyName: undefined,
-      countyCode: undefined,
-      savedAt: new Date().toISOString()
-    };
-    saveLocationPreference(updatedPreference);
-    setSavedPreference(updatedPreference);
+  const clearDefaultLocation = () => {
+    try {
+      window.localStorage.removeItem(LOCATION_STORAGE_KEY);
+    } catch {
+      // Ignore localStorage failures.
+    }
+    setSavedPreference(null);
+    setStateFilter("all");
   };
 
   const handleLocationExit = () => {
@@ -1059,6 +1540,8 @@ export default function App() {
       let label = rawInput;
       let countyName: string | undefined;
       let countyCode: string | undefined;
+      let lat: number | undefined;
+      let lon: number | undefined;
 
       if (/^\d{5}$/.test(rawInput)) {
         const resolved = await resolveStateFromZip(rawInput);
@@ -1066,6 +1549,8 @@ export default function App() {
         label = resolved.label;
         countyName = resolved.countyName;
         countyCode = resolved.countyCode;
+        lat = resolved.lat;
+        lon = resolved.lon;
       } else if (isLikelyStateOnlyInput(rawInput)) {
         stateCode = toStateCode(rawInput);
       } else {
@@ -1074,6 +1559,8 @@ export default function App() {
         label = resolved.label;
         countyName = resolved.countyName;
         countyCode = resolved.countyCode;
+        lat = resolved.lat;
+        lon = resolved.lon;
       }
 
       if (!stateCode) {
@@ -1092,6 +1579,8 @@ export default function App() {
         label,
         countyName,
         countyCode,
+        lat,
+        lon,
         savedAt: new Date().toISOString()
       };
 
@@ -1111,6 +1600,17 @@ export default function App() {
     }
   };
 
+  const forecastLocation =
+    forecastData?.location?.label || savedPreference?.label || "Default location";
+  const hourlyForecast = (forecastData?.hourly ?? []).slice(0, 12);
+  const dailyForecast = (forecastData?.daily ?? []).slice(0, 7);
+  const todayForecast = dailyForecast[0];
+  const currentCondition = forecastData?.current?.condition || "Conditions unavailable";
+  const currentIsNight =
+    typeof forecastData?.current?.isNight === "boolean"
+      ? forecastData.current.isNight
+      : inferNightFromCondition(currentCondition);
+
   return (
     <div className="page-shell">
       <div className="background-orb orb-one" />
@@ -1126,184 +1626,390 @@ export default function App() {
           </div>
         </header>
 
-        {showInstallPrompt ? (
-          <section className="install-banner" role="status">
-            <p>Install this app for a faster mobile experience and home-screen alerts access.</p>
-            <div className="install-actions">
-              <button type="button" className="save-location-btn" onClick={installPwa}>
-                Install App
-              </button>
-              <button
-                type="button"
-                className="text-btn"
-                onClick={() => setShowInstallPrompt(false)}
-              >
-                Not now
-              </button>
-            </div>
-          </section>
-        ) : null}
-
         {isOffline ? (
           <section className="message offline-message" role="status">
             You are offline. Showing the most recent cached alert data.
           </section>
         ) : null}
 
-        <section className="metric-grid">
-          <article className="metric-card">
-            <p>Total Active Alerts</p>
-            <strong>{alerts.length}</strong>
-          </article>
-          <article className="metric-card warning-metric">
-            <p>Warnings</p>
-            <strong>{warningCount}</strong>
-          </article>
-          <article className="metric-card">
-            <p>Watches</p>
-            <strong>{watchCount}</strong>
-          </article>
-          <article className="metric-card soon-metric">
-            <p>Expiring Within 2h</p>
-            <strong>{expiringSoonCount}</strong>
-          </article>
-        </section>
+        {activeTab === "alerts" ? (
+          <>
+            <section className="metric-grid">
+              <article className="metric-card">
+                <p>Total Active Alerts</p>
+                <strong>{alerts.length}</strong>
+              </article>
+              <article className="metric-card warning-metric">
+                <p>Warnings</p>
+                <strong>{warningCount}</strong>
+              </article>
+              <article className="metric-card">
+                <p>Watches</p>
+                <strong>{watchCount}</strong>
+              </article>
+              <article className="metric-card soon-metric">
+                <p>Expiring Within 2h</p>
+                <strong>{expiringSoonCount}</strong>
+              </article>
+            </section>
 
-        <section className="filters-panel">
-          <div className="filters-header">
-            <p className="filters-title">Filters and Search</p>
-            <button
-              type="button"
-              className="text-btn"
-              onClick={() => setShowFilters((value) => !value)}
-            >
-              {showFilters ? "Hide" : "Show"}
-            </button>
-          </div>
-
-          {showFilters ? (
-            <>
-              <label className="field">
-                <span>Search alerts</span>
-                <input
-                  type="search"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Search by event, area, severity, or text..."
-                />
-              </label>
-
-              <div className="field-grid">
-                <label className="field">
-                  <span>State</span>
-                  <select
-                    value={stateFilter}
-                    onChange={(event) => setStateFilter(event.target.value)}
-                  >
-                    <option value="all">All states</option>
-                    {states.map((state) => (
-                      <option key={state} value={state}>
-                        {state}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="field">
-                  <span>Type</span>
-                  <select
-                    value={typeFilter}
-                    onChange={(event) =>
-                      setTypeFilter(event.target.value as AlertTypeFilter)
-                    }
-                  >
-                    {Object.entries(alertTypeLabel).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="field">
-                  <span>Severity</span>
-                  <select
-                    value={severityFilter}
-                    onChange={(event) =>
-                      setSeverityFilter(event.target.value as SeverityFilter)
-                    }
-                  >
-                    <option value="all">All severities</option>
-                    <option value="extreme">Extreme</option>
-                    <option value="severe">Severe</option>
-                    <option value="moderate">Moderate</option>
-                    <option value="minor">Minor</option>
-                    <option value="unknown">Unknown</option>
-                  </select>
-                </label>
-
-                <label className="field">
-                  <span>Sort</span>
-                  <select
-                    value={sortMode}
-                    onChange={(event) => setSortMode(event.target.value as SortMode)}
-                  >
-                    <option value="priority">Highest priority first</option>
-                    <option value="expires">Expiring soonest first</option>
-                    <option value="latest">Latest updated first</option>
-                  </select>
-                </label>
-              </div>
-
-              <div className="filters-actions">
-                <button type="button" className="text-btn" onClick={openLocationModal}>
-                  Change Default Location
+            <section className="filters-panel">
+              <div className="filters-header">
+                <p className="filters-title">Filters and Search</p>
+                <button
+                  type="button"
+                  className="text-btn"
+                  onClick={() => setShowFilters((value) => !value)}
+                >
+                  {showFilters ? "Hide" : "Show"}
                 </button>
-                {activeCountyName || activeCountyCode ? (
-                  <button type="button" className="text-btn" onClick={clearCountyFocus}>
-                    Clear County Focus
-                  </button>
-                ) : null}
               </div>
-            </>
-          ) : null}
-        </section>
 
-        {errorMessage ? (
-          <section className="message error-message" role="alert">
-            <strong>Could not load alerts:</strong> {errorMessage}
+              {showFilters ? (
+                <>
+                  <label className="field">
+                    <span>Search alerts</span>
+                    <input
+                      type="search"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="Search by event, area, severity, or text..."
+                    />
+                  </label>
+
+                  <div className="field-grid">
+                    <label className="field">
+                      <span>State</span>
+                      <select
+                        value={stateFilter}
+                        onChange={(event) => setStateFilter(event.target.value)}
+                      >
+                        <option value="all">All states</option>
+                        {states.map((state) => (
+                          <option key={state} value={state}>
+                            {state}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="field">
+                      <span>Type</span>
+                      <select
+                        value={typeFilter}
+                        onChange={(event) =>
+                          setTypeFilter(event.target.value as AlertTypeFilter)
+                        }
+                      >
+                        {Object.entries(alertTypeLabel).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="field">
+                      <span>Severity</span>
+                      <select
+                        value={severityFilter}
+                        onChange={(event) =>
+                          setSeverityFilter(event.target.value as SeverityFilter)
+                        }
+                      >
+                        <option value="all">All severities</option>
+                        <option value="extreme">Extreme</option>
+                        <option value="severe">Severe</option>
+                        <option value="moderate">Moderate</option>
+                        <option value="minor">Minor</option>
+                        <option value="unknown">Unknown</option>
+                      </select>
+                    </label>
+
+                    <label className="field">
+                      <span>Sort</span>
+                      <select
+                        value={sortMode}
+                        onChange={(event) => setSortMode(event.target.value as SortMode)}
+                      >
+                        <option value="priority">Highest priority first</option>
+                        <option value="expires">Expiring soonest first</option>
+                        <option value="latest">Latest updated first</option>
+                      </select>
+                    </label>
+                  </div>
+
+                </>
+              ) : null}
+            </section>
+
+            {errorMessage ? (
+              <section className="message error-message" role="alert">
+                <strong>Could not load alerts:</strong> {errorMessage}
+              </section>
+            ) : null}
+
+            <section className="alerts-panel">
+              {loadState === "loading" && alerts.length === 0 ? (
+                <div className="skeleton-grid">
+                  <div className="skeleton-card" />
+                  <div className="skeleton-card" />
+                  <div className="skeleton-card" />
+                </div>
+              ) : null}
+
+              {loadState !== "loading" && sortedAlerts.length === 0 ? (
+                <div className="empty-state">
+                  <h2>No matching alerts</h2>
+                  <p>
+                    There are no active alerts for the current filters. Clear one or
+                    more filters to broaden results.
+                  </p>
+                </div>
+              ) : null}
+
+              {sortedAlerts.map((alert, index) => (
+                <AlertCard
+                  key={`${alert.id}-${alert.sent}-${index}`}
+                  alert={alert}
+                  index={index}
+                />
+              ))}
+            </section>
+
+            <footer className="site-footer">
+              <p>Data source: NOAA/NWS active alerts feed.</p>
+            </footer>
+          </>
+        ) : null}
+
+        {activeTab === "forecast" ? (
+          <section className="forecast-panel">
+            <article className="forecast-hero">
+              <div className="forecast-cloud cloud-one" />
+              <div className="forecast-cloud cloud-two" />
+              <div className="forecast-mountain mountain-one" />
+              <div className="forecast-mountain mountain-two" />
+              <p className="forecast-location">{forecastLocation}</p>
+              <div className="forecast-condition-row">
+                <WeatherIcon
+                  className="forecast-hero-icon"
+                  condition={currentCondition}
+                  isNight={currentIsNight}
+                />
+                <p>{currentCondition}</p>
+              </div>
+              <p className="forecast-hero-temp">
+                {formatTemp(forecastData?.current?.temperatureF)}
+              </p>
+              <p className="forecast-hero-detail">
+                Feels like {formatTemp(forecastData?.current?.feelsLikeF)}
+              </p>
+              <p className="forecast-hero-detail forecast-hero-detail-contrast">
+                High {formatTemp(todayForecast?.highF)} • Low {formatTemp(todayForecast?.lowF)}
+              </p>
+            </article>
+
+            {forecastLoadState === "loading" ? (
+              <div className="skeleton-grid">
+                <div className="skeleton-card" />
+                <div className="skeleton-card" />
+              </div>
+            ) : null}
+
+            {forecastError ? (
+              <section className="message error-message" role="alert">
+                <strong>Could not load forecast:</strong> {forecastError}
+              </section>
+            ) : null}
+
+            {forecastLoadState === "ready" && forecastData ? (
+              <>
+                <article className="forecast-block">
+                  <header className="forecast-block-head">
+                    <h3>
+                      <span className="forecast-head-icon" aria-hidden="true">
+                        ◷
+                      </span>
+                      Hourly forecast
+                    </h3>
+                    <div className="forecast-scroll-controls">
+                      <button
+                        type="button"
+                        className="forecast-scroll-btn"
+                        aria-label="Scroll hourly forecast left"
+                        onClick={() => scrollForecastStrip(hourlyStripRef, "left")}
+                      >
+                        ◀
+                      </button>
+                      <button
+                        type="button"
+                        className="forecast-scroll-btn"
+                        aria-label="Scroll hourly forecast right"
+                        onClick={() => scrollForecastStrip(hourlyStripRef, "right")}
+                      >
+                        ▶
+                      </button>
+                    </div>
+                  </header>
+
+                  <div className="forecast-hourly-strip" ref={hourlyStripRef}>
+                    {hourlyForecast.map((hour, index) => (
+                      <article
+                        key={`${hour.startTime || "hour"}-${index}`}
+                        className="forecast-hour-item"
+                      >
+                        <p className="forecast-hour-temp">{formatTemp(hour.temperatureF)}</p>
+                        <WeatherIcon
+                          className="forecast-hour-icon"
+                          condition={hour.shortForecast}
+                          isNight={
+                            inferNightFromStartTime(hour.startTime) ||
+                            inferNightFromCondition(hour.shortForecast)
+                          }
+                        />
+                        <p className="forecast-hour-precip">
+                          {formatPercent(hour.precipitationChance)}
+                        </p>
+                        <p className="forecast-hour-label">
+                          {formatHourLabel(hour.startTime, index)}
+                        </p>
+                      </article>
+                    ))}
+                  </div>
+                </article>
+
+                <article className="forecast-block">
+                  <header className="forecast-block-head">
+                    <h3>
+                      <span className="forecast-head-icon" aria-hidden="true">
+                        ▣
+                      </span>
+                      7-day forecast
+                    </h3>
+                    <div className="forecast-scroll-controls">
+                      <button
+                        type="button"
+                        className="forecast-scroll-btn"
+                        aria-label="Scroll 7-day forecast left"
+                        onClick={() => scrollForecastStrip(dailyStripRef, "left")}
+                      >
+                        ◀
+                      </button>
+                      <button
+                        type="button"
+                        className="forecast-scroll-btn"
+                        aria-label="Scroll 7-day forecast right"
+                        onClick={() => scrollForecastStrip(dailyStripRef, "right")}
+                      >
+                        ▶
+                      </button>
+                    </div>
+                  </header>
+
+                  <div className="forecast-daily-strip" ref={dailyStripRef}>
+                    {dailyForecast.map((day, index) => (
+                      <article key={`${day.name || "day"}-${index}`} className="forecast-day-pill">
+                        <p className="forecast-day-high">{formatTemp(day.highF)}</p>
+                        <p className="forecast-day-low">{formatTemp(day.lowF)}</p>
+                        <WeatherIcon
+                          className="forecast-day-icon"
+                          condition={day.shortForecast}
+                          isNight={false}
+                        />
+                        <p className="forecast-day-precip">
+                          {formatPercent(day.precipitationChance)}
+                        </p>
+                        <p className="forecast-day-title">
+                          {formatDayLabel(day.startTime, index)}
+                        </p>
+                        <p className="forecast-day-date">
+                          {formatMonthDay(day.startTime)}
+                        </p>
+                      </article>
+                    ))}
+                  </div>
+                </article>
+
+                {forecastData.updated ? (
+                  <p className="forecast-updated">
+                    Updated: {formatDateTime(forecastData.updated)}
+                  </p>
+                ) : null}
+                <p className="forecast-updated">
+                  Wind {formatMph(forecastData.current?.windMph)}{" "}
+                  {forecastData.current?.windDirection || ""}
+                </p>
+              </>
+            ) : null}
           </section>
         ) : null}
 
-        <section className="alerts-panel">
-          {loadState === "loading" && alerts.length === 0 ? (
-            <div className="skeleton-grid">
-              <div className="skeleton-card" />
-              <div className="skeleton-card" />
-              <div className="skeleton-card" />
-            </div>
-          ) : null}
+        {activeTab === "more" ? (
+          <section className="more-panel">
+            <article className="more-card">
+              <h2>More</h2>
+              <p className="more-copy">App and location preferences.</p>
 
-          {loadState !== "loading" && sortedAlerts.length === 0 ? (
-            <div className="empty-state">
-              <h2>No matching alerts</h2>
-              <p>
-                There are no active alerts for the current filters. Clear one or
-                more filters to broaden results.
+              <div className="more-actions">
+                <button
+                  type="button"
+                  className="save-location-btn"
+                  onClick={installPwa}
+                  disabled={!installPromptEvent}
+                >
+                  Install App
+                </button>
+                <button type="button" className="text-btn" onClick={openLocationModal}>
+                  Change Default Location
+                </button>
+                {savedPreference ? (
+                  <button type="button" className="text-btn" onClick={clearDefaultLocation}>
+                    Reset Default State
+                  </button>
+                ) : null}
+              </div>
+
+              <p className="more-note">
+                {savedPreference
+                  ? `Current default: ${savedPreference.label}`
+                  : "No default location saved yet."}
               </p>
-            </div>
-          ) : null}
+              {!installPromptEvent ? (
+                <p className="more-note">
+                  Install will appear on supported browsers/devices after engagement.
+                </p>
+              ) : null}
+            </article>
+          </section>
+        ) : null}
 
-          {sortedAlerts.map((alert, index) => (
-            <AlertCard key={`${alert.id}-${alert.sent}-${index}`} alert={alert} index={index} />
-          ))}
-        </section>
-
-        <footer className="site-footer">
-          <p>
-            Data source: NOAA/NWS active alerts feed.
-          </p>
-        </footer>
+        <nav className="bottom-nav" aria-label="Primary">
+          <button
+            type="button"
+            className={`bottom-nav-item${activeTab === "alerts" ? " active" : ""}`}
+            aria-current={activeTab === "alerts" ? "page" : undefined}
+            onClick={() => setActiveTab("alerts")}
+          >
+            Alerts
+          </button>
+          <button
+            type="button"
+            className={`bottom-nav-item${activeTab === "forecast" ? " active" : ""}`}
+            aria-current={activeTab === "forecast" ? "page" : undefined}
+            onClick={() => setActiveTab("forecast")}
+          >
+            Forecast
+          </button>
+          <button
+            type="button"
+            className={`bottom-nav-item${activeTab === "more" ? " active" : ""}`}
+            aria-current={activeTab === "more" ? "page" : undefined}
+            onClick={() => setActiveTab("more")}
+          >
+            More
+          </button>
+        </nav>
 
         {showLocationModal ? (
           <section

@@ -42,7 +42,7 @@ body {
 
 .page-shell {
   min-height: 100vh;
-  padding: calc(1rem + env(safe-area-inset-top)) 0 calc(2.5rem + env(safe-area-inset-bottom));
+  padding: calc(1rem + env(safe-area-inset-top)) 0 calc(6.5rem + env(safe-area-inset-bottom));
   position: relative;
   overflow-x: clip;
 }
@@ -212,14 +212,6 @@ select {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.filters-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
 .text-btn {
   border: 1px solid var(--line);
   background: #fff;
@@ -239,6 +231,390 @@ select {
 .text-btn:disabled {
   opacity: 0.65;
   cursor: default;
+}
+
+.forecast-panel,
+.more-panel {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.forecast-hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: 1.7rem;
+  border: 1px solid #c5dbf3;
+  background: linear-gradient(180deg, #7eb1dd 0%, #a4c3df 58%, #b7c7d5 100%);
+  min-height: 18.5rem;
+  padding: 0.95rem 0.9rem 1.15rem;
+  color: #011833;
+  text-align: center;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  width: 100%;
+  min-width: 0;
+}
+
+.forecast-hero > * {
+  position: relative;
+  z-index: 1;
+}
+
+.forecast-location {
+  margin: 0.2rem 0 0;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(1, 24, 51, 0.72);
+}
+
+.forecast-condition-row {
+  margin-top: 0.6rem;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.forecast-condition-row p {
+  margin: 0;
+  font-size: clamp(1rem, 3.3vw, 1.25rem);
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  text-align: center;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.forecast-hero-icon {
+  width: 2.1rem;
+  height: 2.1rem;
+}
+
+.forecast-hero-temp {
+  margin: 0.9rem 0 0;
+  font-size: clamp(3rem, 10vw, 4.4rem);
+  line-height: 0.9;
+  letter-spacing: -0.045em;
+  font-weight: 700;
+  max-width: 100%;
+}
+
+.forecast-hero-detail {
+  margin: 0.62rem 0 0;
+  font-size: clamp(0.92rem, 2.8vw, 1.18rem);
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  text-align: center;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: #0a203d;
+  font-weight: 600;
+  text-shadow: 0 1px 0 rgba(248, 252, 255, 0.58);
+}
+
+.forecast-hero-detail-contrast {
+  color: #071a33;
+  font-weight: 700;
+  text-shadow: 0 1px 0 rgba(252, 254, 255, 0.68);
+}
+
+.forecast-cloud {
+  position: absolute;
+  border-radius: 999px;
+  background: rgba(234, 241, 248, 0.54);
+  filter: blur(1px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.forecast-cloud.cloud-one {
+  width: 12rem;
+  height: 3.2rem;
+  left: -2rem;
+  top: 1.7rem;
+}
+
+.forecast-cloud.cloud-two {
+  width: 14rem;
+  height: 3.2rem;
+  right: -2.4rem;
+  top: 7.8rem;
+}
+
+.forecast-mountain {
+  position: absolute;
+  border-radius: 2rem;
+  background: rgba(218, 228, 238, 0.72);
+  filter: blur(0.2px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.forecast-mountain.mountain-one {
+  width: 18rem;
+  height: 7.3rem;
+  left: -2rem;
+  bottom: -2.4rem;
+  transform: rotate(12deg);
+}
+
+.forecast-mountain.mountain-two {
+  width: 17rem;
+  height: 8rem;
+  right: -2.5rem;
+  bottom: -2.8rem;
+  transform: rotate(-9deg);
+}
+
+.forecast-block {
+  border: 1px solid #cadcf2;
+  border-radius: 1.7rem;
+  background: #f8fbff;
+  padding: 0.85rem 0.8rem 0.6rem;
+  min-width: 0;
+}
+
+.forecast-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.75rem;
+}
+
+.forecast-block-head h3 {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.48rem;
+  font-size: 1rem;
+  color: #10243f;
+  letter-spacing: -0.01em;
+}
+
+.forecast-head-icon {
+  font-size: 0.95rem;
+  color: #0f2038;
+}
+
+.forecast-scroll-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.forecast-scroll-btn {
+  width: 1.95rem;
+  height: 1.95rem;
+  border-radius: 999px;
+  border: 1px solid #c5d8f0;
+  background: #dbe9fb;
+  color: #5f77a4;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.forecast-scroll-btn:hover {
+  filter: brightness(0.98);
+}
+
+.forecast-hourly-strip,
+.forecast-daily-strip {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding-bottom: 0.35rem;
+  scrollbar-width: none;
+  min-width: 0;
+}
+
+.forecast-hourly-strip::-webkit-scrollbar,
+.forecast-daily-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.forecast-hour-item {
+  width: 3.55rem;
+  min-width: 3.55rem;
+  padding: 0.35rem 0.2rem;
+  text-align: center;
+  display: grid;
+  gap: 0.18rem;
+  justify-items: center;
+}
+
+.forecast-hour-temp {
+  margin: 0;
+  font-size: 1.12rem;
+  font-weight: 700;
+  color: #213e63;
+  line-height: 1;
+}
+
+.forecast-hour-icon {
+  width: 1.58rem;
+  height: 1.58rem;
+}
+
+.weather-symbol {
+  display: block;
+}
+
+.forecast-hour-precip {
+  margin: 0;
+  min-height: 0.95rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #23476f;
+  line-height: 1;
+}
+
+.forecast-hour-label {
+  margin: 0.18rem 0 0;
+  font-size: 0.84rem;
+  color: #1d3b63;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.forecast-day-pill {
+  width: 4.45rem;
+  min-width: 4.45rem;
+  border: 2px solid #bad2f2;
+  border-radius: 1.7rem;
+  padding: 0.5rem 0.32rem 0.48rem;
+  background: #f8fbff;
+  text-align: center;
+  display: grid;
+  justify-items: center;
+  gap: 0.2rem;
+}
+
+.forecast-day-high,
+.forecast-day-low {
+  margin: 0;
+  font-size: 1.02rem;
+  line-height: 1;
+  color: #1e3e66;
+  font-weight: 700;
+}
+
+.forecast-day-low {
+  margin-top: -0.08rem;
+  opacity: 0.92;
+}
+
+.forecast-day-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-top: 0.14rem;
+}
+
+.forecast-day-precip {
+  margin: 0.05rem 0 0;
+  min-height: 0.9rem;
+  font-size: 0.75rem;
+  color: #244d78;
+  line-height: 1;
+}
+
+.forecast-day-title,
+.forecast-day-date {
+  margin: 0.14rem 0 0;
+  font-size: 0.76rem;
+  color: #1f3f66;
+  line-height: 1.15;
+}
+
+.forecast-day-date {
+  margin-top: 0;
+}
+
+.forecast-updated {
+  margin: 0;
+  color: #426184;
+  font-size: 0.86rem;
+  line-height: 1.2;
+  padding-inline: 0.12rem;
+}
+
+.more-card {
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--surface);
+  padding: 1rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.more-card h2 {
+  margin: 0;
+  font-size: 1.08rem;
+}
+
+.more-copy {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.more-actions {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.more-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.bottom-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  border-top: 1px solid var(--line);
+  background: rgba(246, 250, 255, 0.95);
+  backdrop-filter: blur(12px);
+  padding: 0.55rem calc(0.7rem + env(safe-area-inset-left))
+    calc(0.55rem + env(safe-area-inset-bottom))
+    calc(0.7rem + env(safe-area-inset-right));
+}
+
+.bottom-nav-item {
+  border: 1px solid #d0dced;
+  border-radius: 0.85rem;
+  background: #ffffff;
+  color: #395372;
+  min-height: 2.8rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+}
+
+.bottom-nav-item.active {
+  border-color: #1f62d6;
+  background: linear-gradient(150deg, #1c61d8, #125bcc);
+  color: #ffffff;
 }
 
 .message {
@@ -640,6 +1016,75 @@ select {
     grid-template-columns: 1fr;
   }
 
+  .forecast-hero {
+    min-height: 13.9rem;
+    border-radius: 1.35rem;
+    padding: 0.72rem 0.58rem 0.82rem;
+  }
+
+  .forecast-condition-row p {
+    font-size: clamp(0.82rem, 4vw, 1rem);
+  }
+
+  .forecast-hero-icon {
+    width: 1.4rem;
+    height: 1.4rem;
+  }
+
+  .forecast-hero-temp {
+    font-size: clamp(2.7rem, 13vw, 3.65rem);
+  }
+
+  .forecast-hero-detail {
+    font-size: clamp(0.78rem, 3.45vw, 0.92rem);
+  }
+
+  .forecast-hour-item {
+    width: 2.9rem;
+    min-width: 2.9rem;
+  }
+
+  .forecast-hour-temp {
+    font-size: 0.88rem;
+  }
+
+  .forecast-hour-icon {
+    width: 1.2rem;
+    height: 1.2rem;
+  }
+
+  .forecast-hour-precip,
+  .forecast-hour-label {
+    font-size: 0.72rem;
+  }
+
+  .forecast-day-pill {
+    width: 3.55rem;
+    min-width: 3.55rem;
+    border-radius: 1.5rem;
+    padding: 0.4rem 0.24rem 0.36rem;
+  }
+
+  .forecast-day-high,
+  .forecast-day-low {
+    font-size: 0.8rem;
+  }
+
+  .forecast-day-icon {
+    width: 1.18rem;
+    height: 1.18rem;
+  }
+
+  .forecast-day-precip,
+  .forecast-day-title,
+  .forecast-day-date {
+    font-size: 0.62rem;
+  }
+
+  .forecast-updated {
+    font-size: 0.68rem;
+  }
+
   .sheet-head {
     flex-direction: column;
     align-items: flex-start;
@@ -682,5 +1127,89 @@ select {
   .location-modal {
     border-bottom-left-radius: 0.6rem;
     border-bottom-right-radius: 0.6rem;
+  }
+}
+
+@media (max-width: 420px) {
+  .forecast-hero {
+    min-height: 12.6rem;
+    padding: 0.62rem 0.5rem 0.72rem;
+  }
+
+  .forecast-location {
+    font-size: 0.64rem;
+  }
+
+  .forecast-condition-row p {
+    font-size: 0.74rem;
+  }
+
+  .forecast-hero-icon {
+    width: 1.18rem;
+    height: 1.18rem;
+  }
+
+  .forecast-hero-temp {
+    font-size: clamp(2.1rem, 11vw, 2.95rem);
+  }
+
+  .forecast-hero-detail {
+    font-size: 0.68rem;
+  }
+
+  .forecast-block {
+    padding: 0.74rem 0.64rem 0.52rem;
+    border-radius: 1.45rem;
+  }
+
+  .forecast-block-head h3 {
+    font-size: 0.88rem;
+  }
+
+  .forecast-scroll-btn {
+    width: 1.7rem;
+    height: 1.7rem;
+    font-size: 0.62rem;
+  }
+
+  .forecast-hour-item {
+    width: 2.6rem;
+    min-width: 2.6rem;
+  }
+
+  .forecast-hour-temp {
+    font-size: 0.78rem;
+  }
+
+  .forecast-hour-icon {
+    width: 1.06rem;
+    height: 1.06rem;
+  }
+
+  .forecast-hour-precip,
+  .forecast-hour-label {
+    font-size: 0.66rem;
+  }
+
+  .forecast-day-pill {
+    width: 3.15rem;
+    min-width: 3.15rem;
+    padding: 0.34rem 0.2rem 0.3rem;
+  }
+
+  .forecast-day-high,
+  .forecast-day-low {
+    font-size: 0.72rem;
+  }
+
+  .forecast-day-icon {
+    width: 1.02rem;
+    height: 1.02rem;
+  }
+
+  .forecast-day-precip,
+  .forecast-day-title,
+  .forecast-day-date {
+    font-size: 0.56rem;
   }
 }
