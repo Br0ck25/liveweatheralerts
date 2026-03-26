@@ -1082,6 +1082,7 @@ function priorityScore(alert: AlertRecord): number {
 
 function AlertCard({ alert, index }: { alert: AlertRecord; index: number }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const alertType = classifyAlertType(alert.event);
   const description = textLines(alert.description);
   const instruction = textLines(alert.instruction);
   const sourceLabel = alert.stateCode.trim() ? alert.stateCode : "US";
@@ -1120,12 +1121,14 @@ function AlertCard({ alert, index }: { alert: AlertRecord; index: number }) {
 
   return (
     <article
-      className="alert-sheet"
+      className={`alert-sheet alert-sheet-${alertType}`}
       style={{ animationDelay: `${Math.min(index * 45, 420)}ms` }}
     >
       <header className="sheet-head">
         <div>
-          <p className="sheet-event">{(alert.event || "Weather Alert").toUpperCase()}</p>
+          <p className={`sheet-event sheet-event-${alertType}`}>
+            {(alert.event || "Weather Alert").toUpperCase()}
+          </p>
           <h3>{stateCountySummary}</h3>
         </div>
       </header>
@@ -1257,7 +1260,7 @@ export default function App() {
   const [severityFilter, setSeverityFilter] =
     useState<SeverityFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("priority");
-  const [showFilters, setShowFilters] = useState(true);
+  const [showFilters, setShowFilters] = useState(false);
   const hourlyStripRef = useRef<HTMLDivElement | null>(null);
   const dailyStripRef = useRef<HTMLDivElement | null>(null);
 
