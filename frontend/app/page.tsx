@@ -665,6 +665,88 @@ export default function LiveWeatherAlertsHomePage() {
     return () => clearInterval(timer);
   }, []);
 
+  const hasMovedEnough = useCallback(
+    (prev: { lat?: number; lon?: number }, next: { lat: number; lon: number }) => {
+      if (!prev.lat || !prev.lon) return true;
+      const distance = getDistanceMiles({ lat: prev.lat, lon: prev.lon }, { lat: next.lat, lon: next.lon });
+      return distance > 15;
+    },
+    []
+  );
+
+  async function updateLocationFromTravel(next: { lat: number; lon: number }) {
+    const current = location;
+    if (!current) return;
+
+    const nextLocation: SavedLocation = {
+      ...current,
+      lat: next.lat,
+      lon: next.lon,
+    };
+
+    try {
+      const res = await fetch(`${API_BASE}/api/location?lat=${next.lat}&lon=${next.lon}`, {
+        cache: "no-store",
+      });
+      const data = await safeJson(res);
+      if (res.ok && data) {
+        nextLocation.stateCode = data.state || nextLocation.stateCode;
+        if (data.county) nextLocation.county = data.county;
+        if (data.countyFips) nextLocation.countyFips = data.countyFips;
+        if (Array.isArray(data.adjacentCountyFips)) nextLocation.adjacentCountyFips = data.adjacentCountyFips;
+        if (data.label) nextLocation.label = data.label;
+
+        if (data.countyCenters && typeof data.countyCenters === "object") {
+          setCountyCenters((prev) => ({
+            ...prev,
+            ...data.countyCenters,
+          }));
+        }
+        if (data.countyFips && data.countyCenter && data.countyCenter.lat && data.countyCenter.lon) {
+          setCountyCenters((prev) => ({
+            ...prev,
+            [data.countyFips]: {
+              lat: data.countyCenter.lat,
+              lon: data.countyCenter.lon,
+            },
+          }));
+        }
+
+        if (nextLocation.countyFips && nextLocation.countyFips !== location?.countyFips) {
+          openNotificationPromptIfNeeded(nextLocation);
+        }
+      }
+    } catch {
+      // keep existing values
+    }
+
+    setLocation(nextLocation);
+    setTravelLocationUpdatedAt(Date.now());
+
+    if (pushEnabled && pushPrefs && nextLocation.countyFips && nextLocation.countyFips !== (current?.countyFips || "")) {
+      const nextPrefs = {
+        ...pushPrefs,
+        stateCode: nextLocation.stateCode || pushPrefs.stateCode,
+        countyFips: nextLocation.countyFips,
+      };
+      try {
+        await updatePushPreferences(nextPrefs);
+        setPushPrefs(nextPrefs);
+      } catch (err) {
+        console.warn("Failed to update push preferences on travel location change", err);
+      }
+    }
+  }
+
+  const handleTravelLocationUpdate = useCallback(
+    (next: { lat: number; lon: number }) => {
+      if (!location?.lat || !location?.lon) return;
+      if (!hasMovedEnough(location, next)) return;
+      updateLocationFromTravel(next);
+    },
+    [location, updateLocationFromTravel, hasMovedEnough]
+  );
+
   useEffect(() => {
     if (travelAlertsMode === "off") return;
     if (!("geolocation" in navigator)) return;
@@ -980,87 +1062,6 @@ export default function LiveWeatherAlertsHomePage() {
     const bearing = toDeg(Math.atan2(y, x));
     return (bearing + 360) % 360;
   }
-
-  const hasMovedEnough = useCallback(
-    (prev: { lat?: number; lon?: number }, next: { lat: number; lon: number }) => {
-      if (!prev.lat || !prev.lon) return true;
-      const distance = getDistanceMiles({ lat: prev.lat, lon: prev.lon }, { lat: next.lat, lon: next.lon });
-      return distance > 15;
-    },
-    []
-  );
-
-  const updateLocationFromTravel = useCallback(
-    async (next: { lat: number; lon: number }) => {
-      const current = location;
-      if (!current) return;
-
-      const nextLocation: SavedLocation = {
-        ...current,
-        lat: next.lat,
-        lon: next.lon,
-      };
-
-      try {
-        const res = await fetch(`${API_BASE}/api/location?lat=${next.lat}&lon=${next.lon}`, {
-          cache: "no-store",
-        });
-        const data = await safeJson(res);
-        if (res.ok && data) {
-          nextLocation.stateCode = data.state || nextLocation.stateCode;
-          if (data.county) nextLocation.county = data.county;
-          if (data.countyFips) nextLocation.countyFips = data.countyFips;
-          if (Array.isArray(data.adjacentCountyFips)) nextLocation.adjacentCountyFips = data.adjacentCountyFips;
-          if (data.label) nextLocation.label = data.label;
-
-          if (data.countyCenters && typeof data.countyCenters === "object") {
-            setCountyCenters((prev) => ({
-              ...prev,
-              ...data.countyCenters,
-            }));
-          }
-          if (data.countyFips && data.countyCenter && data.countyCenter.lat && data.countyCenter.lon) {
-            setCountyCenters((prev) => ({
-              ...prev,
-              [data.countyFips]: {
-                lat: data.countyCenter.lat,
-                lon: data.countyCenter.lon,
-              },
-            }));
-          }
-        }
-      } catch {
-        // keep existing values
-      }
-
-      setLocation(nextLocation);
-      setTravelLocationUpdatedAt(Date.now());
-
-      if (pushEnabled && pushPrefs && nextLocation.countyFips && nextLocation.countyFips !== (current?.countyFips || "")) {
-        const nextPrefs = {
-          ...pushPrefs,
-          stateCode: nextLocation.stateCode || pushPrefs.stateCode,
-          countyFips: nextLocation.countyFips,
-        };
-        try {
-          await updatePushPreferences(nextPrefs);
-          setPushPrefs(nextPrefs);
-        } catch (err) {
-          console.warn("Failed to update push preferences on travel location change", err);
-        }
-      }
-    },
-    [location, pushEnabled, pushPrefs]
-  );
-
-  const handleTravelLocationUpdate = useCallback(
-    (next: { lat: number; lon: number }) => {
-      if (!location?.lat || !location?.lon) return;
-      if (!hasMovedEnough(location, next)) return;
-      updateLocationFromTravel(next);
-    },
-    [location, updateLocationFromTravel, hasMovedEnough]
-  );
 
   async function handleEnableNotificationsFromPrompt() {
     if (!location?.stateCode) return;
