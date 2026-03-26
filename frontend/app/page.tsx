@@ -36,7 +36,7 @@ import {
   updatePushPreferences,
   type PushPreferences,
 } from "@/lib/push";
-import { formatTime, formatRelative, mapIcon } from "@/lib/weather/formatters";
+import { formatTime, formatRelative } from "@/lib/weather/formatters";
 import { sortAlerts, getAlertPriority, heroAreaLabel, getAlertBackground, getHeroVariantBackgroundImageIfExists } from "@/lib/alerts/helpers";
 
 /**
@@ -247,11 +247,11 @@ function resolveCurrentIcon(
     return "cloud";
   }
 
-  if (isNight) {
-    return "night";
+  if (text.includes("clear")) {
+    return isNight ? "night" : "sun";
   }
 
-  return "sun";
+  return isNight ? "night" : "sun";
 }
 
 function AllClearBanner({
@@ -768,15 +768,30 @@ export default function LiveWeatherAlertsHomePage() {
           <HourlyStrip
             points={
               weather?.hourly?.length
-                ? weather.hourly.map((p, i) => ({
-                    label: new Date(p.startTime || Date.now()).toLocaleTimeString([], {
-                      hour: "numeric",
-                    }),
-                    temp: p.temperatureF ?? 0,
-                    icon: mapIcon(p.shortForecast),
-                    precip: p.precipitationChance ?? 0,
-                    startTime: p.startTime,
-                  }))
+                ? weather.hourly.map((p, i) => {
+                    const isNightHour =
+                      weather?.current?.sunrise &&
+                      weather?.current?.sunset &&
+                      p.startTime
+                        ? (() => {
+                            const t = new Date(p.startTime).getTime();
+                            const sunrise = new Date(weather.current.sunrise).getTime();
+                            const sunset = new Date(weather.current.sunset).getTime();
+                            return t < sunrise || t > sunset;
+                          })()
+                        : new Date(p.startTime || "").getHours() < 6 ||
+                          new Date(p.startTime || "").getHours() >= 18;
+
+                    return {
+                      label: new Date(p.startTime || Date.now()).toLocaleTimeString([], {
+                        hour: "numeric",
+                      }),
+                      temp: p.temperatureF ?? 0,
+                      icon: resolveCurrentIcon(p.shortForecast, isNightHour),
+                      precip: p.precipitationChance ?? 0,
+                      startTime: p.startTime,
+                    };
+                  })
                 : fallbackHourly
             }
             onView10Day={() => setActiveTab("forecast")}

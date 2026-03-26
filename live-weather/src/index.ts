@@ -2783,6 +2783,13 @@ function buildSunTimesFromDailyPeriods(dailyPeriods: any[], nowMs = Date.now()) 
 		isNight = true;
 	}
 
+	if (!sunrise && dayPeriods.length) {
+		sunrise = dayPeriods[0].startTime;
+	}
+	if (!sunset && dayPeriods.length) {
+		sunset = dayPeriods[dayPeriods.length - 1].endTime;
+	}
+
 	return { sunrise, sunset, isNight };
 }
 
@@ -3050,6 +3057,12 @@ async function handleApiWeather(request: Request): Promise<Response> {
 		const hourly = normalizeHourlyPeriods(hourlyPeriodsRaw);
 		const daily = normalizeDailyPeriods(dailyPeriodsRaw);
 		const sun = buildSunTimesFromDailyPeriods(dailyPeriodsRaw);
+		if (!sun.sunrise && observation?.properties?.sunrise) {
+			sun.sunrise = String(observation.properties.sunrise);
+		}
+		if (!sun.sunset && observation?.properties?.sunset) {
+			sun.sunset = String(observation.properties.sunset);
+		}
 		let current = buildCurrentConditions(
 			observation?.properties ?? {},
 			hourlyPeriodsRaw[0] ?? {},
