@@ -1279,11 +1279,12 @@ export default function LiveWeatherAlertsHomePage() {
           <>
             <AllClearBanner
             locationLabel={activeLocationLabel}
-              backgroundImage={resolveWeatherBackground(
-                currentConditions.condition,
-                currentConditions.isNight
-              )}
-            />
+            lastPoll={lastCheckedAt}
+            backgroundImage={resolveWeatherBackground(
+              currentConditions.condition,
+              currentConditions.isNight
+            )}
+          />
 
             <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
               <CardContent className="p-5">
