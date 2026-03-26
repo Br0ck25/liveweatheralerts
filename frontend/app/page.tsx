@@ -294,7 +294,7 @@ function AllClearBanner({
           No active weather alerts
         </div>
         <div className="mt-3 text-sm font-medium text-sky-50">
-          {locationLabel} • {formatLiveTime(lastPoll)}
+          {locationLabel} • {formatLiveTime(lastPoll ? new Date(lastPoll).toISOString() : null)}
         </div>
       </CardContent>
     </Card>
