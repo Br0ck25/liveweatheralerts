@@ -85,6 +85,7 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 const LOCATION_STORAGE_KEY = "lwa:preferred-state:v1";
+const LOCATION_MODAL_DISMISSED_KEY = "lwa:location-modal-dismissed:v1";
 
 const STATE_NAME_BY_CODE: Record<string, string> = {
   AL: "alabama",
@@ -290,6 +291,56 @@ function saveLocationPreference(preference: SavedLocationPreference): void {
   window.localStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify(preference));
 }
 
+function isLocationModalDismissed(): boolean {
+  try {
+    return window.localStorage.getItem(LOCATION_MODAL_DISMISSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setLocationModalDismissed(dismissed: boolean): void {
+  try {
+    if (dismissed) {
+      window.localStorage.setItem(LOCATION_MODAL_DISMISSED_KEY, "1");
+    } else {
+      window.localStorage.removeItem(LOCATION_MODAL_DISMISSED_KEY);
+    }
+  } catch {
+    // Ignore localStorage failures in private mode or restricted contexts.
+  }
+}
+
+async function parseGeocodeResponse(
+  response: Response,
+  fallbackError: string
+): Promise<GeocodeLocationPayload> {
+  const raw = await response.text();
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  const looksLikeHtml = /^\s*</.test(raw);
+
+  if (!contentType.includes("application/json") || looksLikeHtml) {
+    throw new Error(
+      "Location lookup is unavailable right now. Please enter a state only, or try again in a moment."
+    );
+  }
+
+  let payload: GeocodeLocationPayload;
+  try {
+    payload = JSON.parse(raw) as GeocodeLocationPayload;
+  } catch {
+    throw new Error(
+      "Location lookup returned an unexpected response. Please enter a state only, or try again."
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(payload.error || fallbackError);
+  }
+
+  return payload;
+}
+
 async function resolveStateFromZip(
   zip: string
 ): Promise<{
@@ -305,11 +356,7 @@ async function resolveStateFromZip(
       Accept: "application/json"
     }
   });
-
-  const payload = (await response.json()) as GeocodeLocationPayload;
-  if (!response.ok) {
-    throw new Error(payload.error || "ZIP code lookup failed.");
-  }
+  const payload = await parseGeocodeResponse(response, "ZIP code lookup failed.");
 
   const stateCode = toStateCode(payload.state ?? "");
   if (!stateCode) {
@@ -342,11 +389,7 @@ async function resolveLocationFromQuery(
       Accept: "application/json"
     }
   });
-
-  const payload = (await response.json()) as GeocodeLocationPayload;
-  if (!response.ok) {
-    throw new Error(payload.error || "Location lookup failed.");
-  }
+  const payload = await parseGeocodeResponse(response, "Location lookup failed.");
 
   const stateCode = toStateCode(payload.state ?? "");
   if (!stateCode) {
@@ -784,8 +827,12 @@ export default function App() {
   useEffect(() => {
     const storedPreference = readSavedLocationPreference();
     if (storedPreference) {
+      setLocationModalDismissed(false);
       setSavedPreference(storedPreference);
       setStateFilter(storedPreference.stateCode);
+      return;
+    }
+    if (isLocationModalDismissed()) {
       return;
     }
     setShowLocationModal(true);
@@ -1011,6 +1058,7 @@ export default function App() {
     setLocationInput(
       savedPreference?.rawInput ?? (stateFilter === "all" ? "" : stateFilter)
     );
+    setLocationModalDismissed(false);
     setShowLocationModal(true);
   };
 
@@ -1024,6 +1072,12 @@ export default function App() {
     };
     saveLocationPreference(updatedPreference);
     setSavedPreference(updatedPreference);
+  };
+
+  const handleLocationExit = () => {
+    setLocationError(null);
+    setShowLocationModal(false);
+    setLocationModalDismissed(true);
   };
 
   const handleLocationSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -1080,6 +1134,7 @@ export default function App() {
       };
 
       saveLocationPreference(preference);
+      setLocationModalDismissed(false);
       setSavedPreference(preference);
       setStateFilter(stateCode);
       setShowLocationModal(false);
@@ -1365,16 +1420,14 @@ export default function App() {
                   >
                     {isSavingLocation ? "Saving..." : "Save Location"}
                   </button>
-                  {savedPreference ? (
-                    <button
-                      type="button"
-                      className="text-btn"
-                      disabled={isSavingLocation}
-                      onClick={() => setShowLocationModal(false)}
-                    >
-                      Cancel
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    className="text-btn"
+                    disabled={isSavingLocation}
+                    onClick={handleLocationExit}
+                  >
+                    Skip for now
+                  </button>
                 </div>
               </form>
             </div>
