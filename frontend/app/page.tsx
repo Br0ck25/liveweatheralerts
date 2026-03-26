@@ -1,5 +1,5 @@
 "use client";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Bell,
   Map,
@@ -59,7 +59,6 @@ type AlertSeverity = "Extreme" | "Severe" | "Moderate" | "Minor" | string;
 type AlertItem = {
   id: string;
   stateCode: string;
-  countyFips?: string | null;
   event: string;
   areaDesc: string;
   severity: AlertSeverity;
@@ -100,9 +99,6 @@ type SavedLocation = {
   lon?: number;
   city?: string;
   stateCode?: string;
-  county?: string;
-  countyFips?: string;
-  adjacentCountyFips?: string[];
 };
 
 type WeatherLocation = {
@@ -201,8 +197,6 @@ type HourlyPoint = {
 };
 
 const STORAGE_KEY = "lwa-location-v1";
-const HOME_LOCATION_KEY = "lwa-home-location-v1";
-const TRAVEL_ALERTS_MODE_KEY = "lwa-travel-alerts-mode-v1";
 
 const fallbackCurrent: CurrentConditions = {
   temp: 72,
@@ -227,7 +221,6 @@ const fallbackHourly: HourlyPoint[] = [
 ];
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
-const STORM_SPEED_MPH = 45;
 
 function resolveWeatherBackground(
   condition: string | undefined,
@@ -272,7 +265,7 @@ function AllClearBanner({
   backgroundImage,
 }: {
   locationLabel: string;
-  lastPoll: number | null;
+  lastPoll: string | null;
   backgroundImage?: string;
 }) {
   return (
@@ -294,7 +287,7 @@ function AllClearBanner({
           No active weather alerts
         </div>
         <div className="mt-3 text-sm font-medium text-sky-50">
-          {locationLabel} • {formatLiveTime(lastPoll ? new Date(lastPoll).toISOString() : null)}
+          {locationLabel} • {formatLiveTime(lastPoll)}
         </div>
       </CardContent>
     </Card>
@@ -305,16 +298,10 @@ export default function LiveWeatherAlertsHomePage() {
   const NOTIFICATION_PROMPT_SEEN_KEY = "lwa-notification-prompt-seen-v1";
 
   const [location, setLocation] = useState<SavedLocation | null>(null);
-  const [homeLocation, setHomeLocation] = useState<SavedLocation | null>(null);
   const [showLocationPrompt, setShowLocationPrompt] = useState(false);
   const [promptDefaultToZip, setPromptDefaultToZip] = useState(false);
   const [showNotificationPrompt, setShowNotificationPrompt] = useState(false);
   const [notificationPromptSeen, setNotificationPromptSeen] = useState(false);
-  const [travelAlertsMode, setTravelAlertsMode] = useState<"off" | "follow" | "corridor">("off");
-  const [lastTravelPosition, setLastTravelPosition] = useState<{ lat: number; lon: number } | null>(null);
-  const [travelBearing, setTravelBearing] = useState<number | null>(null);
-  const [travelLocationUpdatedAt, setTravelLocationUpdatedAt] = useState<number | null>(null);
-  const [countyCenters, setCountyCenters] = useState<Record<string, { lat: number; lon: number }>>({});
   const [alertsResp, setAlertsResp] = useState<AlertsResponse | null>(null);
   const [alertLiveMap, setAlertLiveMap] = useState<AlertLiveMap>({});
   const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
@@ -354,15 +341,6 @@ export default function LiveWeatherAlertsHomePage() {
     const seen = localStorage.getItem(NOTIFICATION_PROMPT_SEEN_KEY) === "true";
     setNotificationPromptSeen(seen);
 
-    const savedTravelMode = localStorage.getItem(TRAVEL_ALERTS_MODE_KEY) as
-      | "off"
-      | "follow"
-      | "corridor"
-      | null;
-    if (savedTravelMode) {
-      setTravelAlertsMode(savedTravelMode);
-    }
-
     const raw = localStorage.getItem(STORAGE_KEY);
     console.log("STORAGE_KEY", STORAGE_KEY);
     console.log("raw location", raw);
@@ -372,15 +350,7 @@ export default function LiveWeatherAlertsHomePage() {
       return;
     }
     try {
-      const parsed = JSON.parse(raw) as SavedLocation;
-      setLocation(parsed);
-      const homeRaw = localStorage.getItem(HOME_LOCATION_KEY);
-      if (homeRaw) {
-        setHomeLocation(JSON.parse(homeRaw));
-      } else {
-        setHomeLocation(parsed);
-        localStorage.setItem(HOME_LOCATION_KEY, JSON.stringify(parsed));
-      }
+      setLocation(JSON.parse(raw));
     } catch {
       setShowLocationPrompt(true);
     }
@@ -665,227 +635,13 @@ export default function LiveWeatherAlertsHomePage() {
     return () => clearInterval(timer);
   }, []);
 
-  const hasMovedEnough = useCallback(
-    (prev: { lat?: number; lon?: number }, next: { lat: number; lon: number }) => {
-      if (!prev.lat || !prev.lon) return true;
-      const distance = getDistanceMiles({ lat: prev.lat, lon: prev.lon }, { lat: next.lat, lon: next.lon });
-      return distance > 15;
-    },
-    []
-  );
-
-  async function updateLocationFromTravel(next: { lat: number; lon: number }) {
-    const current = location;
-    if (!current) return;
-
-    const nextLocation: SavedLocation = {
-      ...current,
-      lat: next.lat,
-      lon: next.lon,
-    };
-
-    try {
-      const res = await fetch(`${API_BASE}/api/location?lat=${next.lat}&lon=${next.lon}`, {
-        cache: "no-store",
-      });
-      const data = await safeJson(res);
-      if (res.ok && data) {
-        nextLocation.stateCode = data.state || nextLocation.stateCode;
-        if (data.county) nextLocation.county = data.county;
-        if (data.countyFips) nextLocation.countyFips = data.countyFips;
-        if (Array.isArray(data.adjacentCountyFips)) nextLocation.adjacentCountyFips = data.adjacentCountyFips;
-        if (data.label) nextLocation.label = data.label;
-
-        if (data.countyCenters && typeof data.countyCenters === "object") {
-          setCountyCenters((prev) => ({
-            ...prev,
-            ...data.countyCenters,
-          }));
-        }
-        if (data.countyFips && data.countyCenter && data.countyCenter.lat && data.countyCenter.lon) {
-          setCountyCenters((prev) => ({
-            ...prev,
-            [data.countyFips]: {
-              lat: data.countyCenter.lat,
-              lon: data.countyCenter.lon,
-            },
-          }));
-        }
-
-        if (nextLocation.countyFips && nextLocation.countyFips !== location?.countyFips) {
-          openNotificationPromptIfNeeded(nextLocation);
-        }
-      }
-    } catch {
-      // keep existing values
-    }
-
-    setLocation(nextLocation);
-    setTravelLocationUpdatedAt(Date.now());
-
-    if (pushEnabled && pushPrefs && nextLocation.countyFips && nextLocation.countyFips !== (current?.countyFips || "")) {
-      const nextPrefs = {
-        ...pushPrefs,
-        stateCode: nextLocation.stateCode || pushPrefs.stateCode,
-        countyFips: nextLocation.countyFips,
-      };
-      try {
-        await updatePushPreferences(nextPrefs);
-        setPushPrefs(nextPrefs);
-      } catch (err) {
-        console.warn("Failed to update push preferences on travel location change", err);
-      }
-    }
-  }
-
-  const handleTravelLocationUpdate = useCallback(
-    (next: { lat: number; lon: number }) => {
-      if (!location?.lat || !location?.lon) return;
-      if (!hasMovedEnough(location, next)) return;
-      updateLocationFromTravel(next);
-    },
-    [location, updateLocationFromTravel, hasMovedEnough]
-  );
-
-  useEffect(() => {
-    if (travelAlertsMode === "off") return;
-    if (!("geolocation" in navigator)) return;
-
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const nextPos = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-
-        if (lastTravelPosition) {
-          const bearing = getBearing(lastTravelPosition, nextPos);
-          setTravelBearing(bearing);
-        }
-
-        setLastTravelPosition(nextPos);
-        handleTravelLocationUpdate(nextPos);
-      },
-      (err) => {
-        console.warn("Travel tracking error", err);
-      },
-      {
-        enableHighAccuracy: false,
-        maximumAge: 300000,
-        timeout: 20000,
-      }
-    );
-
-    return () => {
-      navigator.geolocation.clearWatch(watchId);
-    };
-  }, [travelAlertsMode, location?.lat, location?.lon, handleTravelLocationUpdate, lastTravelPosition]);
-
   const sortedAlerts = useMemo(() => sortAlerts(alertsResp?.alerts || []), [alertsResp]);
 
-  function isAhead(bearingToCounty: number, travelBearing: number) {
-    const diff = Math.abs(((bearingToCounty - travelBearing + 540) % 360) - 180);
-    return diff < 75;
-  }
-
-  function getDirectionLabel(bearing: number) {
-    const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-    return dirs[Math.round(bearing / 45) % 8];
-  }
-
-  const isRelevantAhead = useCallback(
-    (countyFips: string, userPos: { lat: number; lon: number }, bearing: number) => {
-      const center = countyCenters[countyFips];
-      if (!center) return false;
-
-      const distance = getDistanceMiles(userPos, center);
-      if (distance > 150) return false; // keep reasonable range for squall lines
-
-      const countyBearing = getBearing(userPos, center);
-      if (!isAhead(countyBearing, bearing)) return false;
-
-      const etaMinutes = (distance / STORM_SPEED_MPH) * 60;
-      return etaMinutes <= 120; // only near-future alerts
-    },
-    [countyCenters]
-  );
-
-  const userPos = useMemo(() => {
-    if (!location?.lat || !location?.lon) return null;
-    return lastTravelPosition || { lat: location.lat, lon: location.lon };
-  }, [location?.lat, location?.lon, lastTravelPosition]);
-
-  const getEtaText = useCallback(
-    (alert: AlertItem) => {
-      if (!userPos || !alert.countyFips) return null;
-      const center = countyCenters[alert.countyFips];
-      if (!center) return null;
-
-      const countyBearing = getBearing(userPos, center);
-      if (travelBearing !== null && !isAhead(countyBearing, travelBearing)) {
-        return null;
-      }
-
-      const distance = getDistanceMiles(userPos, center);
-      const etaMinutes = (distance / STORM_SPEED_MPH) * 60;
-      const etaLabel =
-        etaMinutes < 30
-          ? "Arriving soon"
-          : etaMinutes < 60
-          ? "Within 1 hour"
-          : "Later";
-
-      return `${etaLabel} • ${Math.round(distance)} mi ahead`;
-    },
-    [countyCenters, userPos, travelBearing]
-  );
-
-  function getDynamicHeroCTA(alert: AlertItem, etaText?: string | null) {
-    if (etaText?.includes("Arriving")) {
-      return "Take Action Now";
-    }
-
-    if (alert.severity === "Extreme" || alert.severity === "Severe") {
-      return "Stay Alert";
-    }
-
-    return "View Details";
-  }
-
   const filteredAlerts = useMemo(() => {
-    if (!location) return sortedAlerts;
-
-    if (travelAlertsMode === "follow") {
-      if (location.countyFips) {
-        const matched = sortedAlerts.filter((item) =>
-          item.countyFips
-            ? item.countyFips === location.countyFips
-            : item.stateCode === location.stateCode
-        );
-        if (matched.length > 0) return matched;
-      } else if (location.stateCode) {
-        const inState = sortedAlerts.filter((item) => item.stateCode === location.stateCode);
-        if (inState.length > 0) return inState;
-      }
-    }
-
-    if (travelAlertsMode === "corridor") {
-      if (travelBearing === null || !userPos) {
-        return sortedAlerts.slice(0, 3);
-      }
-
-      return sortedAlerts.filter((item) => {
-        if (!item.countyFips) return false;
-        if (!countyCenters[item.countyFips]) return false;
-
-        return isRelevantAhead(item.countyFips, userPos, travelBearing);
-      });
-    }
-
-    if (location.stateCode) {
-      const inState = sortedAlerts.filter((item) => item.stateCode === location.stateCode);
-      if (inState.length > 0) return inState;
-    }
-
-    return sortedAlerts;
-  }, [location, sortedAlerts, travelAlertsMode, travelBearing, userPos, countyCenters, isRelevantAhead]);
+    if (!location?.stateCode) return sortedAlerts;
+    const inState = sortedAlerts.filter((item) => item.stateCode === location.stateCode);
+    return inState.length > 0 ? inState : sortedAlerts;
+  }, [location, sortedAlerts]);
 
   const alertState: AlertState = filteredAlerts.length > 0 ? "ACTIVE_ALERTS" : "NO_ALERTS";
   const heroAlert =
@@ -893,12 +649,6 @@ export default function LiveWeatherAlertsHomePage() {
     filteredAlerts[0] ||
     null;
   const locationLabel = location?.label || "Your Area";
-  const activeLocationLabel =
-    travelAlertsMode === "follow"
-      ? `Following location • ${locationLabel}`
-      : travelAlertsMode === "corridor"
-      ? `Travel alerts active • ${locationLabel}`
-      : locationLabel;
 
   const currentConditions: CurrentConditions = {
     temp: weather?.current?.temperatureF ?? fallbackCurrent.temp,
@@ -932,12 +682,6 @@ export default function LiveWeatherAlertsHomePage() {
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
         setLocation(saved);
-
-        if (!homeLocation) {
-          setHomeLocation(saved);
-          localStorage.setItem(HOME_LOCATION_KEY, JSON.stringify(saved));
-        }
-
         setPromptDefaultToZip(false);
         setShowLocationPrompt(false);
         openNotificationPromptIfNeeded(saved);
@@ -994,32 +738,10 @@ export default function LiveWeatherAlertsHomePage() {
         lat: data.lat,
         lon: data.lon,
         stateCode: data.state || undefined,
-        county: data.county || undefined,
-        countyFips: data.countyFips || undefined,
-        adjacentCountyFips: Array.isArray(data.adjacentCountyFips) ? data.adjacentCountyFips : undefined,
       };
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
       setLocation(saved);
-      if (data.countyCenters && typeof data.countyCenters === "object") {
-        setCountyCenters((prev) => ({
-          ...prev,
-          ...data.countyCenters,
-        }));
-      }
-      if (data.countyFips && data.countyCenter && data.countyCenter.lat && data.countyCenter.lon) {
-        setCountyCenters((prev) => ({
-          ...prev,
-          [data.countyFips]: {
-            lat: data.countyCenter.lat,
-            lon: data.countyCenter.lon,
-          },
-        }));
-      }
-      if (!homeLocation) {
-        setHomeLocation(saved);
-        localStorage.setItem(HOME_LOCATION_KEY, JSON.stringify(saved));
-      }
       setShowLocationPrompt(false);
       openNotificationPromptIfNeeded(saved);
     } catch (err) {
@@ -1030,37 +752,6 @@ export default function LiveWeatherAlertsHomePage() {
   function markNotificationPromptSeen() {
     localStorage.setItem(NOTIFICATION_PROMPT_SEEN_KEY, "true");
     setNotificationPromptSeen(true);
-  }
-
-  function getDistanceMiles(from: { lat: number; lon: number }, to: { lat: number; lon: number }) {
-    const toRad = (value: number) => (value * Math.PI) / 180;
-    const R = 3958.8; // miles
-    const dLat = toRad(to.lat - from.lat);
-    const dLon = toRad(to.lon - from.lon);
-    const lat1 = toRad(from.lat);
-    const lat2 = toRad(to.lat);
-
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.sin(dLon / 2) * Math.sin(dLon / 2) * Math.cos(lat1) * Math.cos(lat2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  }
-
-  function getBearing(from: { lat: number; lon: number }, to: { lat: number; lon: number }) {
-    const toRad = (value: number) => (value * Math.PI) / 180;
-    const toDeg = (value: number) => (value * 180) / Math.PI;
-    const fromLat = toRad(from.lat);
-    const toLat = toRad(to.lat);
-    const dLon = toRad(to.lon - from.lon);
-
-    const y = Math.sin(dLon) * Math.cos(toLat);
-    const x =
-      Math.cos(fromLat) * Math.sin(toLat) -
-      Math.sin(fromLat) * Math.cos(toLat) * Math.cos(dLon);
-
-    const bearing = toDeg(Math.atan2(y, x));
-    return (bearing + 360) % 360;
   }
 
   async function handleEnableNotificationsFromPrompt() {
@@ -1088,11 +779,6 @@ export default function LiveWeatherAlertsHomePage() {
   function handleNotificationPromptDismiss() {
     markNotificationPromptSeen();
     setShowNotificationPrompt(false);
-  }
-
-  function setTravelMode(mode: "off" | "follow" | "corridor") {
-    setTravelAlertsMode(mode);
-    localStorage.setItem(TRAVEL_ALERTS_MODE_KEY, mode);
   }
 
   async function handleEnableNotifications() {
@@ -1202,45 +888,15 @@ export default function LiveWeatherAlertsHomePage() {
             {systemStatus}
           </div>
           <div className="text-xs text-slate-300">Updated {formatLiveStatusTime(lastCheckedAt)}</div>
-          {travelAlertsMode !== 'off' ? (
-            <>
-              <div className="mt-1 text-xs text-slate-400">Updated based on your movement</div>
-              <div className="mt-1 text-xs text-slate-400">
-                {travelLocationUpdatedAt
-                  ? `Last location refresh: ${formatLiveStatusTime(travelLocationUpdatedAt)}`
-                  : "Location updates will appear here."}
-              </div>
-              <div className="mt-1 text-xs text-slate-400">
-                {travelBearing !== null ? `Heading ${getDirectionLabel(travelBearing)}` : ""}
-              </div>
-              <div className="mt-1 text-xs text-slate-400">
-                {travelAlertsMode === 'follow'
-                  ? 'Travel alerts active (following your location).'
-                  : 'Travel corridor mode active (includes next counties).'}
-              </div>
-              <div className="mt-1 text-xs font-bold">
-                {travelLocationUpdatedAt
-                  ? `Updated ${formatLiveStatusTime(travelLocationUpdatedAt)}`
-                  : 'Waiting for location…'}
-              </div>
-            </>
-          ) : null}
         </div>
 
         {alertState === "ACTIVE_ALERTS" && heroAlert ? (
           <>
-            {(() => {
-              const heroEta = getEtaText(heroAlert);
-              return (
-                <BigAlertHero
-                  alert={heroAlert}
-                  etaText={heroEta}
-                  ctaText={getDynamicHeroCTA(heroAlert, heroEta)}
-                  onPrimaryAction={(alert) => openExternal(alert.nwsUrl)}
-                  onViewDetails={(alert) => setSelectedAlert(alert)}
-                />
-              );
-            })()}
+            <BigAlertHero
+              alert={heroAlert}
+              onPrimaryAction={(alert) => openExternal(alert.nwsUrl)}
+              onViewDetails={(alert) => setSelectedAlert(alert)}
+            />
 
             {!pushEnabled && tone === "warning" ? (
               <Card className="rounded-[24px] border border-yellow-400/20 bg-yellow-500/10 text-yellow-100 shadow-sm">
@@ -1271,20 +927,19 @@ export default function LiveWeatherAlertsHomePage() {
               <GroupedAlertsList
                 alerts={otherAlerts}
                 onSelectAlert={(alert) => setSelectedAlert(alert)}
-                getEtaText={getEtaText}
               />
             )}
           </>
         ) : (
           <>
             <AllClearBanner
-            locationLabel={activeLocationLabel}
-            lastPoll={lastCheckedAt}
-            backgroundImage={resolveWeatherBackground(
-              currentConditions.condition,
-              currentConditions.isNight
-            )}
-          />
+              locationLabel={locationLabel}
+              lastPoll={alertsResp?.lastPoll ?? null}
+              backgroundImage={resolveWeatherBackground(
+                currentConditions.condition,
+                currentConditions.isNight
+              )}
+            />
 
             <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
               <CardContent className="p-5">
@@ -1354,7 +1009,7 @@ export default function LiveWeatherAlertsHomePage() {
 
         <CurrentConditionsCard
           current={currentConditions}
-          locationLabel={activeLocationLabel}
+          locationLabel={locationLabel}
           heroMode
         />
 
@@ -2075,40 +1730,6 @@ export default function LiveWeatherAlertsHomePage() {
                 <div className="text-xs text-slate-400">
                   County mode is wired in the preference model now. Full county-targeted
                   delivery needs county data added to your location API.
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
-              <CardContent className="space-y-4 p-5">
-                <div className="text-lg font-black">Travel Alerts</div>
-
-                <div className="grid grid-cols-1 gap-2">
-                  <Button
-                    variant={travelAlertsMode === 'off' ? 'default' : 'secondary'}
-                    onClick={() => setTravelMode('off')}
-                    className="h-11 rounded-2xl"
-                  >
-                    Off
-                  </Button>
-                  <Button
-                    variant={travelAlertsMode === 'follow' ? 'default' : 'secondary'}
-                    onClick={() => setTravelMode('follow')}
-                    className="h-11 rounded-2xl"
-                  >
-                    Follow my location
-                  </Button>
-                  <Button
-                    variant={travelAlertsMode === 'corridor' ? 'default' : 'secondary'}
-                    onClick={() => setTravelMode('corridor')}
-                    className="h-11 rounded-2xl"
-                  >
-                    Follow + ahead on route
-                  </Button>
-                </div>
-
-                <div className="text-xs text-slate-400">
-                  Updates alert coverage as you move. Best for road trips.
                 </div>
               </CardContent>
             </Card>

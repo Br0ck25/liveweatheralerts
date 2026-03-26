@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { AlertItem, dedupeArea } from "@/lib/alerts/helpers";
 import { formatTime } from "@/lib/weather/formatters";
@@ -18,15 +18,13 @@ export function groupByEvent(alerts: AlertItem[]) {
 export default function GroupedAlertsList({
   alerts,
   onSelectAlert,
-  getEtaText,
 }: {
   alerts: AlertItem[];
   onSelectAlert: (alert: AlertItem) => void;
-  getEtaText?: (alert: AlertItem) => string | null;
 }) {
   const [expandedEvent, setExpandedEvent] = useState<string | null>(null);
 
-  const groups = useMemo(() => groupByEvent(alerts), [alerts]);
+  const groups = groupByEvent(alerts);
   const eventKeys = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
 
   if (eventKeys.length === 0) return null;
@@ -68,18 +66,9 @@ export default function GroupedAlertsList({
                     <div className="text-sm font-bold text-white">
                       {dedupeArea(alert.areaDesc)}
                     </div>
-                    <div className="text-xs text-slate-400">
-                      {alert.event}
-                    </div>
                     <div className="mt-1 text-xs text-slate-300">
                       Until {formatTime(alert.expires)}
                     </div>
-                    {getEtaText ? (
-                      (() => {
-                        const eta = getEtaText(alert);
-                        return eta ? <div className="mt-1 text-xs text-white/80">{eta}</div> : null;
-                      })()
-                    ) : null}
                   </button>
                 ))}
               </div>

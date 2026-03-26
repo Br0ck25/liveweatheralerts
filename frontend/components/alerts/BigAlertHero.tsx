@@ -8,14 +8,10 @@ import { formatTime } from "@/lib/weather/formatters";
 
 export default function BigAlertHero({
   alert,
-  etaText,
-  ctaText,
   onPrimaryAction,
   onViewDetails,
 }: {
   alert: AlertItem;
-  etaText?: string | null;
-  ctaText?: string;
   onPrimaryAction: (alert: AlertItem) => void;
   onViewDetails: (alert: AlertItem) => void;
 }) {
@@ -38,9 +34,7 @@ export default function BigAlertHero({
         <div
           className="absolute inset-0"
           style={{
-            backgroundImage: backgroundImage
-              ? `url(${backgroundImage})`
-              : getAlertBackground(alert.event),
+            backgroundImage: `${backgroundImage ? `url(${backgroundImage}), ` : ""}${getAlertBackground(alert.event)}`,
             backgroundSize: "cover",
             backgroundPosition: "center",
             backgroundRepeat: "no-repeat",
@@ -105,24 +99,9 @@ export default function BigAlertHero({
               onClick={() => onPrimaryAction(alert)}
               className={cn("mt-4 inline-flex rounded-lg px-3 py-2 text-sm font-black text-white shadow-lg hover:bg-black/40", styles.cta)}
             >
-              {ctaText || getAlertCTA(alert.event)}
+              {getAlertCTA(alert.event)}
             </button>
           </div>
-
-          {etaText && (
-            <div
-              className={cn(
-                "mt-2 text-xs font-bold",
-                etaText.includes("Arriving")
-                  ? "text-red-200"
-                  : etaText.includes("1 hour")
-                  ? "text-yellow-200"
-                  : "text-white/80"
-              )}
-            >
-              {etaText}
-            </div>
-          )}
 
           <div className="mt-4 flex items-end justify-between gap-3">
             <div className="rounded-lg bg-black/35 px-3 py-2 text-sm font-bold text-white">Until {formatTime(alert.expires)}</div>
