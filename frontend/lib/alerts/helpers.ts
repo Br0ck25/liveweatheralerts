@@ -2,6 +2,7 @@
 export type AlertItem = {
   id: string;
   stateCode: string;
+  countyFips?: string | null;
   event: string;
   areaDesc: string;
   severity: string;

@@ -38,7 +38,7 @@ function PreviewMap({
   onTileError: (msg: string) => void;
 }) {
   const mapDivRef = useRef<HTMLDivElement | null>(null);
-  const mapInstance = useRef<any>(null);
+  const mapInstance = useRef<{ remove: () => void; invalidateSize: () => void } | null>(null);
 
   useEffect(() => {
     if (!mapDivRef.current) return;
@@ -46,8 +46,8 @@ function PreviewMap({
     let mounted = true;
 
     async function initMap() {
-      const module = await import("leaflet");
-      const L = module.default || module;
+      const leafletModule = await import("leaflet");
+      const L = leafletModule.default || leafletModule;
 
       if (!mounted || !mapDivRef.current) return;
 
@@ -80,8 +80,9 @@ function PreviewMap({
           updateWhenIdle: true,
           updateWhenZooming: false,
         });
-        layer.on("tileerror", (e: any) => {
-          if (String(e?.error || "").includes("429")) {
+        layer.on("tileerror", (e: unknown) => {
+          const message = String(((e as { error?: unknown })?.error as string) || "");
+          if (message.includes("429")) {
             onTileError("Radar busy — updating shortly...");
           }
         });
@@ -194,6 +195,9 @@ export default function RadarPreviewCard({
           </div>
         </button>
 
+        {radar?.summary ? (
+          <p className="mt-2 text-xs text-slate-300">{radar.summary}</p>
+        ) : null}
         {tileError ? (
           <p className="mt-2 rounded-lg bg-rose-500/20 px-3 py-1 text-xs font-semibold text-rose-200">
             {tileError}

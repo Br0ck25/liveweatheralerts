@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bell,
   Map,
@@ -20,10 +20,9 @@ import AlertDetailsSheet from "@/components/alerts/AlertDetailsSheet";
 import BottomNav from "@/components/navigation/BottomNav";
 import LocationPrompt from "@/components/location/LocationPrompt";
 import RadarMapModal from "@/components/RadarMapModal";
+import NotificationPrompt from "@/components/location/NotificationPrompt";
 import BigAlertHero from "@/components/alerts/BigAlertHero";
-import SmallAlertCard from "@/components/alerts/SmallAlertCard";
-import SingleSecondaryAlertCard from "@/components/alerts/SingleSecondaryAlertCard";
-import AlertHeadlineList from "@/components/alerts/AlertHeadlineList";
+import GroupedAlertsList from "@/components/alerts/GroupedAlertsList";
 import { motion } from "framer-motion";
 
 import { cn, openExternal } from "@/lib/utils";
@@ -60,6 +59,7 @@ type AlertSeverity = "Extreme" | "Severe" | "Moderate" | "Minor" | string;
 type AlertItem = {
   id: string;
   stateCode: string;
+  countyFips?: string | null;
   event: string;
   areaDesc: string;
   severity: AlertSeverity;
@@ -100,6 +100,9 @@ type SavedLocation = {
   lon?: number;
   city?: string;
   stateCode?: string;
+  county?: string;
+  countyFips?: string;
+  adjacentCountyFips?: string[];
 };
 
 type WeatherLocation = {
@@ -198,6 +201,8 @@ type HourlyPoint = {
 };
 
 const STORAGE_KEY = "lwa-location-v1";
+const HOME_LOCATION_KEY = "lwa-home-location-v1";
+const TRAVEL_ALERTS_MODE_KEY = "lwa-travel-alerts-mode-v1";
 
 const fallbackCurrent: CurrentConditions = {
   temp: 72,
@@ -222,6 +227,7 @@ const fallbackHourly: HourlyPoint[] = [
 ];
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
+const STORM_SPEED_MPH = 45;
 
 function resolveWeatherBackground(
   condition: string | undefined,
@@ -296,9 +302,19 @@ function AllClearBanner({
 }
 
 export default function LiveWeatherAlertsHomePage() {
+  const NOTIFICATION_PROMPT_SEEN_KEY = "lwa-notification-prompt-seen-v1";
+
   const [location, setLocation] = useState<SavedLocation | null>(null);
+  const [homeLocation, setHomeLocation] = useState<SavedLocation | null>(null);
   const [showLocationPrompt, setShowLocationPrompt] = useState(false);
   const [promptDefaultToZip, setPromptDefaultToZip] = useState(false);
+  const [showNotificationPrompt, setShowNotificationPrompt] = useState(false);
+  const [notificationPromptSeen, setNotificationPromptSeen] = useState(false);
+  const [travelAlertsMode, setTravelAlertsMode] = useState<"off" | "follow" | "corridor">("off");
+  const [lastTravelPosition, setLastTravelPosition] = useState<{ lat: number; lon: number } | null>(null);
+  const [travelBearing, setTravelBearing] = useState<number | null>(null);
+  const [travelLocationUpdatedAt, setTravelLocationUpdatedAt] = useState<number | null>(null);
+  const [countyCenters, setCountyCenters] = useState<Record<string, { lat: number; lon: number }>>({});
   const [alertsResp, setAlertsResp] = useState<AlertsResponse | null>(null);
   const [alertLiveMap, setAlertLiveMap] = useState<AlertLiveMap>({});
   const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
@@ -335,6 +351,18 @@ export default function LiveWeatherAlertsHomePage() {
   }, [activeTab]);
 
   useEffect(() => {
+    const seen = localStorage.getItem(NOTIFICATION_PROMPT_SEEN_KEY) === "true";
+    setNotificationPromptSeen(seen);
+
+    const savedTravelMode = localStorage.getItem(TRAVEL_ALERTS_MODE_KEY) as
+      | "off"
+      | "follow"
+      | "corridor"
+      | null;
+    if (savedTravelMode) {
+      setTravelAlertsMode(savedTravelMode);
+    }
+
     const raw = localStorage.getItem(STORAGE_KEY);
     console.log("STORAGE_KEY", STORAGE_KEY);
     console.log("raw location", raw);
@@ -344,7 +372,15 @@ export default function LiveWeatherAlertsHomePage() {
       return;
     }
     try {
-      setLocation(JSON.parse(raw));
+      const parsed = JSON.parse(raw) as SavedLocation;
+      setLocation(parsed);
+      const homeRaw = localStorage.getItem(HOME_LOCATION_KEY);
+      if (homeRaw) {
+        setHomeLocation(JSON.parse(homeRaw));
+      } else {
+        setHomeLocation(parsed);
+        localStorage.setItem(HOME_LOCATION_KEY, JSON.stringify(parsed));
+      }
     } catch {
       setShowLocationPrompt(true);
     }
@@ -629,21 +665,158 @@ export default function LiveWeatherAlertsHomePage() {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (travelAlertsMode === "off") return;
+    if (!("geolocation" in navigator)) return;
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const nextPos = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+
+        if (lastTravelPosition) {
+          const bearing = getBearing(lastTravelPosition, nextPos);
+          setTravelBearing(bearing);
+        }
+
+        setLastTravelPosition(nextPos);
+        handleTravelLocationUpdate(nextPos);
+      },
+      (err) => {
+        console.warn("Travel tracking error", err);
+      },
+      {
+        enableHighAccuracy: false,
+        maximumAge: 300000,
+        timeout: 20000,
+      }
+    );
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [travelAlertsMode, location?.lat, location?.lon, handleTravelLocationUpdate, lastTravelPosition]);
+
   const sortedAlerts = useMemo(() => sortAlerts(alertsResp?.alerts || []), [alertsResp]);
 
+  function isAhead(bearingToCounty: number, travelBearing: number) {
+    const diff = Math.abs(((bearingToCounty - travelBearing + 540) % 360) - 180);
+    return diff < 75;
+  }
+
+  function getDirectionLabel(bearing: number) {
+    const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    return dirs[Math.round(bearing / 45) % 8];
+  }
+
+  const isRelevantAhead = useCallback(
+    (countyFips: string, userPos: { lat: number; lon: number }, bearing: number) => {
+      const center = countyCenters[countyFips];
+      if (!center) return false;
+
+      const distance = getDistanceMiles(userPos, center);
+      if (distance > 150) return false; // keep reasonable range for squall lines
+
+      const countyBearing = getBearing(userPos, center);
+      if (!isAhead(countyBearing, bearing)) return false;
+
+      const etaMinutes = (distance / STORM_SPEED_MPH) * 60;
+      return etaMinutes <= 120; // only near-future alerts
+    },
+    [countyCenters]
+  );
+
+  const userPos = useMemo(() => {
+    if (!location?.lat || !location?.lon) return null;
+    return lastTravelPosition || { lat: location.lat, lon: location.lon };
+  }, [location?.lat, location?.lon, lastTravelPosition]);
+
+  const getEtaText = useCallback(
+    (alert: AlertItem) => {
+      if (!userPos || !alert.countyFips) return null;
+      const center = countyCenters[alert.countyFips];
+      if (!center) return null;
+
+      const countyBearing = getBearing(userPos, center);
+      if (travelBearing !== null && !isAhead(countyBearing, travelBearing)) {
+        return null;
+      }
+
+      const distance = getDistanceMiles(userPos, center);
+      const etaMinutes = (distance / STORM_SPEED_MPH) * 60;
+      const etaLabel =
+        etaMinutes < 30
+          ? "Arriving soon"
+          : etaMinutes < 60
+          ? "Within 1 hour"
+          : "Later";
+
+      return `${etaLabel} • ${Math.round(distance)} mi ahead`;
+    },
+    [countyCenters, userPos, travelBearing]
+  );
+
+  function getDynamicHeroCTA(alert: AlertItem, etaText?: string | null) {
+    if (etaText?.includes("Arriving")) {
+      return "Take Action Now";
+    }
+
+    if (alert.severity === "Extreme" || alert.severity === "Severe") {
+      return "Stay Alert";
+    }
+
+    return "View Details";
+  }
+
   const filteredAlerts = useMemo(() => {
-    if (!location?.stateCode) return sortedAlerts;
-    const inState = sortedAlerts.filter((item) => item.stateCode === location.stateCode);
-    return inState.length > 0 ? inState : sortedAlerts;
-  }, [location, sortedAlerts]);
+    if (!location) return sortedAlerts;
+
+    if (travelAlertsMode === "follow") {
+      if (location.countyFips) {
+        const matched = sortedAlerts.filter((item) =>
+          item.countyFips
+            ? item.countyFips === location.countyFips
+            : item.stateCode === location.stateCode
+        );
+        if (matched.length > 0) return matched;
+      } else if (location.stateCode) {
+        const inState = sortedAlerts.filter((item) => item.stateCode === location.stateCode);
+        if (inState.length > 0) return inState;
+      }
+    }
+
+    if (travelAlertsMode === "corridor") {
+      if (travelBearing === null || !userPos) {
+        return sortedAlerts.slice(0, 3);
+      }
+
+      return sortedAlerts.filter((item) => {
+        if (!item.countyFips) return false;
+        if (!countyCenters[item.countyFips]) return false;
+
+        return isRelevantAhead(item.countyFips, userPos, travelBearing);
+      });
+    }
+
+    if (location.stateCode) {
+      const inState = sortedAlerts.filter((item) => item.stateCode === location.stateCode);
+      if (inState.length > 0) return inState;
+    }
+
+    return sortedAlerts;
+  }, [location, sortedAlerts, travelAlertsMode, travelBearing, userPos, countyCenters, isRelevantAhead]);
 
   const alertState: AlertState = filteredAlerts.length > 0 ? "ACTIVE_ALERTS" : "NO_ALERTS";
   const heroAlert =
     filteredAlerts.find((a) => getAlertPriority(a.event) >= 2) ||
     filteredAlerts[0] ||
     null;
-  const secondaryAlerts = filteredAlerts.filter((a) => a !== heroAlert).slice(0, 3);
   const locationLabel = location?.label || "Your Area";
+  const activeLocationLabel =
+    travelAlertsMode === "follow"
+      ? `Following location • ${locationLabel}`
+      : travelAlertsMode === "corridor"
+      ? `Travel alerts active • ${locationLabel}`
+      : locationLabel;
 
   const currentConditions: CurrentConditions = {
     temp: weather?.current?.temperatureF ?? fallbackCurrent.temp,
@@ -677,8 +850,15 @@ export default function LiveWeatherAlertsHomePage() {
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
         setLocation(saved);
+
+        if (!homeLocation) {
+          setHomeLocation(saved);
+          localStorage.setItem(HOME_LOCATION_KEY, JSON.stringify(saved));
+        }
+
         setPromptDefaultToZip(false);
         setShowLocationPrompt(false);
+        openNotificationPromptIfNeeded(saved);
       },
       (err) => {
         console.error("Geolocation error code:", err.code);
@@ -706,6 +886,14 @@ export default function LiveWeatherAlertsHomePage() {
     );
   }
 
+  function openNotificationPromptIfNeeded(nextLocation: SavedLocation) {
+    if (pushEnabled) return;
+    if (notificationPromptSeen) return;
+    if (!nextLocation.stateCode) return;
+
+    setShowNotificationPrompt(true);
+  }
+
   async function handleUseZip(zip: string) {
     try {
       const res = await fetch(`${API_BASE}/api/location?zip=${encodeURIComponent(zip)}`, {
@@ -724,14 +912,186 @@ export default function LiveWeatherAlertsHomePage() {
         lat: data.lat,
         lon: data.lon,
         stateCode: data.state || undefined,
+        county: data.county || undefined,
+        countyFips: data.countyFips || undefined,
+        adjacentCountyFips: Array.isArray(data.adjacentCountyFips) ? data.adjacentCountyFips : undefined,
       };
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
       setLocation(saved);
+      if (data.countyCenters && typeof data.countyCenters === "object") {
+        setCountyCenters((prev) => ({
+          ...prev,
+          ...data.countyCenters,
+        }));
+      }
+      if (data.countyFips && data.countyCenter && data.countyCenter.lat && data.countyCenter.lon) {
+        setCountyCenters((prev) => ({
+          ...prev,
+          [data.countyFips]: {
+            lat: data.countyCenter.lat,
+            lon: data.countyCenter.lon,
+          },
+        }));
+      }
+      if (!homeLocation) {
+        setHomeLocation(saved);
+        localStorage.setItem(HOME_LOCATION_KEY, JSON.stringify(saved));
+      }
       setShowLocationPrompt(false);
+      openNotificationPromptIfNeeded(saved);
     } catch (err) {
       alert(err instanceof Error ? err.message : "ZIP lookup failed.");
     }
+  }
+
+  function markNotificationPromptSeen() {
+    localStorage.setItem(NOTIFICATION_PROMPT_SEEN_KEY, "true");
+    setNotificationPromptSeen(true);
+  }
+
+  function getDistanceMiles(from: { lat: number; lon: number }, to: { lat: number; lon: number }) {
+    const toRad = (value: number) => (value * Math.PI) / 180;
+    const R = 3958.8; // miles
+    const dLat = toRad(to.lat - from.lat);
+    const dLon = toRad(to.lon - from.lon);
+    const lat1 = toRad(from.lat);
+    const lat2 = toRad(to.lat);
+
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.sin(dLon / 2) * Math.sin(dLon / 2) * Math.cos(lat1) * Math.cos(lat2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+
+  function getBearing(from: { lat: number; lon: number }, to: { lat: number; lon: number }) {
+    const toRad = (value: number) => (value * Math.PI) / 180;
+    const toDeg = (value: number) => (value * 180) / Math.PI;
+    const fromLat = toRad(from.lat);
+    const toLat = toRad(to.lat);
+    const dLon = toRad(to.lon - from.lon);
+
+    const y = Math.sin(dLon) * Math.cos(toLat);
+    const x =
+      Math.cos(fromLat) * Math.sin(toLat) -
+      Math.sin(fromLat) * Math.cos(toLat) * Math.cos(dLon);
+
+    const bearing = toDeg(Math.atan2(y, x));
+    return (bearing + 360) % 360;
+  }
+
+  const hasMovedEnough = useCallback(
+    (prev: { lat?: number; lon?: number }, next: { lat: number; lon: number }) => {
+      if (!prev.lat || !prev.lon) return true;
+      const distance = getDistanceMiles({ lat: prev.lat, lon: prev.lon }, { lat: next.lat, lon: next.lon });
+      return distance > 15;
+    },
+    []
+  );
+
+  const updateLocationFromTravel = useCallback(
+    async (next: { lat: number; lon: number }) => {
+      const current = location;
+      if (!current) return;
+
+      const nextLocation: SavedLocation = {
+        ...current,
+        lat: next.lat,
+        lon: next.lon,
+      };
+
+      try {
+        const res = await fetch(`${API_BASE}/api/location?lat=${next.lat}&lon=${next.lon}`, {
+          cache: "no-store",
+        });
+        const data = await safeJson(res);
+        if (res.ok && data) {
+          nextLocation.stateCode = data.state || nextLocation.stateCode;
+          if (data.county) nextLocation.county = data.county;
+          if (data.countyFips) nextLocation.countyFips = data.countyFips;
+          if (Array.isArray(data.adjacentCountyFips)) nextLocation.adjacentCountyFips = data.adjacentCountyFips;
+          if (data.label) nextLocation.label = data.label;
+
+          if (data.countyCenters && typeof data.countyCenters === "object") {
+            setCountyCenters((prev) => ({
+              ...prev,
+              ...data.countyCenters,
+            }));
+          }
+          if (data.countyFips && data.countyCenter && data.countyCenter.lat && data.countyCenter.lon) {
+            setCountyCenters((prev) => ({
+              ...prev,
+              [data.countyFips]: {
+                lat: data.countyCenter.lat,
+                lon: data.countyCenter.lon,
+              },
+            }));
+          }
+        }
+      } catch {
+        // keep existing values
+      }
+
+      setLocation(nextLocation);
+      setTravelLocationUpdatedAt(Date.now());
+
+      if (pushEnabled && pushPrefs && nextLocation.countyFips && nextLocation.countyFips !== (current?.countyFips || "")) {
+        const nextPrefs = {
+          ...pushPrefs,
+          stateCode: nextLocation.stateCode || pushPrefs.stateCode,
+          countyFips: nextLocation.countyFips,
+        };
+        try {
+          await updatePushPreferences(nextPrefs);
+          setPushPrefs(nextPrefs);
+        } catch (err) {
+          console.warn("Failed to update push preferences on travel location change", err);
+        }
+      }
+    },
+    [location, pushEnabled, pushPrefs]
+  );
+
+  const handleTravelLocationUpdate = useCallback(
+    (next: { lat: number; lon: number }) => {
+      if (!location?.lat || !location?.lon) return;
+      if (!hasMovedEnough(location, next)) return;
+      updateLocationFromTravel(next);
+    },
+    [location, updateLocationFromTravel, hasMovedEnough]
+  );
+
+  async function handleEnableNotificationsFromPrompt() {
+    if (!location?.stateCode) return;
+
+    const prefs =
+      pushPrefs && pushPrefs.stateCode === location.stateCode
+        ? pushPrefs
+        : buildDefaultPushPreferences(location.stateCode);
+
+    setPushBusy(true);
+    try {
+      await subscribeToPush(prefs);
+      setPushEnabled(true);
+      setPushPrefs(prefs);
+      markNotificationPromptSeen();
+      setShowNotificationPrompt(false);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to enable alerts");
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  function handleNotificationPromptDismiss() {
+    markNotificationPromptSeen();
+    setShowNotificationPrompt(false);
+  }
+
+  function setTravelMode(mode: "off" | "follow" | "corridor") {
+    setTravelAlertsMode(mode);
+    localStorage.setItem(TRAVEL_ALERTS_MODE_KEY, mode);
   }
 
   async function handleEnableNotifications() {
@@ -809,95 +1169,143 @@ export default function LiveWeatherAlertsHomePage() {
         })
       : fallbackHourly;
 
+    const systemStatus =
+      alertState === "ACTIVE_ALERTS"
+        ? tone === "warning"
+          ? "Severe Weather Active"
+          : tone === "watch"
+          ? "Monitoring Conditions"
+          : "All Clear"
+        : "All Clear";
+
+    const systemStatusPill =
+      tone === "warning"
+        ? "bg-red-500"
+        : tone === "watch"
+        ? "bg-amber-400"
+        : "bg-emerald-400";
+
+    const otherAlerts = heroAlert ? filteredAlerts.filter((a) => a !== heroAlert) : [];
+    const actionLines = buildWhatToWatch({
+      alerts: filteredAlerts,
+      current: currentConditions,
+      hourly: hourlyPoints,
+      locationLabel,
+    });
+
     return (
       <div className={cn("space-y-4", alertState === "NO_ALERTS" && "space-y-3")}>
+        <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-3">
+          <div className="flex items-center gap-2 text-sm font-black uppercase text-white">
+            <span className={cn("h-2 w-2 rounded-full", systemStatusPill)} />
+            {systemStatus}
+          </div>
+          <div className="text-xs text-slate-300">Updated {formatLiveStatusTime(lastCheckedAt)}</div>
+          {travelAlertsMode !== 'off' ? (
+            <>
+              <div className="mt-1 text-xs text-slate-400">Updated based on your movement</div>
+              <div className="mt-1 text-xs text-slate-400">
+                {travelLocationUpdatedAt
+                  ? `Last location refresh: ${formatLiveStatusTime(travelLocationUpdatedAt)}`
+                  : "Location updates will appear here."}
+              </div>
+              <div className="mt-1 text-xs text-slate-400">
+                {travelBearing !== null ? `Heading ${getDirectionLabel(travelBearing)}` : ""}
+              </div>
+              <div className="mt-1 text-xs text-slate-400">
+                {travelAlertsMode === 'follow'
+                  ? 'Travel alerts active (following your location).'
+                  : 'Travel corridor mode active (includes next counties).'}
+              </div>
+              <div className="mt-1 text-xs font-bold">
+                {travelLocationUpdatedAt
+                  ? `Updated ${formatLiveStatusTime(travelLocationUpdatedAt)}`
+                  : 'Waiting for location…'}
+              </div>
+            </>
+          ) : null}
+        </div>
+
         {alertState === "ACTIVE_ALERTS" && heroAlert ? (
           <>
-            <BigAlertHero
-              alert={heroAlert}
-              onPrimaryAction={(alert) => openExternal(alert.nwsUrl)}
-              onViewDetails={(alert) => setSelectedAlert(alert)}
-            />
-
-            {secondaryAlerts.length === 1 ? (
-              <div className="space-y-2">
-                <div className="px-1 text-xs font-black uppercase tracking-[0.18em] text-slate-300">
-                  Related Alert
-                </div>
-                <SingleSecondaryAlertCard
-                  alert={secondaryAlerts[0]}
-                  onClick={(alert) => setSelectedAlert(alert)}
+            {(() => {
+              const heroEta = getEtaText(heroAlert);
+              return (
+                <BigAlertHero
+                  alert={heroAlert}
+                  etaText={heroEta}
+                  ctaText={getDynamicHeroCTA(heroAlert, heroEta)}
+                  onPrimaryAction={(alert) => openExternal(alert.nwsUrl)}
+                  onViewDetails={(alert) => setSelectedAlert(alert)}
                 />
-              </div>
-            ) : secondaryAlerts.length > 1 ? (
-              <div className="relative">
-                <div className="no-scrollbar flex gap-4 overflow-x-auto px-2 pb-1 snap-x snap-mandatory">
-                  {secondaryAlerts.slice(0, 3).map((alert) => (
-                    <div key={alert.id} className="snap-start">
-                      <SmallAlertCard alert={alert} onClick={(alert) => setSelectedAlert(alert)} />
+              );
+            })()}
+
+            {!pushEnabled && tone === "warning" ? (
+              <Card className="rounded-[24px] border border-yellow-400/20 bg-yellow-500/10 text-yellow-100 shadow-sm">
+                <CardContent className="p-4">
+                  <div className="text-sm font-black uppercase tracking-wide">Alerts are off</div>
+                  <div className="mt-2 text-sm text-yellow-100">
+                    Severe conditions are active for your area. Enable alerts anytime in More.
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
+
+            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+              <CardContent className="p-5">
+                <div className="text-xl font-black uppercase tracking-wide">What You Should Do</div>
+                <div className="mt-4 space-y-3 text-sm leading-6">
+                  {actionLines.map((line, i) => (
+                    <div key={i} className={cn("flex gap-2", i === 0 ? "font-semibold text-white" : "text-sky-100")}> 
+                      <span>•</span>
+                      <span>{line}</span>
                     </div>
                   ))}
                 </div>
+              </CardContent>
+            </Card>
 
-                <div className="pointer-events-none absolute left-0 top-0 h-full w-6 bg-gradient-to-r from-slate-950 to-transparent" />
-                <div className="pointer-events-none absolute right-0 top-0 h-full w-6 bg-gradient-to-l from-slate-950 to-transparent" />
-              </div>
-            ) : null}
+            {otherAlerts.length > 0 && (
+              <GroupedAlertsList
+                alerts={otherAlerts}
+                onSelectAlert={(alert) => setSelectedAlert(alert)}
+                getEtaText={getEtaText}
+              />
+            )}
           </>
         ) : (
-          <AllClearBanner
-            locationLabel={locationLabel}
-            lastPoll={alertsResp?.lastPoll ?? null}
-            backgroundImage={resolveWeatherBackground(
-              currentConditions.condition,
-              currentConditions.isNight
-            )}
-          />
-        )}
-
-        <CurrentConditionsCard
-          current={currentConditions}
-          locationLabel={locationLabel}
-          heroMode
-        />
-
-        <div id="forecast-section">
-          <HourlyStrip
-            points={hourlyPoints}
-            onView10Day={() => setActiveTab("forecast")}
-          />
-        </div>
-
-        <div id="radar-section">
-          <RadarPreviewCard
-            radar={weather?.radar || null}
-            location={{
-              lat: weather?.location?.lat ?? location?.lat ?? 37.1671,
-              lon: weather?.location?.lon ?? location?.lon ?? -83.2913,
-              label: weather?.location?.label || locationLabel,
-            }}
-            onViewRadar={() => setShowRadarModal(true)}
-            modalOpen={showRadarModal}
-          />
-        </div>
-
-        {alertState === "ACTIVE_ALERTS" ? (
           <>
-            <div id="alerts-section">
-              <AlertHeadlineList
-                alerts={filteredAlerts}
-                onSelectAlert={(alert) => setSelectedAlert(alert)}
-              />
-            </div>
+            <AllClearBanner
+            locationLabel={activeLocationLabel}
+              backgroundImage={resolveWeatherBackground(
+                currentConditions.condition,
+                currentConditions.isNight
+              )}
+            />
+
+            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+              <CardContent className="p-5">
+                <div className="text-xl font-black uppercase tracking-wide">What You Should Do</div>
+                <div className="mt-4 space-y-3 text-sm leading-6">
+                  {actionLines.map((line, i) => (
+                    <div key={i} className={cn("flex gap-2", i === 0 ? "font-semibold text-white" : "text-sky-100")}> 
+                      <span>•</span>
+                      <span>{line}</span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
             <Card className="rounded-[24px] border border-white/10 bg-slate-950/70 text-white shadow-xl">
               <CardContent className="p-4">
-                <div className="text-sm font-black uppercase tracking-wide">
-                  {pushEnabled ? "Alert updates enabled" : "Stay notified"}
-                </div>
+                <div className="text-sm font-black uppercase tracking-wide">Stay notified</div>
                 <div className="mt-2 text-sm text-slate-300">
-                  {pushEnabled
-                    ? "You’ll receive notification updates for new alert activity in your selected area."
-                    : "Turn on notifications to get updates if conditions worsen."}
+                  No alerts right now — get notified instantly if that changes.
+                </div>
+                <div className="text-xs text-slate-400 mt-1 text-center">
+                  Instant alerts • No spam
                 </div>
                 {!pushEnabled ? (
                   <>
@@ -908,9 +1316,7 @@ export default function LiveWeatherAlertsHomePage() {
                     >
                       {pushBusy ? "Enabling..." : dynamicCta.button}
                     </Button>
-                    <div className="text-xs text-sky-200 mt-2 text-center">
-                      {dynamicCta.subtext}
-                    </div>
+                    <div className="text-xs text-sky-200 mt-2 text-center">{dynamicCta.subtext}</div>
                   </>
                 ) : (
                   <Button
@@ -924,60 +1330,38 @@ export default function LiveWeatherAlertsHomePage() {
               </CardContent>
             </Card>
           </>
-        ) : (
-          <Card className="rounded-[30px] border border-sky-300/15 bg-gradient-to-br from-sky-900/80 to-blue-950 text-white shadow-xl">
-            <CardContent className="p-5">
-              <div className="text-xl font-black uppercase tracking-wide">What to Watch</div>
-              {(() => {
-                const watchLines = buildWhatToWatch({
-                  alerts: filteredAlerts,
-                  current: currentConditions,
-                  hourly: hourlyPoints,
-                  locationLabel,
-                });
-
-                return (
-                  <div className="mt-4 space-y-3 text-sm leading-6">
-                    {watchLines.map((line, i) => (
-                      <div
-                        key={i}
-                        className={cn(
-                          "flex gap-2",
-                          i === 0 ? "font-semibold text-white" : "text-sky-100"
-                        )}
-                      >
-                        <span>•</span>
-                        <span>{line}</span>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-              {pushEnabled ? (
-                <Button
-                  onClick={() => setActiveTab("more")}
-                  variant="secondary"
-                  className="mt-6 h-11 w-full rounded-2xl font-bold"
-                >
-                  Notifications Enabled
-                </Button>
-              ) : (
-                <>
-                  <Button
-                    onClick={handleEnableNotifications}
-                    disabled={pushBusy}
-                    className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
-                  >
-                    {pushBusy ? "Enabling..." : dynamicCta.button}
-                  </Button>
-                  <div className="text-xs text-sky-200 mt-2 text-center">
-                    {dynamicCta.subtext}
-                  </div>
-                </>
-              )}
-            </CardContent>
-          </Card>
         )}
+
+        <div id="radar-section">
+          <RadarPreviewCard
+            radar={weather?.radar || null}
+            location={{
+              lat: weather?.location?.lat ?? location?.lat ?? 37.1671,
+              lon: weather?.location?.lon ?? location?.lon ?? -83.2913,
+              label: weather?.location?.label || locationLabel,
+            }}
+            onViewRadar={() => setShowRadarModal(true)}
+            modalOpen={showRadarModal}
+          />
+          {alertState === "ACTIVE_ALERTS" && filteredAlerts.length > 0 ? (
+            <div className="mt-2 rounded-xl bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-100">
+              Storms approaching — radar is focused on the alert area.
+            </div>
+          ) : null}
+        </div>
+
+        <CurrentConditionsCard
+          current={currentConditions}
+          locationLabel={activeLocationLabel}
+          heroMode
+        />
+
+        <div id="forecast-section">
+          <HourlyStrip
+            points={hourlyPoints}
+            onView10Day={() => setActiveTab("forecast")}
+          />
+        </div>
       </div>
     );
   }
@@ -1695,6 +2079,40 @@ export default function LiveWeatherAlertsHomePage() {
 
             <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
               <CardContent className="space-y-4 p-5">
+                <div className="text-lg font-black">Travel Alerts</div>
+
+                <div className="grid grid-cols-1 gap-2">
+                  <Button
+                    variant={travelAlertsMode === 'off' ? 'default' : 'secondary'}
+                    onClick={() => setTravelMode('off')}
+                    className="h-11 rounded-2xl"
+                  >
+                    Off
+                  </Button>
+                  <Button
+                    variant={travelAlertsMode === 'follow' ? 'default' : 'secondary'}
+                    onClick={() => setTravelMode('follow')}
+                    className="h-11 rounded-2xl"
+                  >
+                    Follow my location
+                  </Button>
+                  <Button
+                    variant={travelAlertsMode === 'corridor' ? 'default' : 'secondary'}
+                    onClick={() => setTravelMode('corridor')}
+                    className="h-11 rounded-2xl"
+                  >
+                    Follow + ahead on route
+                  </Button>
+                </div>
+
+                <div className="text-xs text-slate-400">
+                  Updates alert coverage as you move. Best for road trips.
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+              <CardContent className="space-y-4 p-5">
                 <div className="text-lg font-black">Quiet Hours</div>
 
                 <label className="flex items-center justify-between text-sm">
@@ -1867,6 +2285,15 @@ export default function LiveWeatherAlertsHomePage() {
 
       {showLocationPrompt ? (
         <LocationPrompt onUseGeo={handleUseGeo} onUseZip={handleUseZip} defaultToZip={promptDefaultToZip} />
+      ) : null}
+
+      {showNotificationPrompt ? (
+        <NotificationPrompt
+          locationLabel={location?.label || "your area"}
+          busy={pushBusy}
+          onEnable={handleEnableNotificationsFromPrompt}
+          onNotNow={handleNotificationPromptDismiss}
+        />
       ) : null}
     </div>
   );
