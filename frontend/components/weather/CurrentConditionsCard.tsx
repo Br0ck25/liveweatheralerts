@@ -2,6 +2,7 @@
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Compass } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { iconForHourly } from "@/lib/weather/formatters";
 
 type CurrentConditions = {
@@ -20,13 +21,61 @@ type CurrentConditions = {
 export default function CurrentConditionsCard({
   current,
   locationLabel,
+  heroMode = false,
 }: {
   current: CurrentConditions;
   locationLabel: string;
+  heroMode?: boolean;
 }) {
+  function getGlow(icon: string) {
+    if (icon === "sun") return "shadow-[0_0_60px_rgba(255,200,0,0.25)]";
+    if (icon === "storm") return "shadow-[0_0_60px_rgba(56,189,248,0.25)]";
+    if (icon === "cloud") return "shadow-[0_0_40px_rgba(148,163,184,0.2)]";
+    if (icon === "night") return "shadow-[0_0_50px_rgba(96,165,250,0.2)]";
+    return "";
+  }
+
+  function getCardAtmosphere(icon: string) {
+    if (icon === "sun") {
+      return {
+        card: "from-blue-950 via-blue-900/95 to-slate-950",
+        glow: "bg-[radial-gradient(circle_at_18%_18%,rgba(255,220,120,0.18),transparent_38%)]",
+      };
+    }
+
+    if (icon === "storm") {
+      return {
+        card: "from-slate-950 via-blue-950 to-slate-950",
+        glow: "bg-[radial-gradient(circle_at_18%_18%,rgba(56,189,248,0.18),transparent_38%)]",
+      };
+    }
+
+    if (icon === "cloud") {
+      return {
+        card: "from-slate-950 via-slate-900 to-blue-950",
+        glow: "bg-[radial-gradient(circle_at_18%_18%,rgba(148,163,184,0.14),transparent_38%)]",
+      };
+    }
+
+    return {
+      card: "from-slate-950 via-blue-950 to-slate-950",
+      glow: "bg-[radial-gradient(circle_at_18%_18%,rgba(96,165,250,0.16),transparent_38%)]",
+    };
+  }
+
+  const atmosphere = getCardAtmosphere(current.icon);
+
   return (
-    <Card className="rounded-[30px] border border-blue-900/40 bg-gradient-to-br from-blue-950 via-blue-900 to-slate-950 text-white shadow-xl">
-      <CardContent className="pt-6 pb-5 px-5">
+    <Card
+      className={cn(
+        "relative overflow-hidden rounded-[30px] border text-white shadow-xl bg-gradient-to-br",
+        atmosphere.card,
+        heroMode ? "-mt-2 border-white/10" : "border-blue-900/40"
+      )}
+    >
+      <div className={cn("absolute inset-0 opacity-90", atmosphere.glow)} />
+      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.04)_0%,rgba(255,255,255,0)_38%,rgba(2,6,23,0.18)_100%)]" />
+      <CardContent className="relative pt-5 pb-4 px-4">
         <div className="mb-5 flex items-center justify-between">
           <div className="text-xl font-black uppercase tracking-wide text-white/95">
             Current Conditions
@@ -38,11 +87,16 @@ export default function CurrentConditionsCard({
         </div>
 
         <div className="grid grid-cols-[120px_1fr] gap-4">
-          <div className="rounded-[24px] bg-white/5 p-4 text-center">
-            <div className="mx-auto flex h-16 w-16 items-center justify-center">
+          <div className="rounded-[24px] bg-white/5/70 backdrop-blur p-3 text-center border border-white/10">
+            <div
+              className={cn(
+                "mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-white/5",
+                getGlow(current.icon)
+              )}
+            >
               {iconForHourly(current.icon, "current")}
             </div>
-            <div className="mt-4 text-6xl font-black leading-none">{current.temp}°</div>
+            <div className="mt-3 text-[4rem] font-black leading-none tracking-tight">{current.temp}°</div>
             <div className="mt-2 text-sm font-medium text-blue-100">
               Feels like {current.feelsLike}°
             </div>

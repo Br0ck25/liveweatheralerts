@@ -36,7 +36,12 @@ import {
   updatePushPreferences,
   type PushPreferences,
 } from "@/lib/push";
-import { formatTime, formatRelative } from "@/lib/weather/formatters";
+import {
+  formatTime,
+  formatLiveTime,
+  isNightForHour,
+  resolveWeatherIcon,
+} from "@/lib/weather/formatters";
 import { sortAlerts, getAlertPriority, heroAreaLabel, getAlertBackground, getHeroVariantBackgroundImageIfExists } from "@/lib/alerts/helpers";
 
 /**
@@ -158,10 +163,12 @@ type WeatherResponse = {
   daily: DailyForecast[];
   radar: {
     station: string | null;
-    loopImageUrl: string | null;
-    stillImageUrl: string | null;
-    updated: string;
-    summary: string;
+    loopImageUrl?: string | null;
+    stillImageUrl?: string | null;
+    updated?: string;
+    summary?: string;
+    frames?: { time: string; label: string }[];
+    tileTemplate?: string | null;
   };
   updated: string;
 };
@@ -214,45 +221,6 @@ const fallbackHourly: HourlyPoint[] = [
 ];
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
-
-function resolveCurrentIcon(
-  condition: string | undefined,
-  isNight: boolean | undefined,
-): "storm" | "sun" | "cloud" | "night" {
-  const text = String(condition || "").toLowerCase();
-
-  if (
-    text.includes("thunder") ||
-    text.includes("storm") ||
-    text.includes("tornado") ||
-    text.includes("lightning")
-  ) {
-    return "storm";
-  }
-
-  if (
-    text.includes("rain") ||
-    text.includes("shower") ||
-    text.includes("drizzle") ||
-    text.includes("snow") ||
-    text.includes("sleet") ||
-    text.includes("ice") ||
-    text.includes("freezing") ||
-    text.includes("fog") ||
-    text.includes("mist") ||
-    text.includes("haze") ||
-    text.includes("smoke") ||
-    text.includes("cloud")
-  ) {
-    return "cloud";
-  }
-
-  if (text.includes("clear")) {
-    return isNight ? "night" : "sun";
-  }
-
-  return isNight ? "night" : "sun";
-}
 
 function resolveWeatherBackground(
   condition: string | undefined,
@@ -319,7 +287,7 @@ function AllClearBanner({
           No active weather alerts
         </div>
         <div className="mt-3 text-sm font-medium text-sky-50">
-          {locationLabel} • Updated {formatRelative(lastPoll)}
+          {locationLabel} • {formatLiveTime(lastPoll)}
         </div>
       </CardContent>
     </Card>
@@ -634,7 +602,7 @@ export default function LiveWeatherAlertsHomePage() {
     wind: weather?.current?.wind || fallbackCurrent.wind,
     humidity: weather?.current?.humidity ?? fallbackCurrent.humidity,
     uv: weather?.current?.uv || fallbackCurrent.uv,
-    icon: resolveCurrentIcon(
+    icon: resolveWeatherIcon(
       weather?.current?.condition || fallbackCurrent.condition,
       weather?.current?.isNight ?? fallbackCurrent.isNight,
     ),
@@ -768,7 +736,7 @@ export default function LiveWeatherAlertsHomePage() {
 
   function renderHomeTab() {
     return (
-      <div className="space-y-4">
+      <div className={cn("space-y-4", alertState === "NO_ALERTS" && "space-y-3")}>
         {alertState === "ACTIVE_ALERTS" && heroAlert ? (
           <>
             <BigAlertHero
@@ -813,33 +781,27 @@ export default function LiveWeatherAlertsHomePage() {
         <CurrentConditionsCard
           current={currentConditions}
           locationLabel={locationLabel}
+          heroMode
         />
 
         <div id="forecast-section">
           <HourlyStrip
             points={
               weather?.hourly?.length
-                ? weather.hourly.map((p, i) => {
-                    const isNightHour =
-                      weather?.current?.sunrise &&
-                      weather?.current?.sunset &&
-                      p.startTime
-                        ? (() => {
-                            const t = new Date(p.startTime).getTime();
-                            const sunrise = new Date(weather.current.sunrise).getTime();
-                            const sunset = new Date(weather.current.sunset).getTime();
-                            return t < sunrise || t > sunset;
-                          })()
-                        : new Date(p.startTime || "").getHours() < 6 ||
-                          new Date(p.startTime || "").getHours() >= 18;
+                ? weather.hourly.map((p) => {
+                    const isNightHour = isNightForHour(
+                      p.startTime,
+                      weather?.current?.sunrise,
+                      weather?.current?.sunset
+                    );
 
                     return {
                       label: new Date(p.startTime || Date.now()).toLocaleTimeString([], {
                         hour: "numeric",
                       }),
-                      temp: p.temperatureF ?? 0,
-                      icon: resolveCurrentIcon(p.shortForecast, isNightHour),
-                      precip: p.precipitationChance ?? 0,
+                      temp: p.temperatureF ?? p.temp ?? 0,
+                      icon: resolveWeatherIcon(p.shortForecast, isNightHour),
+                      precip: p.precipitationChance ?? p.precip ?? 0,
                       startTime: p.startTime,
                     };
                   })
@@ -851,8 +813,12 @@ export default function LiveWeatherAlertsHomePage() {
 
         <div id="radar-section">
           <RadarPreviewCard
-            alertState={alertState}
             radar={weather?.radar || null}
+            location={{
+              lat: weather?.location?.lat ?? location?.lat ?? 37.1671,
+              lon: weather?.location?.lon ?? location?.lon ?? -83.2913,
+              label: weather?.location?.label || locationLabel,
+            }}
             onViewRadar={() => setShowRadarModal(true)}
           />
         </div>
@@ -1058,7 +1024,7 @@ export default function LiveWeatherAlertsHomePage() {
             <div className="mt-4 space-y-2 text-base text-slate-200">
               <div>{weather?.radar?.summary || "Live radar available"}</div>
               <div className="text-sm text-slate-400">
-                Updated {formatRelative(weather?.radar?.updated)}
+                {formatLiveTime(weather?.radar?.updated)}
               </div>
               {weather?.radar?.station ? (
                 <div className="text-sm text-slate-400">Station: {weather.radar.station}</div>
@@ -1601,7 +1567,7 @@ export default function LiveWeatherAlertsHomePage() {
                   ? "Loading weather..."
                   : loadingAlerts
                   ? "Loading alerts..."
-                  : `Synced ${formatRelative(alertsResp?.lastPoll)}`}
+                  : "Live • Monitoring"}
               </div>
             </div>
           </div>

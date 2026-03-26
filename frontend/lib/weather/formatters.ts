@@ -20,6 +20,25 @@ export function formatRelative(value?: string | null) {
   return `${diffHr} hr ago`;
 }
 
+export function formatLiveTime(iso?: string | null) {
+  if (!iso) return "Live";
+
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return "Live";
+
+  const diffSec = Math.floor((Date.now() - ts) / 1000);
+
+  if (diffSec < 10) return "Live • Updating";
+  if (diffSec < 60) return "Live • Just now";
+
+  const diffMin = Math.floor(diffSec / 60);
+
+  if (diffMin < 5) return "Updated just now";
+  if (diffMin < 15) return `Updated ${diffMin}m ago`;
+
+  return "Live • Updating";
+}
+
 export function mapIcon(forecast = "") {
   const f = forecast.toLowerCase();
 
@@ -38,7 +57,7 @@ export function iconForHourly(
   size: "hourly" | "current" = "hourly"
 ): ReactNode {
   const className =
-    size === "current" ? "h-16 w-16" : "h-7 w-7";
+    size === "current" ? "h-20 w-20" : "h-7 w-7";
 
   if (icon === "storm") {
     return createElement(CloudRain, { className: `${className} text-sky-300` });
@@ -57,6 +76,71 @@ export function iconForHourly(
   }
 
   return createElement(Cloud, { className: `${className} text-slate-200` });
+}
+
+export function isNightForHour(
+  startTime?: string | null,
+  sunrise?: string | null,
+  sunset?: string | null
+) {
+  const time = startTime ? Date.parse(startTime) : NaN;
+  const rise = sunrise ? Date.parse(sunrise) : NaN;
+  const set = sunset ? Date.parse(sunset) : NaN;
+
+  if (Number.isFinite(time) && Number.isFinite(rise) && Number.isFinite(set)) {
+    return time < rise || time >= set;
+  }
+
+  const d = startTime ? new Date(startTime) : new Date();
+  const hour = d.getHours();
+  return hour < 6 || hour >= 18;
+}
+
+export function resolveWeatherIcon(
+  forecast?: string | null,
+  isNight?: boolean
+): WeatherIconType {
+  const text = String(forecast || "").toLowerCase();
+
+  if (
+    text.includes("thunder") ||
+    text.includes("storm") ||
+    text.includes("tornado") ||
+    text.includes("lightning")
+  ) {
+    return "storm";
+  }
+
+  if (
+    text.includes("rain") ||
+    text.includes("shower") ||
+    text.includes("drizzle") ||
+    text.includes("snow") ||
+    text.includes("sleet") ||
+    text.includes("ice") ||
+    text.includes("freezing") ||
+    text.includes("fog") ||
+    text.includes("mist") ||
+    text.includes("haze") ||
+    text.includes("smoke") ||
+    text.includes("overcast") ||
+    text.includes("mostly cloudy") ||
+    text.includes("partly cloudy") ||
+    text.includes("cloud")
+  ) {
+    return "cloud";
+  }
+
+  if (
+    text.includes("clear") ||
+    text.includes("sunny") ||
+    text.includes("mostly sunny") ||
+    text.includes("partly sunny")
+  ) {
+    return isNight ? "night" : "sun";
+  }
+
+  return isNight ? "night" : "sun";
 }
 
 export function formatAlertDate(value?: string) {

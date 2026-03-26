@@ -1,115 +1,182 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Radar } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { formatRelative } from "@/lib/weather/formatters";
 
-type AlertState = "ACTIVE_ALERTS" | "NO_ALERTS";
+const OSM_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const RADAR_COLOR = 2;
+const RADAR_OPTIONS = "1_1";
+const PREVIEW_ZOOM = 5;
 
-type RadarData = {
-  station: string | null;
-  loopImageUrl: string | null;
-  stillImageUrl: string | null;
-  updated: string;
-  summary: string;
+type RadarPreviewLocation = {
+  lat: number;
+  lon: number;
+  label: string;
+};
+
+type RainViewerFrame = {
+  time: number;
+  path: string;
 };
 
 export default function RadarPreviewCard({
-  alertState,
-  radar,
+  location,
   onViewRadar,
+  modalOpen = false,
 }: {
-  alertState: AlertState;
-  radar: RadarData | null;
+  location: RadarPreviewLocation;
   onViewRadar: () => void;
+  /**
+   * Pass `true` while the radar modal is open.
+   * The preview map will be fully destroyed to prevent tile/marker bleed-through
+   * and recreated when the modal closes.
+   */
+  modalOpen?: boolean;
 }) {
-  const [hasOpenedRadar, setHasOpenedRadar] = useState(false);
-  const hasStillImage = Boolean(radar?.stillImageUrl);
+  const mapDivRef = useRef<HTMLDivElement | null>(null);
+  const mapInstance = useRef<any>(null);
+  const leafletRef = useRef<any>(null);
+
+  const [host, setHost] = useState("");
+  const [latestFrame, setLatestFrame] = useState<RainViewerFrame | null>(null);
+  const [tileError, setTileError] = useState<string | null>(null);
+
+  // Fetch latest single radar frame once
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetch(
+          "https://api.rainviewer.com/public/weather-maps.json",
+          { cache: "no-store" }
+        );
+        const data = await res.json();
+        setHost(data.host || "https://tilecache.rainviewer.com");
+        const frames: RainViewerFrame[] = data.radar?.past ?? [];
+        setLatestFrame(frames[frames.length - 1] ?? null);
+      } catch {
+        // silently ignore; map renders without radar overlay
+      }
+    }
+    load();
+  }, []);
+
+  /**
+   * Fully destroy the map when the modal opens, fully recreate it when the
+   * modal closes. This is the only 100% reliable way to prevent Leaflet's
+   * tile layers and markers from bleeding through into the modal's viewport.
+   */
+  useEffect(() => {
+    // Modal just opened → tear down the preview map entirely
+    if (modalOpen) {
+      if (mapInstance.current) {
+        mapInstance.current.remove();
+        mapInstance.current = null;
+      }
+      return;
+    }
+
+    // Modal closed (or was never open) → initialise / reinitialise the preview map
+    if (!mapDivRef.current || mapInstance.current) return;
+
+    let mounted = true;
+
+    async function initMap() {
+      const module = await import("leaflet");
+      const L = module.default || module;
+      leafletRef.current = L;
+
+      if (!mounted || !mapDivRef.current) return;
+
+      const map = L.map(mapDivRef.current, {
+        zoomControl: false,
+        attributionControl: false,
+        dragging: false,
+        touchZoom: false,
+        doubleClickZoom: false,
+        scrollWheelZoom: false,
+        keyboard: false,
+      }).setView([location.lat, location.lon], PREVIEW_ZOOM);
+
+      L.tileLayer(OSM_URL, { maxZoom: 19 }).addTo(map);
+
+      L.circleMarker([location.lat, location.lon], {
+        radius: 6,
+        color: "#ffffff",
+        weight: 2,
+        fillColor: "#3b82f6",
+        fillOpacity: 1,
+      }).addTo(map);
+
+      // Add radar overlay if we already have frame data
+      if (host && latestFrame) {
+        const url = `${host}${latestFrame.path}/256/{z}/{x}/{y}/${RADAR_COLOR}/${RADAR_OPTIONS}.png`;
+        const layer = L.tileLayer(url, {
+          opacity: 0.75,
+          maxZoom: PREVIEW_ZOOM,
+          tileSize: 256,
+          updateWhenIdle: true,
+          updateWhenZooming: false,
+        });
+        layer.on("tileerror", (e: any) => {
+          if (String(e?.error || "").includes("429")) {
+            setTileError("Radar rate-limited — try again shortly.");
+          }
+        });
+        layer.addTo(map);
+      }
+
+      mapInstance.current = map;
+      setTimeout(() => map.invalidateSize(), 0);
+    }
+
+    initMap();
+
+    return () => {
+      mounted = false;
+    };
+  // Re-run whenever modal opens/closes, or when radar frame data arrives
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalOpen, host, latestFrame]);
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => {
+      mapInstance.current?.remove();
+      mapInstance.current = null;
+    };
+  }, []);
 
   return (
-    <Card className="overflow-hidden rounded-[30px] border border-slate-800 bg-slate-950 text-white shadow-xl">
+    <Card className="rounded-[30px] border border-slate-800 bg-slate-950 text-white">
       <CardContent className="p-5">
-        <div className="mb-4 flex items-center gap-2 text-xl font-black uppercase tracking-wide">
+        <div className="mb-4 flex items-center gap-2 text-xl font-black uppercase">
           <Radar className="h-5 w-5 text-red-400" />
           Live Radar
         </div>
 
-        <div className="grid grid-cols-[120px_1fr] gap-3">
-          <div className="rounded-[22px] bg-white/5 p-4">
-            <div className="flex items-center gap-2 text-sm font-semibold text-white">
-              <span
-                className={cn(
-                  "h-3 w-3 rounded-full",
-                  alertState === "ACTIVE_ALERTS" ? "bg-green-400" : "bg-blue-400"
-                )}
-              />
-              {radar?.summary || "Interactive radar ready"}
-            </div>
+        <button
+          onClick={onViewRadar}
+          className="relative w-full overflow-hidden rounded-[20px] border border-white/10"
+          aria-label="Open live radar"
+        >
+          {modalOpen ? (
+            // Placeholder shown while the modal is open (map is destroyed)
+            <div className="h-48 w-full rounded-[20px] bg-slate-900" />
+          ) : (
+            <div ref={mapDivRef} className="h-48 w-full" />
+          )}
 
-            <div className="mt-3 text-xs font-medium leading-5 text-slate-300">
-              Updated {formatRelative(radar?.updated)}
-            </div>
-
-            {radar?.station ? (
-              <div className="mt-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                Station {radar.station}
-              </div>
-            ) : null}
+          <div className="absolute bottom-2 right-2 rounded-lg bg-slate-950/80 px-2 py-1 text-[11px] font-semibold text-slate-300 backdrop-blur">
+            Tap to expand
           </div>
+        </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setHasOpenedRadar(true);
-              onViewRadar();
-            }}
-            className="relative overflow-hidden rounded-[22px] border border-white/10 bg-slate-900 text-left transition hover:border-sky-400/50 hover:bg-slate-800/80 hover:shadow-[0_10px_30px_rgba(56,189,248,0.15)] active:scale-[0.98]"
-            aria-label="Open live radar"
-          >
-            {hasStillImage ? (
-              <div
-                className="absolute inset-0 bg-cover bg-center"
-                style={{ backgroundImage: `url(${radar?.stillImageUrl})` }}
-              />
-            ) : null}
-
-            <div
-              className={cn(
-                "absolute inset-0",
-                hasStillImage
-                  ? "bg-gradient-to-br from-slate-950/45 via-slate-950/35 to-slate-950/80"
-                  : "bg-[radial-gradient(circle_at_60%_25%,rgba(255,196,0,0.30),transparent_18%),linear-gradient(135deg,rgba(34,197,94,0.28),transparent_25%),linear-gradient(160deg,rgba(250,204,21,0.24),transparent_45%),linear-gradient(200deg,rgba(239,68,68,0.30),transparent_62%),linear-gradient(180deg,#162033_0%,#0b1220_100%)]"
-              )}
-            />
-
-            <div className="relative flex h-full min-h-[130px] flex-col justify-between p-4">
-              <div>
-                <div className="text-xs font-black uppercase tracking-[0.18em] text-sky-200/80">
-                  Interactive Radar
-                </div>
-
-                <div className="mt-2 text-lg font-black leading-tight text-white">
-                  {radar?.summary || "Live Radar"}
-                </div>
-              </div>
-
-              <div className="flex items-end justify-between gap-3">
-                {!hasOpenedRadar ? (
-                  <div className="text-sm font-medium text-slate-100">
-                    Tap to open full-screen radar
-                  </div>
-                ) : null}
-
-                <div className="flex items-center gap-2 rounded-full bg-white/15 px-3 py-1 text-xs font-black uppercase tracking-wide text-white backdrop-blur">
-                  <span className="h-2 w-2 rounded-full bg-red-400 animate-pulse"></span>
-                  Live
-                </div>
-              </div>
-            </div>
-          </button>
-        </div>
+        {tileError ? (
+          <p className="mt-2 rounded-lg bg-rose-500/20 px-3 py-1 text-xs font-semibold text-rose-200">
+            {tileError}
+          </p>
+        ) : null}
       </CardContent>
     </Card>
   );
