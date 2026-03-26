@@ -40,7 +40,7 @@ export default function CurrentConditionsCard({
         <div className="grid grid-cols-[120px_1fr] gap-4">
           <div className="rounded-[24px] bg-white/5 p-4 text-center">
             <div className="mx-auto flex h-16 w-16 items-center justify-center">
-              {iconForHourly(current.icon)}
+              {iconForHourly(current.icon, "current")}
             </div>
             <div className="mt-4 text-6xl font-black leading-none">{current.temp}°</div>
             <div className="mt-2 text-sm font-medium text-blue-100">
@@ -51,7 +51,7 @@ export default function CurrentConditionsCard({
           <div className="space-y-4 rounded-[24px] bg-white/5 p-4">
             <div className="flex items-center gap-2 text-base font-semibold text-white">
               <span className="flex h-5 w-5 items-center justify-center">
-                {iconForHourly(current.icon)}
+                {iconForHourly(current.icon, "hourly")}
               </span>
               {current.condition}
             </div>

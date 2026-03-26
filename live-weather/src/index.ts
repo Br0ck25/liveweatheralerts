@@ -2793,55 +2793,34 @@ function buildSunTimesFromDailyPeriods(dailyPeriods: any[], nowMs = Date.now()) 
 	return { sunrise, sunset, isNight };
 }
 
-function computeHeatIndexF(tempF: number | null, humidity: number | null): number | null {
-	if (!Number.isFinite(tempF as number) || !Number.isFinite(humidity as number)) return null;
-	const T = Number(tempF);
-	const R = Number(humidity);
-	if (T < 80 || R < 40) return null;
-	const hi =
-		-42.379 +
-		2.04901523 * T +
-		10.14333127 * R -
-		0.22475541 * T * R -
-		0.00683783 * T * T -
-		0.05481717 * R * R +
-		0.00122874 * T * T * R +
-		0.00085282 * T * R * R -
-		0.00000199 * T * T * R * R;
-	return hi;
-}
-
-function computeWindChillF(tempF: number | null, windMph: number | null): number | null {
-	if (!Number.isFinite(tempF as number) || !Number.isFinite(windMph as number)) return null;
-	const T = Number(tempF);
-	const V = Number(windMph);
-	if (T > 50 || V < 3) return null;
-	return 35.74 + 0.6215 * T - 35.75 * Math.pow(V, 0.16) + 0.4275 * T * Math.pow(V, 0.16);
-}
-
-function computeFeelsLike(
-	observedTempF: number | null,
-	heatIndexF: number | null,
-	windChillF: number | null,
-	humidity: number | null,
-	windMph: number | null,
-	fallbackTempF: number | null,
-): number | null {
-	if (Number.isFinite(observedTempF as number)) {
-		const observed = Number(observedTempF);
-
-		if (observed >= 80) {
-			return firstFinite(heatIndexF, computeHeatIndexF(observed, humidity), observed, fallbackTempF);
-		}
-
-		if (observed <= 50) {
-			return firstFinite(windChillF, computeWindChillF(observed, windMph), observed, fallbackTempF);
-		}
-
-		return observed;
+function calculateFeelsLike(tempF: number, humidity: number, windMph: number): number {
+	// Wind Chill (ONLY when cold)
+	if (tempF <= 50 && windMph > 3) {
+		return Math.round(
+			35.74 +
+			0.6215 * tempF -
+			35.75 * Math.pow(windMph, 0.16) +
+			0.4275 * tempF * Math.pow(windMph, 0.16),
+		);
 	}
 
-	return firstFinite(fallbackTempF, heatIndexF, windChillF);
+	// Heat Index (ONLY when hot)
+	if (tempF >= 80 && humidity >= 40) {
+		return Math.round(
+			-42.379 +
+			2.04901523 * tempF +
+			10.14333127 * humidity -
+			0.22475541 * tempF * humidity -
+			0.00683783 * tempF * tempF -
+			0.05481717 * humidity * humidity +
+			0.00122874 * tempF * tempF * humidity +
+			0.00085282 * tempF * humidity * humidity -
+			0.00000199 * tempF * tempF * humidity * humidity,
+		);
+	}
+
+	// Otherwise → actual temp
+	return Math.round(tempF);
 }
 
 function buildCurrentConditions(
@@ -2869,16 +2848,13 @@ function buildCurrentConditions(
 	const windDirection = observationIsFresh
 		? firstFinite(measurementValue(observationProps?.windDirection), null)
 		: null;
-	const heatIndexF = observationIsFresh ? toTemperatureF(observationProps?.heatIndex) : null;
-	const windChillF = observationIsFresh ? toTemperatureF(observationProps?.windChill) : null;
-	const feelsLikeF = computeFeelsLike(
-		observationIsFresh ? observedTempF : temperatureF,
-		heatIndexF,
-		windChillF,
-		humidity,
-		windMph,
-		temperatureF,
-	);
+	const feelsLikeF = Number.isFinite(Number(temperatureF))
+		? calculateFeelsLike(
+			Number(temperatureF),
+			Number(humidity ?? 0),
+			Number(windMph ?? 0),
+		)
+		: null;
 
 	const condition = String(
 		(observationIsFresh ? observationProps?.textDescription : null)

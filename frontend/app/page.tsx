@@ -254,16 +254,63 @@ function resolveCurrentIcon(
   return isNight ? "night" : "sun";
 }
 
+function resolveWeatherBackground(
+  condition: string | undefined,
+  isNight: boolean | undefined,
+): string {
+  const text = String(condition || "").toLowerCase();
+
+  const isStorm =
+    text.includes("thunder") ||
+    text.includes("storm") ||
+    text.includes("tornado") ||
+    text.includes("lightning");
+
+  const isCloudy =
+    text.includes("rain") ||
+    text.includes("shower") ||
+    text.includes("drizzle") ||
+    text.includes("snow") ||
+    text.includes("sleet") ||
+    text.includes("ice") ||
+    text.includes("freezing") ||
+    text.includes("fog") ||
+    text.includes("mist") ||
+    text.includes("haze") ||
+    text.includes("smoke") ||
+    text.includes("cloud");
+
+  if (isNight) {
+    if (isStorm) return "/images/website/storm-night.jpg";
+    if (isCloudy) return "/images/website/cloudy-night.jpg";
+    return "/images/website/clear-night.jpg";
+  }
+
+  if (isStorm) return "/images/website/storm-day.jpg";
+  if (isCloudy) return "/images/website/cloudy-day.jpg";
+  return "/images/website/sunny-day.jpg";
+}
+
 function AllClearBanner({
   locationLabel,
   lastPoll,
+  backgroundImage,
 }: {
   locationLabel: string;
   lastPoll: string | null;
+  backgroundImage?: string;
 }) {
   return (
-    <Card className="overflow-hidden rounded-[30px] border border-sky-300/20 bg-gradient-to-br from-sky-500 via-blue-600 to-blue-800 text-white shadow-2xl">
-      <CardContent className="p-6">
+    <Card
+      className="relative overflow-hidden rounded-[30px] border border-sky-300/20 text-white shadow-2xl"
+      style={{
+        backgroundImage: backgroundImage ? `url(${backgroundImage})` : undefined,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+      }}
+    >
+      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(8,18,34,0.18)_0%,rgba(8,18,34,0.38)_45%,rgba(8,18,34,0.62)_100%)]" />
+      <CardContent className="relative p-6">
         <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.18em] text-white/90">
           <ShieldAlert className="h-4 w-4" />
           All Clear
@@ -756,6 +803,10 @@ export default function LiveWeatherAlertsHomePage() {
           <AllClearBanner
             locationLabel={locationLabel}
             lastPoll={alertsResp?.lastPoll ?? null}
+            backgroundImage={resolveWeatherBackground(
+              currentConditions.condition,
+              currentConditions.isNight
+            )}
           />
         )}
 

@@ -1,4 +1,4 @@
-import { CloudRain, CloudSun } from "lucide-react";
+import { Cloud, CloudRain, Moon, Sun } from "lucide-react";
 import { createElement, ReactNode } from "react";
 
 export function formatTime(value?: string) {
@@ -33,11 +33,30 @@ export function mapIcon(forecast = "") {
 
 export type WeatherIconType = "storm" | "sun" | "cloud" | "night";
 
-export function iconForHourly(icon: WeatherIconType): ReactNode {
-  if (icon === "storm") return createElement(CloudRain, { className: "h-6 w-6" });
-  if (icon === "sun") return createElement(CloudSun, { className: "h-6 w-6" });
-  if (icon === "night") return createElement(CloudSun, { className: "h-6 w-6 opacity-70" });
-  return createElement(CloudSun, { className: "h-6 w-6" });
+export function iconForHourly(
+  icon: WeatherIconType,
+  size: "hourly" | "current" = "hourly"
+): ReactNode {
+  const className =
+    size === "current" ? "h-16 w-16" : "h-7 w-7";
+
+  if (icon === "storm") {
+    return createElement(CloudRain, { className: `${className} text-sky-300` });
+  }
+
+  if (icon === "sun") {
+    return createElement(Sun, { className: `${className} text-yellow-300` });
+  }
+
+  if (icon === "night") {
+    return createElement(Moon, { className: `${className} text-blue-200` });
+  }
+
+  if (icon === "cloud") {
+    return createElement(Cloud, { className: `${className} text-slate-200` });
+  }
+
+  return createElement(Cloud, { className: `${className} text-slate-200` });
 }
 
 export function formatAlertDate(value?: string) {
