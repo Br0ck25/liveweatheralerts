@@ -28,10 +28,10 @@ export default function CurrentConditionsCard({
   heroMode?: boolean;
 }) {
   function getGlow(icon: string) {
-    if (icon === "sun") return "shadow-[0_0_60px_rgba(255,200,0,0.25)]";
-    if (icon === "storm") return "shadow-[0_0_60px_rgba(56,189,248,0.25)]";
-    if (icon === "cloud") return "shadow-[0_0_40px_rgba(148,163,184,0.2)]";
-    if (icon === "night") return "shadow-[0_0_50px_rgba(96,165,250,0.2)]";
+    if (icon === "sun") return "shadow-[0_0_80px_rgba(255,200,0,0.35)]";
+    if (icon === "storm") return "shadow-[0_0_80px_rgba(56,189,248,0.35)]";
+    if (icon === "cloud") return "shadow-[0_20px_60px_rgba(148,163,184,0.35)]";
+    if (icon === "night") return "shadow-[0_0_70px_rgba(96,165,250,0.3)]";
     return "";
   }
 
@@ -86,23 +86,25 @@ export default function CurrentConditionsCard({
           </div>
         </div>
 
-        <div className="grid grid-cols-[120px_1fr] gap-4">
-          <div className="rounded-[24px] bg-white/5/70 backdrop-blur p-3 text-center border border-white/10">
+        <div className="grid grid-cols-[140px_1fr] gap-5">
+          <div className="relative rounded-[26px] bg-gradient-to-b from-white/10 to-white/5 backdrop-blur p-4 text-center border border-white/15 shadow-inner">
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_30%,rgba(255,255,255,0.08),transparent_60%)] pointer-events-none rounded-[26px]" />
             <div
               className={cn(
-                "mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-white/5",
+                "relative mx-auto flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-br from-white/10 to-white/0 ring-1 ring-white/10 animate-[pulse_8s_ease-in-out_infinite]",
                 getGlow(current.icon)
               )}
             >
-              {iconForHourly(current.icon, "current")}
+              <div className="absolute inset-2 rounded-full bg-white/5 blur-md opacity-60" />
+              <div className="relative z-10">{iconForHourly(current.icon, "current")}</div>
             </div>
-            <div className="mt-3 text-[4rem] font-black leading-none tracking-tight">{current.temp}°</div>
+            <div className="mt-4 text-[4.5rem] font-extrabold leading-none tracking-tight">{current.temp}°</div>
             <div className="mt-2 text-sm font-medium text-blue-100">
               Feels like {current.feelsLike}°
             </div>
           </div>
 
-          <div className="space-y-4 rounded-[24px] bg-white/5 p-4">
+          <div className="space-y-4 rounded-[24px] bg-gradient-to-b from-white/10 to-white/5 p-4">
             <div className="flex items-center gap-2 text-base font-semibold text-white">
               <span className="flex h-5 w-5 items-center justify-center">
                 {iconForHourly(current.icon, "hourly")}

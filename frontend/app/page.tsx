@@ -485,6 +485,55 @@ export default function LiveWeatherAlertsHomePage() {
     return `${diffHr}h ago`;
   }
 
+  function getRiskTone(alerts: AlertItem[]) {
+    if (!alerts.length) return "calm" as const;
+
+    const highest = alerts.reduce((best, alert) => {
+      const severity = String(alert.severity || "").toLowerCase();
+      const event = String(alert.event || "").toLowerCase();
+
+      const score =
+        severity === "extreme" ? 4 :
+        severity === "severe" ? 3 :
+        severity === "moderate" ? 2 :
+        severity === "minor" ? 1 : 0;
+
+      const boostedScore =
+        event.includes("tornado warning") ||
+        event.includes("flash flood warning") ||
+        event.includes("severe thunderstorm warning")
+          ? Math.max(score, 3)
+          : score;
+
+      return boostedScore > best ? boostedScore : best;
+    }, 0);
+
+    if (highest >= 3) return "warning" as const;
+    if (highest >= 1) return "watch" as const;
+    return "calm" as const;
+  }
+
+  function getDynamicCta(tone: "calm" | "watch" | "warning") {
+    if (tone === "warning") {
+      return {
+        button: "Severe Weather Active — Turn On Alerts NOW",
+        subtext: "Get instant severe weather alerts before conditions worsen",
+      };
+    }
+
+    if (tone === "watch") {
+      return {
+        button: "Storms Possible — Enable Alerts",
+        subtext: "Get notified fast if watches or warnings are issued",
+      };
+    }
+
+    return {
+      button: "Turn On Weather Alerts",
+      subtext: "Get instant severe weather alerts before conditions change",
+    };
+  }
+
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -735,6 +784,9 @@ export default function LiveWeatherAlertsHomePage() {
   }
 
   function renderHomeTab() {
+    const tone = getRiskTone(filteredAlerts);
+    const dynamicCta = getDynamicCta(tone);
+
     return (
       <div className={cn("space-y-4", alertState === "NO_ALERTS" && "space-y-3")}>
         {alertState === "ACTIVE_ALERTS" && heroAlert ? (
@@ -756,14 +808,17 @@ export default function LiveWeatherAlertsHomePage() {
                 />
               </div>
             ) : secondaryAlerts.length > 1 ? (
-              <div className="no-scrollbar flex gap-3 overflow-x-auto pb-1">
-                {secondaryAlerts.slice(0, 3).map((alert) => (
-                  <SmallAlertCard
-                    key={alert.id}
-                    alert={alert}
-                    onClick={(alert) => setSelectedAlert(alert)}
-                  />
-                ))}
+              <div className="relative">
+                <div className="no-scrollbar flex gap-4 overflow-x-auto px-2 pb-1 snap-x snap-mandatory">
+                  {secondaryAlerts.slice(0, 3).map((alert) => (
+                    <div key={alert.id} className="snap-start">
+                      <SmallAlertCard alert={alert} onClick={(alert) => setSelectedAlert(alert)} />
+                    </div>
+                  ))}
+                </div>
+
+                <div className="pointer-events-none absolute left-0 top-0 h-full w-6 bg-gradient-to-r from-slate-950 to-transparent" />
+                <div className="pointer-events-none absolute right-0 top-0 h-full w-6 bg-gradient-to-l from-slate-950 to-transparent" />
               </div>
             ) : null}
           </>
@@ -843,13 +898,18 @@ export default function LiveWeatherAlertsHomePage() {
                     : "Turn on notifications to get updates if conditions worsen."}
                 </div>
                 {!pushEnabled ? (
-                  <Button
-                    onClick={handleEnableNotifications}
-                    disabled={pushBusy}
-                    className="mt-4 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
-                  >
-                    {pushBusy ? "Enabling..." : "Stay notified for updates"}
-                  </Button>
+                  <>
+                    <Button
+                      onClick={handleEnableNotifications}
+                      disabled={pushBusy}
+                      className="mt-4 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
+                    >
+                      {pushBusy ? "Enabling..." : dynamicCta.button}
+                    </Button>
+                    <div className="text-xs text-sky-200 mt-2 text-center">
+                      {dynamicCta.subtext}
+                    </div>
+                  </>
                 ) : (
                   <Button
                     onClick={() => setActiveTab("more")}
@@ -866,11 +926,31 @@ export default function LiveWeatherAlertsHomePage() {
           <Card className="rounded-[30px] border border-sky-300/15 bg-gradient-to-br from-sky-900/80 to-blue-950 text-white shadow-xl">
             <CardContent className="p-5">
               <div className="text-xl font-black uppercase tracking-wide">What to Watch</div>
-              <div className="mt-4 space-y-3 text-sm font-medium leading-6 text-sky-100">
-                <div>• Quiet conditions nearby right now</div>
-                <div>• Check radar again before evening plans</div>
-                <div>• Enable alerts for faster warning coverage</div>
-              </div>
+              {(() => {
+                const watchLines = buildWhatToWatch({
+                  alerts: filteredAlerts,
+                  current: currentConditions,
+                  hourly: weather?.hourly || [],
+                  locationLabel,
+                });
+
+                return (
+                  <div className="mt-4 space-y-3 text-sm leading-6">
+                    {watchLines.map((line, i) => (
+                      <div
+                        key={i}
+                        className={cn(
+                          "flex gap-2",
+                          i === 0 ? "font-semibold text-white" : "text-sky-100"
+                        )}
+                      >
+                        <span>•</span>
+                        <span>{line}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
               {pushEnabled ? (
                 <Button
                   onClick={() => setActiveTab("more")}
@@ -880,13 +960,18 @@ export default function LiveWeatherAlertsHomePage() {
                   Notifications Enabled
                 </Button>
               ) : (
-                <Button
-                  onClick={handleEnableNotifications}
-                  disabled={pushBusy}
-                  className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
-                >
-                  {pushBusy ? "Enabling..." : "Get notified when conditions change"}
-                </Button>
+                <>
+                  <Button
+                    onClick={handleEnableNotifications}
+                    disabled={pushBusy}
+                    className="mt-6 h-11 w-full rounded-2xl bg-blue-600 font-bold hover:bg-blue-500"
+                  >
+                    {pushBusy ? "Enabling..." : dynamicCta.button}
+                  </Button>
+                  <div className="text-xs text-sky-200 mt-2 text-center">
+                    {dynamicCta.subtext}
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>
@@ -1139,6 +1224,142 @@ export default function LiveWeatherAlertsHomePage() {
       label: "Alert",
       icon: TriangleAlert,
     };
+  }
+
+  function buildWhatToWatch({
+    alerts,
+    current,
+    hourly,
+    locationLabel,
+  }: {
+    alerts: AlertItem[];
+    current: CurrentConditions;
+    hourly: HourlyPoint[];
+    locationLabel: string;
+  }) {
+    const lines: string[] = [];
+    const tone = getRiskTone(alerts);
+    const condition = current.condition.toLowerCase();
+
+    // 1. Primary status line
+    if (tone === "calm") {
+      lines.push(`No active alerts near ${locationLabel}`);
+    } else if (tone === "watch") {
+      lines.push(`${alerts[0].event} in effect for your area`);
+    } else {
+      lines.push(`${alerts[0].event} — stay alert and ready to act`);
+    }
+
+    // 2. Current pattern line
+    if (tone === "warning") {
+      if (condition.includes("storm") || condition.includes("thunder")) {
+        lines.push("Hazardous weather is possible nearby");
+      } else if (condition.includes("fog")) {
+        lines.push("Visibility may change quickly in spots");
+      } else {
+        lines.push("Conditions can worsen quickly in your area");
+      }
+    } else if (tone === "watch") {
+      if (condition.includes("storm") || condition.includes("thunder")) {
+        lines.push("Storm chances are increasing today");
+      } else if (condition.includes("rain")) {
+        lines.push("Unsettled weather remains possible");
+      } else {
+        lines.push("Stay weather-aware through the day");
+      }
+    } else {
+      if (condition.includes("fog")) {
+        lines.push("Visibility may drop below 1 mile at times");
+      } else if (condition.includes("storm") || condition.includes("thunder")) {
+        lines.push("Storms possible — monitor conditions closely");
+      } else if (condition.includes("rain")) {
+        lines.push("Light rain possible in your area");
+      } else {
+        lines.push("Stable weather pattern in place");
+      }
+    }
+
+    // 3. Next-change line
+    const nextStorm = hourly.find(
+      (h) => (h.precip ?? 0) >= 40 || h.icon === "storm"
+    );
+
+    if (nextStorm) {
+      if (tone === "warning") {
+        lines.push(`Storm activity may increase around ${nextStorm.label}`);
+      } else if (tone === "watch") {
+        lines.push(`Storm chances increase around ${nextStorm.label}`);
+      } else {
+        lines.push(`Rain chances increase around ${nextStorm.label}`);
+      }
+    } else {
+      const nextChange = hourly.find((h, i) => {
+        if (i === 0) return false;
+        return (
+          h.shortForecast !== hourly[0]?.shortForecast ||
+          h.icon !== hourly[0]?.icon
+        );
+      });
+
+      if (nextChange) {
+        const label =
+          nextChange.label ||
+          (nextChange.startTime
+            ? new Date(nextChange.startTime).toLocaleTimeString([], {
+                hour: "numeric",
+              })
+            : null);
+
+        const nextText = String(nextChange.shortForecast || "").toLowerCase();
+
+        if (nextText.includes("cloud")) {
+          lines.push(`Clouds increase around ${label}`);
+        } else if (nextText.includes("sun") || nextText.includes("clear")) {
+          lines.push(`Clearing skies around ${label}`);
+        } else if (nextText.includes("rain") || nextText.includes("shower")) {
+          lines.push(`Rain chances begin around ${label}`);
+        } else if (nextText.includes("fog")) {
+          lines.push(`Fog develops around ${label}`);
+        } else if (label) {
+          lines.push(`Conditions change around ${label}`);
+        } else {
+          lines.push("Conditions change later today");
+        }
+      } else {
+        lines.push(
+          tone === "warning"
+            ? "Hazards may persist through the next few hours"
+            : "Conditions remain steady through the next few hours"
+        );
+      }
+    }
+
+    // 4. Guidance line
+    const hour = new Date().getHours();
+
+    if (tone === "warning") {
+      lines.push("Be ready to take shelter if warnings are issued");
+    } else if (tone === "watch") {
+      if (hour >= 18) {
+        lines.push("Keep alerts enabled through the evening");
+      } else {
+        lines.push("Check radar again before heading out");
+      }
+    } else if (hour >= 18) {
+      lines.push("Quiet conditions continue overnight");
+    } else if (hour <= 9) {
+      if (condition.includes("cloud")) {
+        lines.push("Cloud cover decreases through the morning");
+      } else if (condition.includes("fog")) {
+        lines.push("Fog clearing through the morning");
+      } else if (condition.includes("rain")) {
+        lines.push("Rain tapers off through the morning");
+      } else {
+        lines.push("Quiet conditions continue through the morning");
+      }
+    }
+
+    return lines.slice(0, 4);
   }
 
   function groupAlertsBySeverity(alerts: AlertItem[]) {

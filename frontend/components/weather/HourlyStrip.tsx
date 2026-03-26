@@ -33,21 +33,25 @@ export default function HourlyStrip({
           </Button>
         </div>
 
-        <div className="no-scrollbar flex gap-3 overflow-x-auto pb-1">
-          {points.map((point, index) => (
-            <div
-              key={`${point.label}-${point.startTime ?? index}`}
-              className="min-w-[110px] rounded-[24px] border border-white/10 bg-gradient-to-b from-blue-900/70 to-slate-900 px-4 py-3 text-center shadow-md shadow-black/30"
-            >
-              <div className="text-[11px] font-bold uppercase text-sky-300">{point.label}</div>
+        <div className="relative">
+          <div className="no-scrollbar flex gap-3 overflow-x-auto px-2 pb-1 snap-x snap-mandatory">
+            {points.map((point, index) => (
+              <div
+                key={`${point.label}-${point.startTime ?? index}`}
+                className={`relative min-w-[110px] snap-start rounded-[24px] border ${index === 0 ? 'border-white/20 bg-gradient-to-b from-blue-800/85' : 'border-white/10 bg-gradient-to-b from-blue-900/70'} to-slate-900 px-4 py-3 text-center shadow-md shadow-black/30`}
+              >
+                <div className="text-[11px] font-bold uppercase text-sky-300">{point.label}</div>
+                <div className="mt-2 flex justify-center">{iconForHourly(point.icon)}</div>
 
-              <div className="mt-2 flex justify-center">{iconForHourly(point.icon)}</div>
+                <div className="mt-2 text-[22px] font-black leading-none">{point.temp}°</div>
 
-              <div className="mt-2 text-[22px] font-black leading-none">{point.temp}°</div>
+                <div className="mt-1 text-[11px] text-slate-400">{point.precip ?? 0}%</div>
+              </div>
+            ))}
+          </div>
 
-              <div className="mt-1 text-[11px] text-slate-400">{point.precip ?? 0}%</div>
-            </div>
-          ))}
+          <div className="pointer-events-none absolute left-0 top-0 h-full w-4 bg-gradient-to-r from-slate-950 to-transparent" />
+          <div className="pointer-events-none absolute right-0 top-0 h-full w-4 bg-gradient-to-l from-slate-950 to-transparent" />
         </div>
       </CardContent>
     </Card>

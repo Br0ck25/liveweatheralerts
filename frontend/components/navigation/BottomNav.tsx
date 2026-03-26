@@ -40,16 +40,30 @@ export default function BottomNav({
               <button
                 key={tab.key}
                 type="button"
-                onClick={() => onChangeTab(tab.key)}
+                onClick={() => {
+                  if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+                    navigator.vibrate(10);
+                  }
+                  onChangeTab(tab.key);
+                }}
                 className={cn(
-                  "group relative inline-flex h-11 w-full flex-col items-center justify-center rounded-2xl text-xs font-black uppercase tracking-wide transition",
+                  "group relative inline-flex h-11 w-full flex-col items-center justify-center rounded-2xl text-[10px] font-extrabold uppercase tracking-wider transition-all duration-200",
                   isActive
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "bg-slate-950/40 text-slate-300 hover:bg-white/10 hover:text-white"
+                    ? "bg-blue-500/20 text-white shadow-[0_0_12px_rgba(59,130,246,0.35)] border border-blue-400/30"
+                    : "bg-slate-900/40 text-slate-400 hover:bg-white/10 hover:text-white",
+                  "active:scale-95"
                 )}
               >
-                <Icon className="h-5 w-5" />
-                {tab.label}
+                {isActive && (
+                  <span className="absolute inset-0 rounded-2xl bg-blue-500/10 blur-md" />
+                )}
+                <Icon
+                  className={cn(
+                    "h-5 w-5 transition-all duration-200",
+                    isActive && "scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]"
+                  )}
+                />
+                <span className={cn(isActive && "text-white")}>{tab.label}</span>
                 {tab.badge ? (
                   <span className="absolute -right-2 -top-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-[10px] font-black text-white">
                     {tab.badge}
