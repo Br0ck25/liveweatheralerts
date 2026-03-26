@@ -165,7 +165,7 @@ export default function RadarPreviewCard({
           }`}
           aria-label="Open live radar"
         >
-          <div className="pointer-events-none absolute inset-0 z-[900] bg-white/0 transition group-hover:bg-white/[0.03]" />
+          <div className="pointer-events-none absolute inset-0 z-10 bg-white/0 transition group-hover:bg-white/[0.03]" />
           {/*
            * When modalOpen is true, we hide the preview content immediately
            * and avoid any Leaflet rendering behind the opening modal.
@@ -181,11 +181,11 @@ export default function RadarPreviewCard({
             <div className="hidden h-48 w-full bg-slate-900" />
           )}
 
-          <div className="pointer-events-none absolute left-3 top-3 z-[1000] rounded-xl bg-slate-950/80 px-3 py-2 text-left text-white backdrop-blur-md">
+          <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-xl bg-slate-950/80 px-3 py-2 text-left text-white backdrop-blur-md">
             <div className="text-xs font-semibold text-slate-300">{locationLabel}</div>
           </div>
 
-          <div className="pointer-events-none absolute right-3 bottom-2 z-[1000] flex items-center gap-2 rounded-xl bg-slate-950/80 px-3 py-2 text-white backdrop-blur-md text-xs font-bold">
+          <div className="pointer-events-none absolute right-3 bottom-2 z-10 flex items-center gap-2 rounded-xl bg-slate-950/80 px-3 py-2 text-white backdrop-blur-md text-xs font-bold">
             <span>{previewTime}</span>
             <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/20 px-2 py-0.5 text-rose-200">
               <span className="h-2 w-2 rounded-full bg-rose-400" />
