@@ -6,8 +6,16 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.ts",
       registerType: "autoUpdate",
-      includeAssets: ["pwa-icon.svg", "pwa-maskable.svg"],
+      includeAssets: [
+        "pwa-icon.svg",
+        "pwa-maskable.svg",
+        "notification-icon-192.png",
+        "notification-badge-72.png"
+      ],
       manifest: {
         id: "/",
         name: "Live Weather Alerts",
@@ -32,55 +40,6 @@ export default defineConfig({
             sizes: "any",
             type: "image/svg+xml",
             purpose: "maskable"
-          }
-        ]
-      },
-      workbox: {
-        navigateFallback: "/index.html",
-        runtimeCaching: [
-          {
-            urlPattern: ({ url }) =>
-              url.pathname.startsWith("/api/alerts") ||
-              url.pathname.startsWith("/api/geocode"),
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "weather-api",
-              networkTimeoutSeconds: 5,
-              expiration: {
-                maxEntries: 30,
-                maxAgeSeconds: 60 * 5
-              },
-              cacheableResponse: {
-                statuses: [0, 200]
-              }
-            }
-          },
-          {
-            urlPattern: ({ request }) => request.destination === "image",
-            handler: "CacheFirst",
-            options: {
-              cacheName: "weather-images",
-              expiration: {
-                maxEntries: 50,
-                maxAgeSeconds: 60 * 60 * 24 * 7
-              },
-              cacheableResponse: {
-                statuses: [0, 200]
-              }
-            }
-          },
-          {
-            urlPattern: ({ request }) =>
-              request.destination === "style" ||
-              request.destination === "script" ||
-              request.destination === "font",
-            handler: "StaleWhileRevalidate",
-            options: {
-              cacheName: "app-assets",
-              cacheableResponse: {
-                statuses: [0, 200]
-              }
-            }
           }
         ]
       }

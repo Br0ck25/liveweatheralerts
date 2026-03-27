@@ -11,6 +11,7 @@ interface Env {
 	FB_PAGE_ID?: string;
 	FB_PAGE_ACCESS_TOKEN?: string;
 	ADMIN_PASSWORD?: string;
+	DEBUG_SUMMARY_BEARER_TOKEN?: string;
 	FB_IMAGE_BASE_URL?: string;
 	VAPID_PUBLIC_KEY?: string;
 	VAPID_PRIVATE_KEY?: string;
@@ -29,6 +30,8 @@ const NWS_ACCEPT     = 'application/geo+json,application/json';
 const FB_GRAPH_API   = 'https://graph.facebook.com/v17.0';
 const DEFAULT_WEATHER_LAT = 41.8781;
 const DEFAULT_WEATHER_LON = -87.6298;
+const PRIMARY_APP_ORIGIN = 'https://liveweatheralerts.com';
+const WWW_APP_ORIGIN = 'https://www.liveweatheralerts.com';
 
 // KV keys
 const KV_ALERT_MAP  = 'alerts:map';       // JSON: Record<alertId, feature> — merged active alerts
@@ -38,6 +41,13 @@ const KV_FB_APP_CONFIG = 'fb:app-config';  // JSON: { appId, appSecret }
 const KV_PUSH_SUB_PREFIX = 'push:sub:'; // push:sub:{sha256(endpoint)}
 const KV_PUSH_STATE_INDEX_PREFIX = 'push:index:state:'; // push:index:state:{stateCode}
 const KV_PUSH_STATE_ALERT_SNAPSHOT = 'push:state-alert-snapshot:v1'; // JSON: Record<stateCode, alertId[]>
+const KV_ALERT_LIFECYCLE_SNAPSHOT = 'alerts:lifecycle-snapshot:v1'; // JSON: Record<alertId, AlertLifecycleSnapshotEntry>
+const KV_ALERT_CHANGES = 'alerts:changes:v1'; // JSON: AlertChangeRecord[]
+const KV_ALERT_HISTORY_DAILY = 'alerts:history:daily:v1'; // JSON: Record<day, AlertHistoryDayRecord>
+const KV_OPERATIONAL_DIAGNOSTICS = 'ops:diagnostics:v1'; // JSON: OperationalDiagnostics
+const ALERT_HISTORY_RETENTION_DAYS = 14;
+const ALERT_HISTORY_MAX_QUERY_DAYS = 14;
+const MAX_RECENT_PUSH_FAILURES = 20;
 // KV thread keys: thread:{ugc}:{eventSlug} — tracks active FB post threads per county+alertType
 // e.g. thread:KYC195:severe_thunderstorm_warning
 
@@ -62,33 +72,189 @@ type PushAlertTypes = {
 	statements: boolean;
 };
 
+type PushDeliveryScope = 'state' | 'county';
+type PushDeliveryMode = 'immediate' | 'digest';
+
 type PushQuietHours = {
 	enabled: boolean;
 	start: string;
 	end: string;
 };
 
-type PushPreferences = {
+type PushScope = {
+	id: string;
+	placeId?: string | null;
+	label: string;
 	stateCode: string;
-	deliveryScope: 'state' | 'county';
+	deliveryScope: PushDeliveryScope;
 	countyName?: string | null;
 	countyFips?: string | null;
+	enabled: boolean;
 	alertTypes: PushAlertTypes;
+	severeOnly: boolean;
+};
+
+type PushPreferences = {
+	scopes: PushScope[];
 	quietHours: PushQuietHours;
+	deliveryMode: PushDeliveryMode;
+	pausedUntil?: string | null;
 };
 
 interface PushSubscriptionRecord {
 	id: string;
 	endpoint: string;
-	stateCode: string;
 	subscription: WebPushSubscription;
-	prefs?: PushPreferences;
+	prefs: PushPreferences;
+	indexedStateCodes: string[];
 	createdAt: string;
 	updatedAt: string;
 	userAgent?: string;
 }
 
+type LegacyPushPreferences = {
+	stateCode?: string;
+	deliveryScope?: PushDeliveryScope;
+	countyName?: string | null;
+	countyFips?: string | null;
+	alertTypes?: Partial<PushAlertTypes>;
+	quietHours?: Partial<PushQuietHours>;
+	severeOnly?: boolean;
+	pausedUntil?: string | null;
+};
+
+type LegacyPushSubscriptionRecord = {
+	id?: string;
+	endpoint?: string;
+	stateCode?: string;
+	subscription?: WebPushSubscription;
+	prefs?: LegacyPushPreferences | PushPreferences;
+	indexedStateCodes?: string[];
+	createdAt?: string;
+	updatedAt?: string;
+	userAgent?: string;
+};
+
 type PushStateAlertSnapshot = Record<string, string[]>;
+
+type AlertImpactCategory =
+	| 'tornado'
+	| 'flood'
+	| 'winter'
+	| 'heat'
+	| 'wind'
+	| 'fire'
+	| 'marine'
+	| 'coastal'
+	| 'air_quality'
+	| 'other';
+
+type AlertChangeType = 'new' | 'updated' | 'extended' | 'expired' | 'all_clear';
+
+type AlertChangeRecord = {
+	alertId: string;
+	stateCodes: string[];
+	countyCodes: string[];
+	event: string;
+	areaDesc: string;
+	changedAt: string;
+	changeType: AlertChangeType;
+	severity?: string | null;
+	category?: string | null;
+	isMajor?: boolean;
+	previousExpires?: string | null;
+	nextExpires?: string | null;
+};
+
+type AlertLifecycleSnapshotEntry = {
+	alertId: string;
+	stateCodes: string[];
+	countyCodes: string[];
+	event: string;
+	areaDesc: string;
+	headline: string;
+	description: string;
+	instruction: string;
+	severity: string;
+	urgency: string;
+	certainty: string;
+	updated: string;
+	expires: string;
+	lastChangeType?: Extract<AlertChangeType, 'new' | 'updated' | 'extended'> | null;
+	lastChangedAt?: string | null;
+};
+
+type AlertLifecycleSnapshot = Record<string, AlertLifecycleSnapshotEntry>;
+
+type AlertLifecycleDiffResult = {
+	currentSnapshot: AlertLifecycleSnapshot;
+	changes: AlertChangeRecord[];
+	isInitialSnapshot: boolean;
+};
+
+type AlertHistoryEntry = {
+	alertId: string;
+	stateCodes: string[];
+	countyCodes: string[];
+	event: string;
+	areaDesc: string;
+	changedAt: string;
+	changeType: AlertChangeType;
+	severity: string;
+	category: string;
+	isMajor: boolean;
+	summary: string;
+	previousExpires?: string | null;
+	nextExpires?: string | null;
+};
+
+type AlertHistorySnapshotCounts = {
+	activeAlertCount: number;
+	activeWarningCount: number;
+	activeMajorCount: number;
+};
+
+type AlertHistoryDaySnapshot = {
+	activeAlertCount: number;
+	activeWarningCount: number;
+	activeMajorCount: number;
+	byState: Record<
+		string,
+		AlertHistorySnapshotCounts
+	>;
+	byStateCounty?: Record<string, AlertHistorySnapshotCounts>;
+};
+
+type AlertHistoryDayRecord = {
+	day: string;
+	updatedAt: string;
+	snapshot: AlertHistoryDaySnapshot;
+	entries: AlertHistoryEntry[];
+};
+
+type AlertHistoryByDay = Record<string, AlertHistoryDayRecord>;
+
+type PushFailureDiagnostic = {
+	at: string;
+	stateCode: string;
+	subscriptionId?: string | null;
+	status?: number;
+	message: string;
+};
+
+type OperationalDiagnostics = {
+	lastSyncAttemptAt: string | null;
+	lastSuccessfulSyncAt: string | null;
+	lastSyncError: string | null;
+	lastKnownAlertCount: number;
+	lastStaleDataAt: string | null;
+	lastStaleMinutes: number | null;
+	invalidSubscriptionCount: number;
+	lastInvalidSubscriptionAt: string | null;
+	lastInvalidSubscriptionReason: string | null;
+	pushFailureCount: number;
+	recentPushFailures: PushFailureDiagnostic[];
+};
 
 interface SavedLocation {
 	lat: number;
@@ -238,6 +404,20 @@ function isAuthenticated(request: Request, env: Env): boolean {
 	const token = auth.split('=')[1] || '';
 	const secret = env.ADMIN_PASSWORD || 'liveweather';
 	return token === encodeURIComponent(authToken(secret));
+}
+
+function getDebugSummaryBearerToken(env: Env): string | null {
+	const token = String(env.DEBUG_SUMMARY_BEARER_TOKEN || '').trim();
+	return token || null;
+}
+
+function hasDebugSummaryAccess(request: Request, expectedBearerToken: string): boolean {
+	const authHeader = request.headers.get('Authorization') || request.headers.get('authorization') || '';
+	const match = authHeader.match(/^Bearer\s+(.+)$/i);
+	if (!match) return false;
+	const provided = match[1].trim();
+	if (!provided) return false;
+	return provided === expectedBearerToken;
 }
 
 
@@ -465,6 +645,20 @@ const STATE_CODE_TO_NAME: Record<string, string> = {
 	'DC': 'district-of-columbia'
 };
 
+const STATE_CODE_TO_FIPS: Record<string, string> = {
+	'AL': '01', 'AK': '02', 'AZ': '04', 'AR': '05', 'CA': '06',
+	'CO': '08', 'CT': '09', 'DE': '10', 'DC': '11', 'FL': '12',
+	'GA': '13', 'HI': '15', 'ID': '16', 'IL': '17', 'IN': '18',
+	'IA': '19', 'KS': '20', 'KY': '21', 'LA': '22', 'ME': '23',
+	'MD': '24', 'MA': '25', 'MI': '26', 'MN': '27', 'MS': '28',
+	'MO': '29', 'MT': '30', 'NE': '31', 'NV': '32', 'NH': '33',
+	'NJ': '34', 'NM': '35', 'NY': '36', 'NC': '37', 'ND': '38',
+	'OH': '39', 'OK': '40', 'OR': '41', 'PA': '42', 'RI': '44',
+	'SC': '45', 'SD': '46', 'TN': '47', 'TX': '48', 'UT': '49',
+	'VT': '50', 'VA': '51', 'WA': '53', 'WV': '54', 'WI': '55',
+	'WY': '56'
+};
+
 function slugify(text: string): string {
 	return String(text || '')
 		.trim()
@@ -622,6 +816,234 @@ function stateCodeDisplayName(code: string): string {
 		.join(' ');
 }
 
+const DEFAULT_PUSH_ALERT_TYPES: PushAlertTypes = {
+	warnings: true,
+	watches: true,
+	advisories: false,
+	statements: true,
+};
+
+const DEFAULT_PUSH_QUIET_HOURS: PushQuietHours = {
+	enabled: false,
+	start: '22:00',
+	end: '06:00',
+};
+
+const NOTIFICATION_ICON_PATH = '/notification-icon-192.png';
+const NOTIFICATION_BADGE_PATH = '/notification-badge-72.png';
+
+function normalizeCountyFips(input: unknown): string | null {
+	const digits = String(input ?? '').replace(/\D/g, '');
+	if (!digits) return null;
+	return digits.padStart(3, '0').slice(-3);
+}
+
+function normalizeCountyName(input: unknown): string | null {
+	const value = String(input ?? '').trim();
+	return value ? value : null;
+}
+
+function normalizePushAlertTypes(input: unknown): PushAlertTypes {
+	const value = input as Record<string, unknown> | null;
+	return {
+		warnings: value?.warnings !== false,
+		watches: value?.watches !== false,
+		advisories: value?.advisories === true,
+		statements: value?.statements !== false,
+	};
+}
+
+function normalizeQuietHourTime(input: unknown, fallback: string): string {
+	const value = String(input ?? '').trim();
+	if (!/^\d{2}:\d{2}$/.test(value)) return fallback;
+	const [hours, minutes] = value.split(':').map((part) => Number(part));
+	if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return fallback;
+	if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return fallback;
+	return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function normalizePushQuietHours(input: unknown): PushQuietHours {
+	const value = input as Record<string, unknown> | null;
+	return {
+		enabled: value?.enabled === true,
+		start: normalizeQuietHourTime(value?.start, DEFAULT_PUSH_QUIET_HOURS.start),
+		end: normalizeQuietHourTime(value?.end, DEFAULT_PUSH_QUIET_HOURS.end),
+	};
+}
+
+function createPushScopeId(
+	stateCode: string,
+	deliveryScope: PushDeliveryScope,
+	countyFips: string | null,
+	indexHint: number,
+): string {
+	const suffix =
+		deliveryScope === 'county'
+			? countyFips || `county-${indexHint + 1}`
+			: `state-${indexHint + 1}`;
+	return `${stateCode}-${deliveryScope}-${suffix}`;
+}
+
+function normalizePushScope(
+	input: unknown,
+	fallbackStateCode: string,
+	indexHint: number,
+): PushScope | null {
+	const value = input as Record<string, unknown> | null;
+	if (!value || typeof value !== 'object') return null;
+
+	const stateCode = normalizeStateCode(value.stateCode) || normalizeStateCode(fallbackStateCode);
+	if (!stateCode) return null;
+
+	const requestedDeliveryScope =
+		value.deliveryScope === 'county' ? 'county' : 'state';
+	const countyFips = normalizeCountyFips(value.countyFips);
+	const countyName = normalizeCountyName(value.countyName);
+
+	const deliveryScope: PushDeliveryScope =
+		requestedDeliveryScope === 'county' && (countyFips || countyName)
+			? 'county'
+			: 'state';
+	const scopeId =
+		String(value.id ?? '').trim() ||
+		createPushScopeId(stateCode, deliveryScope, countyFips, indexHint);
+	const placeIdValue = String(value.placeId ?? '').trim();
+	const placeId = placeIdValue ? placeIdValue : null;
+	const fallbackLabel =
+		deliveryScope === 'county'
+			? `${stateCode} ${countyName || `County ${countyFips || ''}`.trim()}`.trim()
+			: `${stateCode} Alerts`;
+	const scopeLabel = String(value.label ?? '').trim() || fallbackLabel;
+
+	return {
+		id: scopeId,
+		placeId,
+		label: scopeLabel,
+		stateCode,
+		deliveryScope,
+		countyName,
+		countyFips,
+		enabled: value.enabled !== false,
+		alertTypes: normalizePushAlertTypes(value.alertTypes),
+		severeOnly: value.severeOnly === true,
+	};
+}
+
+function createDefaultPushScope(stateCode: string): PushScope {
+	return {
+		id: `${stateCode}-state-default`,
+		placeId: null,
+		label: `${stateCode} Alerts`,
+		stateCode,
+		deliveryScope: 'state',
+		countyName: null,
+		countyFips: null,
+		enabled: true,
+		alertTypes: { ...DEFAULT_PUSH_ALERT_TYPES },
+		severeOnly: false,
+	};
+}
+
+function defaultPushPreferences(stateCode: string): PushPreferences {
+	const normalizedState = normalizeStateCode(stateCode) || 'KY';
+	return {
+		scopes: [createDefaultPushScope(normalizedState)],
+		quietHours: { ...DEFAULT_PUSH_QUIET_HOURS },
+		deliveryMode: 'immediate',
+		pausedUntil: null,
+	};
+}
+
+function normalizePushPreferences(
+	input: unknown,
+	fallbackStateCode: string,
+): PushPreferences {
+	const fallback = defaultPushPreferences(fallbackStateCode);
+	const value = input as Record<string, unknown> | null;
+	if (!value || typeof value !== 'object') {
+		return fallback;
+	}
+
+	const scopesInput = Array.isArray(value.scopes) ? value.scopes : [];
+	let scopes = scopesInput
+		.map((scope, index) => normalizePushScope(scope, fallbackStateCode, index))
+		.filter((scope): scope is PushScope => !!scope);
+
+	if (scopes.length === 0) {
+		const legacyState = normalizeStateCode(
+			(value as LegacyPushPreferences).stateCode || fallbackStateCode,
+		);
+		if (legacyState) {
+			const legacy = value as LegacyPushPreferences;
+			const legacyDeliveryScope =
+				legacy.deliveryScope === 'county' ? 'county' : 'state';
+			const legacyCountyFips = normalizeCountyFips(legacy.countyFips);
+			const legacyCountyName = normalizeCountyName(legacy.countyName);
+			const deliveryScope: PushDeliveryScope =
+				legacyDeliveryScope === 'county' && (legacyCountyFips || legacyCountyName)
+					? 'county'
+					: 'state';
+
+			scopes = [
+				{
+					...createDefaultPushScope(legacyState),
+					id: createPushScopeId(legacyState, deliveryScope, legacyCountyFips, 0),
+					label:
+						deliveryScope === 'county'
+							? `${legacyState} ${legacyCountyName || `County ${legacyCountyFips || ''}`.trim()}`.trim()
+							: `${legacyState} Alerts`,
+					deliveryScope,
+					countyName: legacyCountyName,
+					countyFips: legacyCountyFips,
+					alertTypes: normalizePushAlertTypes(legacy.alertTypes),
+					severeOnly: legacy.severeOnly === true,
+				},
+			];
+		}
+	}
+
+	if (scopes.length === 0) {
+		scopes = fallback.scopes;
+	}
+
+	const seenScopeIds = new Set<string>();
+	const dedupedScopes = scopes.filter((scope) => {
+		const key = scope.id;
+		if (seenScopeIds.has(key)) return false;
+		seenScopeIds.add(key);
+		return true;
+	});
+
+	const pausedUntilValue = String(value.pausedUntil ?? '').trim();
+	const pausedUntil = pausedUntilValue ? pausedUntilValue : null;
+
+	return {
+		scopes: dedupedScopes,
+		quietHours: normalizePushQuietHours(value.quietHours),
+		deliveryMode: value.deliveryMode === 'digest' ? 'digest' : 'immediate',
+		pausedUntil,
+	};
+}
+
+function indexedStateCodesFromPreferences(prefs: PushPreferences): string[] {
+	const states = prefs.scopes
+		.filter((scope) => scope.enabled)
+		.map((scope) => normalizeStateCode(scope.stateCode))
+		.filter((code): code is string => !!code);
+	return dedupeStrings(states);
+}
+
+function firstStateCodeFromPreferences(prefs: PushPreferences): string | null {
+	const firstEnabled = prefs.scopes.find(
+		(scope) => scope.enabled && normalizeStateCode(scope.stateCode),
+	);
+	if (firstEnabled) return normalizeStateCode(firstEnabled.stateCode);
+
+	const firstAny = prefs.scopes.find((scope) => normalizeStateCode(scope.stateCode));
+	if (firstAny) return normalizeStateCode(firstAny.stateCode);
+	return null;
+}
+
 function pushSubKey(subscriptionId: string): string {
 	return `${KV_PUSH_SUB_PREFIX}${subscriptionId}`;
 }
@@ -698,33 +1120,48 @@ async function readPushSubscriptionRecordById(env: Env, subscriptionId: string):
 	try {
 		const raw = await env.WEATHER_KV.get(pushSubKey(subscriptionId));
 		if (!raw) return null;
-		const parsed = JSON.parse(raw) as PushSubscriptionRecord;
-		if (!parsed?.id || !parsed?.endpoint || !parsed?.stateCode) return null;
-		if (!isValidPushSubscription(parsed.subscription)) return null;
-		return parsed;
+		const parsed = JSON.parse(raw) as LegacyPushSubscriptionRecord;
+		if (!parsed || typeof parsed !== 'object') return null;
+
+		const id = String(parsed.id || '').trim();
+		const endpoint = String(parsed.endpoint || '').trim();
+		const subscription = parsed.subscription;
+		if (!id || !endpoint || !isValidPushSubscription(subscription)) return null;
+
+		const fallbackStateCode =
+			normalizeStateCode(parsed.stateCode)
+			|| normalizeStateCode(parsed.indexedStateCodes?.[0])
+			|| 'KY';
+		const prefs = normalizePushPreferences(parsed.prefs, fallbackStateCode);
+		const indexedFromRecord = Array.isArray(parsed.indexedStateCodes)
+			? dedupeStrings(
+				parsed.indexedStateCodes
+					.map((value) => normalizeStateCode(value))
+					.filter((value): value is string => !!value),
+			)
+			: [];
+		const indexedStateCodes =
+			indexedFromRecord.length > 0
+				? indexedFromRecord
+				: indexedStateCodesFromPreferences(prefs);
+
+		const createdAt = String(parsed.createdAt || '').trim() || new Date().toISOString();
+		const updatedAt = String(parsed.updatedAt || '').trim() || createdAt;
+		const userAgent = String(parsed.userAgent || '').slice(0, 300);
+
+		return {
+			id,
+			endpoint,
+			subscription,
+			prefs,
+			indexedStateCodes,
+			createdAt,
+			updatedAt,
+			userAgent: userAgent || undefined,
+		};
 	} catch {
 		return null;
 	}
-}
-
-function defaultPushPreferences(stateCode: string): PushPreferences {
-	return {
-		stateCode,
-		deliveryScope: 'state',
-		countyName: null,
-		countyFips: null,
-		alertTypes: {
-			warnings: true,
-			watches: true,
-			advisories: false,
-			statements: true,
-		},
-		quietHours: {
-			enabled: false,
-			start: '22:00',
-			end: '06:00',
-		},
-	};
 }
 
 function classifyAlertType(event: string): keyof PushAlertTypes {
@@ -735,9 +1172,9 @@ function classifyAlertType(event: string): keyof PushAlertTypes {
 	return 'statements';
 }
 
-function alertMatchesTypePrefs(event: string, prefs: PushPreferences): boolean {
+function alertMatchesTypePrefs(event: string, alertTypes: PushAlertTypes): boolean {
 	const bucket = classifyAlertType(event);
-	return !!prefs.alertTypes[bucket];
+	return !!alertTypes[bucket];
 }
 
 function timeStringToMinutes(value: string): number {
@@ -755,41 +1192,191 @@ function isWithinQuietHours(now: Date, prefs: PushPreferences): boolean {
 	return current >= start || current < end;
 }
 
-function alertBypassesQuietHours(event: string): boolean {
+function alertBypassesQuietHours(feature: any): boolean {
+	const event = String(feature?.properties?.event || '');
 	const text = String(event || '').toLowerCase();
-	return text.includes('tornado warning') || text.includes('severe thunderstorm warning');
+	if (
+		text.includes('tornado warning')
+		|| text.includes('severe thunderstorm warning')
+		|| text.includes('flash flood warning')
+	) {
+		return true;
+	}
+	const severity = String(feature?.properties?.severity || '').toLowerCase();
+	return text.includes('warning') && severity === 'extreme';
 }
 
-function alertMatchesCountyPrefs(feature: any, prefs: PushPreferences): boolean {
-	if (prefs.deliveryScope !== 'county') return true;
-	const areaDesc = String(feature?.properties?.areaDesc || '').toLowerCase();
-	const countyName = String(prefs.countyName || '').trim().toLowerCase();
+function isDeliveryPaused(prefs: PushPreferences, now: Date): boolean {
+	if (!prefs.pausedUntil) return false;
+	const pausedUntilMs = Date.parse(prefs.pausedUntil);
+	return Number.isFinite(pausedUntilMs) && pausedUntilMs > now.getTime();
+}
+
+function cleanCountyToken(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9\s]/g, ' ')
+		.replace(/\b(county|counties|parish|parishes|borough|city)\b/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+function extractCountyUgcCodes(feature: any): string[] {
+	const ugcCodes = Array.isArray(feature?.properties?.geocode?.UGC)
+		? feature.properties.geocode.UGC
+		: [];
+	return dedupeStrings(
+		ugcCodes
+			.map((value: unknown) => String(value || '').trim().toUpperCase())
+			.filter((value: string) => /^[A-Z]{2}C\d{3}$/.test(value)),
+	);
+}
+
+function extractCountyFipsFromSameCodes(
+	feature: any,
+	stateCodeInput?: string | null,
+): string[] {
+	const expectedStateCode = normalizeStateCode(stateCodeInput || '');
+	const expectedStateFips = expectedStateCode
+		? STATE_CODE_TO_FIPS[expectedStateCode] || null
+		: null;
+	const sameCodes = Array.isArray(feature?.properties?.geocode?.SAME)
+		? feature.properties.geocode.SAME
+		: [];
+
+	return dedupeStrings(
+		sameCodes
+			.map((value: unknown) => String(value || '').replace(/\D/g, ''))
+			.map((digits: string) => (digits.length >= 5 ? digits.slice(-5) : ''))
+			.filter((digits: string) => /^\d{5}$/.test(digits))
+			.filter((digits: string) =>
+				expectedStateFips ? digits.slice(0, 2) === expectedStateFips : true,
+			)
+			.map((digits: string) => digits.slice(-3))
+			.filter((digits: string) => /^\d{3}$/.test(digits)),
+	);
+}
+
+function extractCountyFipsCodesForState(feature: any, stateCodeInput: string): string[] {
+	const stateCode = normalizeStateCode(stateCodeInput);
+	if (!stateCode) return [];
+	const fromUgc = extractCountyUgcCodes(feature)
+		.filter((ugcCode) => ugcCode.startsWith(`${stateCode}C`))
+		.map((ugcCode) => ugcCode.slice(-3))
+		.filter((countyCode) => /^\d{3}$/.test(countyCode));
+	const fromSame = extractCountyFipsFromSameCodes(feature, stateCode);
+	return dedupeStrings([...fromUgc, ...fromSame]).sort();
+}
+
+function alertMatchesScopeCounty(feature: any, scope: PushScope): boolean {
+	if (scope.deliveryScope !== 'county') return true;
+
+	const stateCode = normalizeStateCode(scope.stateCode);
+	if (!stateCode) return false;
+
+	const countyFipsCodes = extractCountyFipsCodesForState(feature, stateCode);
+	const countyFips = normalizeCountyFips(scope.countyFips);
+	if (countyFips) {
+		if (countyFipsCodes.includes(countyFips)) return true;
+	}
+
+	const countyName = cleanCountyToken(String(scope.countyName || ''));
 	if (!countyName) return false;
-	return areaDesc.includes(countyName);
+
+	const areaDesc = String(feature?.properties?.areaDesc || '');
+	const areaTokens = areaDesc
+		.split(/[;,]/)
+		.map((part) => cleanCountyToken(part))
+		.filter(Boolean);
+
+	if (
+		areaTokens.some(
+			(token) =>
+				token === countyName
+				|| token.includes(countyName)
+				|| countyName.includes(token),
+		)
+	) {
+		return true;
+	}
+
+	return cleanCountyToken(areaDesc).includes(countyName);
+}
+
+function alertMatchesSevereOnly(feature: any): boolean {
+	const event = String(feature?.properties?.event || '').toLowerCase();
+	const severity = String(feature?.properties?.severity || '').toLowerCase();
+	if (!event.includes('warning')) return false;
+	if (severity === 'severe' || severity === 'extreme') return true;
+	return (
+		event.includes('tornado')
+		|| event.includes('severe thunderstorm')
+		|| event.includes('flash flood')
+		|| event.includes('hurricane')
+		|| event.includes('blizzard')
+	);
+}
+
+function featureMatchesScope(feature: any, stateCode: string, scope: PushScope): boolean {
+	if (!scope.enabled) return false;
+	if (normalizeStateCode(scope.stateCode) !== stateCode) return false;
+	const event = String(feature?.properties?.event || '');
+	if (!alertMatchesTypePrefs(event, scope.alertTypes)) return false;
+	if (scope.severeOnly && !alertMatchesSevereOnly(feature)) return false;
+	if (!alertMatchesScopeCounty(feature, scope)) return false;
+	return true;
 }
 
 async function upsertPushSubscriptionRecord(
 	env: Env,
 	subscription: WebPushSubscription,
-	stateCode: string,
 	userAgent?: string,
-	prefs?: PushPreferences,
+	stateCodeInput?: string,
+	prefsInput?: unknown,
 ): Promise<PushSubscriptionRecord> {
 	const nowIso = new Date().toISOString();
 	const subscriptionId = await sha256Hex(subscription.endpoint);
 	const existing = await readPushSubscriptionRecordById(env, subscriptionId);
-	const normalizedState = normalizeStateCode(stateCode) || stateCode;
+	const requestedStateCode = normalizeStateCode(stateCodeInput);
+	const existingPrimaryState =
+		existing ? firstStateCodeFromPreferences(existing.prefs) : null;
+	const fallbackStateCode =
+		requestedStateCode
+		|| existingPrimaryState
+		|| 'KY';
 
-	const nextPrefs = prefs
-		? { ...defaultPushPreferences(normalizedState), ...prefs, stateCode: normalizedState }
-		: existing?.prefs || defaultPushPreferences(normalizedState);
+	let nextPrefs: PushPreferences;
+	if (prefsInput && typeof prefsInput === 'object') {
+		nextPrefs = normalizePushPreferences(prefsInput, fallbackStateCode);
+	} else if (requestedStateCode) {
+		const baseline = existing?.prefs || defaultPushPreferences(requestedStateCode);
+		const templateScope = baseline.scopes[0] || createDefaultPushScope(requestedStateCode);
+		const migratedScope: PushScope = {
+			...templateScope,
+			id: `${requestedStateCode}-state-updated`,
+			label: `${requestedStateCode} Alerts`,
+			stateCode: requestedStateCode,
+			deliveryScope: 'state',
+			countyName: null,
+			countyFips: null,
+			enabled: true,
+		};
+		nextPrefs = {
+			...baseline,
+			scopes: [migratedScope],
+		};
+	} else {
+		nextPrefs = existing?.prefs || defaultPushPreferences(fallbackStateCode);
+	}
+	const indexedStateCodes = indexedStateCodesFromPreferences(nextPrefs);
 
 	const record: PushSubscriptionRecord = {
 		id: subscriptionId,
 		endpoint: subscription.endpoint,
-		stateCode: normalizedState,
 		subscription,
 		prefs: nextPrefs,
+		indexedStateCodes,
 		createdAt: existing?.createdAt || nowIso,
 		updatedAt: nowIso,
 		userAgent: String(userAgent || existing?.userAgent || '').slice(0, 300),
@@ -797,10 +1384,26 @@ async function upsertPushSubscriptionRecord(
 
 	await env.WEATHER_KV.put(pushSubKey(subscriptionId), JSON.stringify(record));
 
-	if (existing?.stateCode && existing.stateCode !== normalizedState) {
-		await removePushIdFromStateIndex(env, existing.stateCode, subscriptionId);
+	const previousIndexedStateCodes = existing?.indexedStateCodes || [];
+	const allKnownStateCodes = dedupeStrings([
+		...Object.keys(STATE_CODE_TO_NAME),
+		...previousIndexedStateCodes,
+		...indexedStateCodes,
+	]);
+
+	for (const stateCode of allKnownStateCodes) {
+		const shouldBeIndexed = indexedStateCodes.includes(stateCode);
+		const currentlyIndexed = (await readPushStateIndex(env, stateCode)).includes(
+			subscriptionId,
+		);
+		if (shouldBeIndexed && !currentlyIndexed) {
+			await addPushIdToStateIndex(env, stateCode, subscriptionId);
+			continue;
+		}
+		if (!shouldBeIndexed && currentlyIndexed) {
+			await removePushIdFromStateIndex(env, stateCode, subscriptionId);
+		}
 	}
-	await addPushIdToStateIndex(env, normalizedState, subscriptionId);
 
 	return record;
 }
@@ -813,7 +1416,9 @@ async function removePushSubscriptionById(env: Env, subscriptionId: string): Pro
 	}
 	await Promise.all([
 		env.WEATHER_KV.delete(pushSubKey(subscriptionId)),
-		removePushIdFromStateIndex(env, existing.stateCode, subscriptionId),
+		...existing.indexedStateCodes.map((stateCode) =>
+			removePushIdFromStateIndex(env, stateCode, subscriptionId),
+		),
 	]);
 	return true;
 }
@@ -840,18 +1445,85 @@ function buildStateAlertSnapshot(map: Record<string, any>): PushStateAlertSnapsh
 	return snapshot;
 }
 
-async function readPushStateAlertSnapshot(env: Env): Promise<PushStateAlertSnapshot | null> {
+async function writePushStateAlertSnapshot(env: Env, snapshot: PushStateAlertSnapshot): Promise<void> {
+	await env.WEATHER_KV.put(KV_PUSH_STATE_ALERT_SNAPSHOT, JSON.stringify(snapshot));
+}
+
+function extractCountyFipsCodes(feature: any): string[] {
+	const fromUgc = extractCountyUgcCodes(feature)
+		.map((ugc) => String(ugc).slice(-3))
+		.filter((value) => /^\d{3}$/.test(value));
+	const fromSame = extractCountyFipsFromSameCodes(feature);
+	return dedupeStrings(
+		[...fromUgc, ...fromSame],
+	).sort();
+}
+
+function normalizeIsoTimestamp(value: unknown): string {
+	const text = String(value || '').trim();
+	const parsed = Date.parse(text);
+	if (!Number.isFinite(parsed)) return '';
+	return new Date(parsed).toISOString();
+}
+
+function normalizeAlertLifecycleSnapshotEntry(value: unknown): AlertLifecycleSnapshotEntry | null {
+	const entry = value as Record<string, unknown> | null;
+	if (!entry || typeof entry !== 'object') return null;
+
+	const alertId = String(entry.alertId || '').trim();
+	if (!alertId) return null;
+
+	const stateCodes = Array.isArray(entry.stateCodes)
+		? dedupeStrings(entry.stateCodes.map((state) => String(state).trim().toUpperCase())).sort()
+		: [];
+	const countyCodes = Array.isArray(entry.countyCodes)
+		? dedupeStrings(
+			entry.countyCodes
+				.map((countyCode) => String(countyCode).replace(/\D/g, '').padStart(3, '0').slice(-3))
+				.filter((countyCode) => /^\d{3}$/.test(countyCode)),
+		).sort()
+		: [];
+
+	const normalizedLastChangeType = String(entry.lastChangeType || '').trim().toLowerCase();
+	const lastChangeType =
+		normalizedLastChangeType === 'new'
+		|| normalizedLastChangeType === 'updated'
+		|| normalizedLastChangeType === 'extended'
+			? normalizedLastChangeType
+			: null;
+
+	const lastChangedAt = normalizeIsoTimestamp(entry.lastChangedAt);
+
+	return {
+		alertId,
+		stateCodes,
+		countyCodes,
+		event: String(entry.event || ''),
+		areaDesc: String(entry.areaDesc || ''),
+		headline: String(entry.headline || ''),
+		description: String(entry.description || ''),
+		instruction: String(entry.instruction || ''),
+		severity: String(entry.severity || ''),
+		urgency: String(entry.urgency || ''),
+		certainty: String(entry.certainty || ''),
+		updated: String(entry.updated || ''),
+		expires: String(entry.expires || ''),
+		lastChangeType,
+		lastChangedAt: lastChangedAt || null,
+	};
+}
+
+async function readAlertLifecycleSnapshot(env: Env): Promise<AlertLifecycleSnapshot | null> {
 	try {
-		const raw = await env.WEATHER_KV.get(KV_PUSH_STATE_ALERT_SNAPSHOT);
+		const raw = await env.WEATHER_KV.get(KV_ALERT_LIFECYCLE_SNAPSHOT);
 		if (!raw) return null;
 		const parsed = JSON.parse(raw);
 		if (!parsed || typeof parsed !== 'object') return null;
-		const snapshot: PushStateAlertSnapshot = {};
-		for (const [stateCode, ids] of Object.entries(parsed as Record<string, unknown>)) {
-			if (!Array.isArray(ids)) continue;
-			const normalized = normalizeStateCode(stateCode);
+		const snapshot: AlertLifecycleSnapshot = {};
+		for (const [alertId, value] of Object.entries(parsed as Record<string, unknown>)) {
+			const normalized = normalizeAlertLifecycleSnapshotEntry(value);
 			if (!normalized) continue;
-			snapshot[normalized] = dedupeStrings(ids.map((id) => String(id))).sort();
+			snapshot[String(alertId)] = normalized;
 		}
 		return snapshot;
 	} catch {
@@ -859,8 +1531,838 @@ async function readPushStateAlertSnapshot(env: Env): Promise<PushStateAlertSnaps
 	}
 }
 
-async function writePushStateAlertSnapshot(env: Env, snapshot: PushStateAlertSnapshot): Promise<void> {
-	await env.WEATHER_KV.put(KV_PUSH_STATE_ALERT_SNAPSHOT, JSON.stringify(snapshot));
+async function writeAlertLifecycleSnapshot(env: Env, snapshot: AlertLifecycleSnapshot): Promise<void> {
+	await env.WEATHER_KV.put(KV_ALERT_LIFECYCLE_SNAPSHOT, JSON.stringify(snapshot));
+}
+
+function normalizeAlertChangeType(value: unknown): AlertChangeType | null {
+	const normalized = String(value || '').trim().toLowerCase();
+	if (
+		normalized === 'new'
+		|| normalized === 'updated'
+		|| normalized === 'extended'
+		|| normalized === 'expired'
+		|| normalized === 'all_clear'
+	) {
+		return normalized;
+	}
+	return null;
+}
+
+function normalizeAlertChangeRecord(value: unknown): AlertChangeRecord | null {
+	const record = value as Record<string, unknown> | null;
+	if (!record || typeof record !== 'object') return null;
+
+	const changeType = normalizeAlertChangeType(record.changeType);
+	const alertId = String(record.alertId || '').trim();
+	const changedAt = normalizeIsoTimestamp(record.changedAt);
+	if (!changeType || !alertId || !changedAt) return null;
+
+	const stateCodes = Array.isArray(record.stateCodes)
+		? dedupeStrings(
+			record.stateCodes
+				.map((stateCode) => normalizeStateCode(stateCode))
+				.filter((stateCode): stateCode is string => !!stateCode),
+		).sort()
+		: [];
+	const countyCodes = Array.isArray(record.countyCodes)
+		? dedupeStrings(
+			record.countyCodes
+				.map((countyCode) =>
+					String(countyCode).replace(/\D/g, '').padStart(3, '0').slice(-3),
+				)
+				.filter((countyCode) => /^\d{3}$/.test(countyCode)),
+		).sort()
+		: [];
+
+	return {
+		alertId,
+		stateCodes,
+		countyCodes,
+		event: String(record.event || ''),
+		areaDesc: String(record.areaDesc || ''),
+		changedAt,
+		changeType,
+		severity: String(record.severity || '').trim() || null,
+		category: String(record.category || '').trim() || null,
+		isMajor: record.isMajor === true,
+		previousExpires: record.previousExpires ? String(record.previousExpires) : null,
+		nextExpires: record.nextExpires ? String(record.nextExpires) : null,
+	};
+}
+
+async function readAlertChangeRecords(env: Env): Promise<AlertChangeRecord[]> {
+	try {
+		const raw = await env.WEATHER_KV.get(KV_ALERT_CHANGES);
+		if (!raw) return [];
+		const parsed = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return parsed
+			.map((record) => normalizeAlertChangeRecord(record))
+			.filter((record): record is AlertChangeRecord => !!record)
+			.sort((a, b) => Date.parse(b.changedAt) - Date.parse(a.changedAt));
+	} catch {
+		return [];
+	}
+}
+
+async function appendAlertChangeRecords(env: Env, changes: AlertChangeRecord[]): Promise<void> {
+	if (changes.length === 0) return;
+	const existing = await readAlertChangeRecords(env);
+	const merged = [...changes, ...existing];
+	const deduped = new Map<string, AlertChangeRecord>();
+	for (const record of merged) {
+		const key = `${record.alertId}|${record.changeType}|${record.changedAt}`;
+		if (!deduped.has(key)) {
+			deduped.set(key, record);
+		}
+	}
+	const sorted = Array.from(deduped.values()).sort(
+		(a, b) => Date.parse(b.changedAt) - Date.parse(a.changedAt),
+	);
+	const retentionWindowMs = 7 * 24 * 60 * 60 * 1000;
+	const nowMs = Date.now();
+	const trimmed = sorted
+		.filter((record) => {
+			const changedAtMs = Date.parse(record.changedAt);
+			if (!Number.isFinite(changedAtMs)) return false;
+			return nowMs - changedAtMs <= retentionWindowMs;
+		})
+		.slice(0, 1200);
+	await env.WEATHER_KV.put(KV_ALERT_CHANGES, JSON.stringify(trimmed));
+}
+
+function dayKeyFromTimestampMs(timestampMs: number): string {
+	return new Date(timestampMs).toISOString().slice(0, 10);
+}
+
+function dayKeyFromIso(value: string): string | null {
+	const parsed = Date.parse(String(value || '').trim());
+	if (!Number.isFinite(parsed)) return null;
+	return dayKeyFromTimestampMs(parsed);
+}
+
+function normalizeAlertHistorySnapshotCount(value: unknown): number {
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+}
+
+function createEmptyAlertHistorySnapshotCounts(): AlertHistorySnapshotCounts {
+	return {
+		activeAlertCount: 0,
+		activeWarningCount: 0,
+		activeMajorCount: 0,
+	};
+}
+
+function normalizeAlertHistorySnapshotCounts(value: unknown): AlertHistorySnapshotCounts {
+	const counts = value as Record<string, unknown> | null;
+	return {
+		activeAlertCount: normalizeAlertHistorySnapshotCount(counts?.activeAlertCount),
+		activeWarningCount: normalizeAlertHistorySnapshotCount(counts?.activeWarningCount),
+		activeMajorCount: normalizeAlertHistorySnapshotCount(counts?.activeMajorCount),
+	};
+}
+
+function addAlertHistorySnapshotCounts(
+	target: AlertHistorySnapshotCounts,
+	source: AlertHistorySnapshotCounts,
+): void {
+	target.activeAlertCount += source.activeAlertCount;
+	target.activeWarningCount += source.activeWarningCount;
+	target.activeMajorCount += source.activeMajorCount;
+}
+
+function buildStateCountySnapshotKey(stateCode: string, countyCode: string): string {
+	return `${stateCode}:${countyCode}`;
+}
+
+function parseStateCountySnapshotKey(
+	value: unknown,
+): { stateCode: string; countyCode: string } | null {
+	const raw = String(value || '').trim().toUpperCase();
+	if (!raw) return null;
+
+	const splitMatch = raw.match(/^([A-Z]{2})[:|](\d{3})$/);
+	if (splitMatch) {
+		const stateCode = normalizeStateCode(splitMatch[1]);
+		const countyCode = normalizeCountyFips(splitMatch[2]);
+		if (!stateCode || !countyCode) return null;
+		return { stateCode, countyCode };
+	}
+
+	const compactMatch = raw.match(/^([A-Z]{2})(\d{3})$/);
+	if (!compactMatch) return null;
+	const stateCode = normalizeStateCode(compactMatch[1]);
+	const countyCode = normalizeCountyFips(compactMatch[2]);
+	if (!stateCode || !countyCode) return null;
+	return { stateCode, countyCode };
+}
+
+function readAlertHistorySnapshotCountsByCounty(
+	snapshot: AlertHistoryDaySnapshot,
+	countyCodeInput: string,
+	stateCodeInput?: string | null,
+): AlertHistorySnapshotCounts | null {
+	const countyCode = normalizeCountyFips(countyCodeInput);
+	if (!countyCode) return null;
+	const stateCode = normalizeStateCode(stateCodeInput || '');
+	const byStateCounty = snapshot.byStateCounty || {};
+
+	if (stateCode) {
+		const directMatch = byStateCounty[buildStateCountySnapshotKey(stateCode, countyCode)];
+		return directMatch ? normalizeAlertHistorySnapshotCounts(directMatch) : null;
+	}
+
+	let matched = false;
+	const totals = createEmptyAlertHistorySnapshotCounts();
+	for (const [key, value] of Object.entries(byStateCounty)) {
+		const parsedKey = parseStateCountySnapshotKey(key);
+		if (!parsedKey || parsedKey.countyCode !== countyCode) continue;
+		matched = true;
+		addAlertHistorySnapshotCounts(
+			totals,
+			normalizeAlertHistorySnapshotCounts(value),
+		);
+	}
+	return matched ? totals : null;
+}
+
+function summarizeAlertHistoryEntriesAsSnapshot(
+	entries: AlertHistoryEntry[],
+): AlertHistorySnapshotCounts {
+	const latestByAlertId = new Map<string, AlertHistoryEntry>();
+	for (const entry of entries) {
+		const alertId = String(entry.alertId || '').trim();
+		if (!alertId || alertId.toLowerCase().startsWith('all-clear:')) continue;
+		const existing = latestByAlertId.get(alertId);
+		const changedAtMs = Date.parse(entry.changedAt);
+		const existingChangedAtMs = existing ? Date.parse(existing.changedAt) : NaN;
+		if (
+			!existing
+			|| (
+				Number.isFinite(changedAtMs)
+				&& (
+					!Number.isFinite(existingChangedAtMs)
+					|| changedAtMs > existingChangedAtMs
+				)
+			)
+		) {
+			latestByAlertId.set(alertId, entry);
+		}
+	}
+
+	const counts = createEmptyAlertHistorySnapshotCounts();
+	for (const entry of latestByAlertId.values()) {
+		counts.activeAlertCount += 1;
+		const category = String(entry.category || '').trim().toLowerCase()
+			|| classifyAlertCategoryFromEvent(entry.event);
+		if (category === 'warning') {
+			counts.activeWarningCount += 1;
+		}
+		if (entry.isMajor === true) {
+			counts.activeMajorCount += 1;
+		}
+	}
+	return counts;
+}
+
+function normalizeAlertHistoryDaySnapshot(value: unknown): AlertHistoryDaySnapshot {
+	const snapshot = value as Record<string, unknown> | null;
+	const byStateRaw = snapshot?.byState as Record<string, unknown> | undefined;
+	const byState: AlertHistoryDaySnapshot['byState'] = {};
+	if (byStateRaw && typeof byStateRaw === 'object') {
+		for (const [stateCode, stateValue] of Object.entries(byStateRaw)) {
+			const normalizedStateCode = normalizeStateCode(stateCode);
+			if (!normalizedStateCode) continue;
+			byState[normalizedStateCode] = normalizeAlertHistorySnapshotCounts(stateValue);
+		}
+	}
+
+	const byStateCountyRaw = snapshot?.byStateCounty as Record<string, unknown> | undefined;
+	const byStateCounty: Record<string, AlertHistorySnapshotCounts> = {};
+	if (byStateCountyRaw && typeof byStateCountyRaw === 'object') {
+		for (const [stateCountyKey, stateCountyValue] of Object.entries(byStateCountyRaw)) {
+			const parsedKey = parseStateCountySnapshotKey(stateCountyKey);
+			if (!parsedKey) continue;
+			byStateCounty[
+				buildStateCountySnapshotKey(parsedKey.stateCode, parsedKey.countyCode)
+			] = normalizeAlertHistorySnapshotCounts(stateCountyValue);
+		}
+	}
+
+	const rootCounts = normalizeAlertHistorySnapshotCounts(snapshot);
+	return {
+		activeAlertCount: rootCounts.activeAlertCount,
+		activeWarningCount: rootCounts.activeWarningCount,
+		activeMajorCount: rootCounts.activeMajorCount,
+		byState,
+		byStateCounty,
+	};
+}
+
+function createHistoryDaySnapshotFromMap(map: Record<string, any>): AlertHistoryDaySnapshot {
+	let activeAlertCount = 0;
+	let activeWarningCount = 0;
+	let activeMajorCount = 0;
+	const byState: AlertHistoryDaySnapshot['byState'] = {};
+	const byStateCounty: Record<string, AlertHistorySnapshotCounts> = {};
+
+	for (const feature of Object.values(map)) {
+		activeAlertCount += 1;
+		const properties = feature?.properties ?? {};
+		const event = String(properties.event || '');
+		const severity = String(properties.severity || '');
+		const headline = String(properties.headline || '');
+		const description = String(properties.description || '');
+		const category = classifyAlertCategoryFromEvent(event);
+		const stateCodes = extractStateCodes(feature);
+		const countyCodesByState = new Map<string, string[]>();
+		for (const stateCode of stateCodes) {
+			const countyCodesForState = extractCountyFipsCodesForState(feature, stateCode);
+			countyCodesByState.set(stateCode, countyCodesForState);
+			if (!byState[stateCode]) {
+				byState[stateCode] = createEmptyAlertHistorySnapshotCounts();
+			}
+			byState[stateCode].activeAlertCount += 1;
+			for (const countyCode of countyCodesForState) {
+				const stateCountyKey = buildStateCountySnapshotKey(stateCode, countyCode);
+				if (!byStateCounty[stateCountyKey]) {
+					byStateCounty[stateCountyKey] = createEmptyAlertHistorySnapshotCounts();
+				}
+				byStateCounty[stateCountyKey].activeAlertCount += 1;
+			}
+		}
+
+		if (category === 'warning') {
+			activeWarningCount += 1;
+			for (const stateCode of stateCodes) {
+				if (byState[stateCode]) {
+					byState[stateCode].activeWarningCount += 1;
+				}
+			}
+			for (const stateCode of stateCodes) {
+				const countyCodesForState = countyCodesByState.get(stateCode) || [];
+				for (const countyCode of countyCodesForState) {
+					const stateCountyKey = buildStateCountySnapshotKey(stateCode, countyCode);
+					if (byStateCounty[stateCountyKey]) {
+						byStateCounty[stateCountyKey].activeWarningCount += 1;
+					}
+				}
+			}
+		}
+		const impactCategories = deriveAlertImpactCategories(event, headline, description);
+		if (isMajorImpactAlertEvent(event, severity, impactCategories)) {
+			activeMajorCount += 1;
+			for (const stateCode of stateCodes) {
+				if (byState[stateCode]) {
+					byState[stateCode].activeMajorCount += 1;
+				}
+			}
+			for (const stateCode of stateCodes) {
+				const countyCodesForState = countyCodesByState.get(stateCode) || [];
+				for (const countyCode of countyCodesForState) {
+					const stateCountyKey = buildStateCountySnapshotKey(stateCode, countyCode);
+					if (byStateCounty[stateCountyKey]) {
+						byStateCounty[stateCountyKey].activeMajorCount += 1;
+					}
+				}
+			}
+		}
+	}
+
+	return {
+		activeAlertCount,
+		activeWarningCount,
+		activeMajorCount,
+		byState,
+		byStateCounty,
+	};
+}
+
+function buildAlertHistoryEntrySummary(change: AlertChangeRecord): string {
+	const eventLabel = String(change.event || 'Weather alert').trim() || 'Weather alert';
+	const areaLabel = String(change.areaDesc || '').trim();
+	const placeLabel = areaLabel || 'the selected area';
+
+	if (change.changeType === 'new') {
+		return `${eventLabel} was newly issued for ${placeLabel}.`;
+	}
+	if (change.changeType === 'updated') {
+		return `${eventLabel} was updated for ${placeLabel}.`;
+	}
+	if (change.changeType === 'extended') {
+		return `${eventLabel} was extended for ${placeLabel}.`;
+	}
+	if (change.changeType === 'expired') {
+		return `${eventLabel} expired for ${placeLabel}.`;
+	}
+	return `All clear conditions were recorded for ${placeLabel}.`;
+}
+
+function normalizeAlertHistoryEntry(value: unknown): AlertHistoryEntry | null {
+	const entry = value as Record<string, unknown> | null;
+	if (!entry || typeof entry !== 'object') return null;
+
+	const alertId = String(entry.alertId || '').trim();
+	const changedAt = normalizeIsoTimestamp(entry.changedAt);
+	const changeType = normalizeAlertChangeType(entry.changeType);
+	if (!alertId || !changedAt || !changeType) return null;
+
+	const event = String(entry.event || '').trim() || 'Weather Alert';
+	const categoryRaw = String(entry.category || '').trim().toLowerCase();
+	const category = categoryRaw || classifyAlertCategoryFromEvent(event);
+	const severity = String(entry.severity || '').trim();
+	const impactCategories = deriveAlertImpactCategories(
+		event,
+		String(entry.summary || ''),
+		String(entry.areaDesc || ''),
+	);
+	const isMajor =
+		entry.isMajor === true
+		|| isMajorImpactAlertEvent(event, severity, impactCategories);
+	const stateCodes = Array.isArray(entry.stateCodes)
+		? dedupeStrings(
+			entry.stateCodes
+				.map((stateCode) => normalizeStateCode(stateCode))
+				.filter((stateCode): stateCode is string => !!stateCode),
+		).sort()
+		: [];
+	const countyCodes = Array.isArray(entry.countyCodes)
+		? dedupeStrings(
+			entry.countyCodes
+				.map((countyCode) => String(countyCode).replace(/\D/g, '').padStart(3, '0').slice(-3))
+				.filter((countyCode) => /^\d{3}$/.test(countyCode)),
+		).sort()
+		: [];
+	const summary = String(entry.summary || '').trim() || buildAlertHistoryEntrySummary({
+		alertId,
+		stateCodes,
+		countyCodes,
+		event,
+		areaDesc: String(entry.areaDesc || ''),
+		changedAt,
+		changeType,
+		severity: severity || null,
+		category,
+		isMajor,
+		previousExpires: entry.previousExpires ? String(entry.previousExpires) : null,
+		nextExpires: entry.nextExpires ? String(entry.nextExpires) : null,
+	});
+
+	return {
+		alertId,
+		stateCodes,
+		countyCodes,
+		event,
+		areaDesc: String(entry.areaDesc || ''),
+		changedAt,
+		changeType,
+		severity: severity || 'Unknown',
+		category,
+		isMajor,
+		summary,
+		previousExpires: entry.previousExpires ? String(entry.previousExpires) : null,
+		nextExpires: entry.nextExpires ? String(entry.nextExpires) : null,
+	};
+}
+
+function normalizeAlertHistoryDayRecord(value: unknown): AlertHistoryDayRecord | null {
+	const record = value as Record<string, unknown> | null;
+	if (!record || typeof record !== 'object') return null;
+
+	const day = String(record.day || '').trim();
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+	const dayMs = Date.parse(`${day}T00:00:00.000Z`);
+	if (!Number.isFinite(dayMs)) return null;
+
+	const updatedAt = normalizeIsoTimestamp(record.updatedAt) || new Date().toISOString();
+	const snapshot = normalizeAlertHistoryDaySnapshot(record.snapshot);
+	const entries = Array.isArray(record.entries)
+		? record.entries
+			.map((entry) => normalizeAlertHistoryEntry(entry))
+			.filter((entry): entry is AlertHistoryEntry => !!entry)
+			.sort((a, b) => Date.parse(b.changedAt) - Date.parse(a.changedAt))
+		: [];
+
+	return {
+		day,
+		updatedAt,
+		snapshot,
+		entries,
+	};
+}
+
+async function readAlertHistoryByDay(env: Env): Promise<AlertHistoryByDay> {
+	try {
+		const raw = await env.WEATHER_KV.get(KV_ALERT_HISTORY_DAILY);
+		if (!raw) return {};
+		const parsed = JSON.parse(raw);
+		if (!parsed || typeof parsed !== 'object') return {};
+		const records: AlertHistoryByDay = {};
+		for (const value of Object.values(parsed as Record<string, unknown>)) {
+			const normalized = normalizeAlertHistoryDayRecord(value);
+			if (!normalized) continue;
+			records[normalized.day] = normalized;
+		}
+		return records;
+	} catch {
+		return {};
+	}
+}
+
+async function writeAlertHistoryByDay(env: Env, historyByDay: AlertHistoryByDay): Promise<void> {
+	await env.WEATHER_KV.put(KV_ALERT_HISTORY_DAILY, JSON.stringify(historyByDay));
+}
+
+function pruneAlertHistoryByDay(
+	historyByDay: AlertHistoryByDay,
+	nowMs = Date.now(),
+): AlertHistoryByDay {
+	const retentionWindowMs = ALERT_HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+	const cutoffMs = nowMs - retentionWindowMs;
+	const pruned: AlertHistoryByDay = {};
+	for (const [day, record] of Object.entries(historyByDay)) {
+		const dayMs = Date.parse(`${day}T00:00:00.000Z`);
+		if (!Number.isFinite(dayMs)) continue;
+		const dayEndsMs = dayMs + (24 * 60 * 60 * 1000);
+		if (dayEndsMs < cutoffMs) continue;
+		pruned[day] = record;
+	}
+	return pruned;
+}
+
+function createAlertHistoryEntryFromChange(change: AlertChangeRecord): AlertHistoryEntry {
+	const event = String(change.event || '').trim() || 'Weather Alert';
+	const category = String(change.category || '').trim().toLowerCase()
+		|| classifyAlertCategoryFromEvent(event);
+	const severity = String(change.severity || '').trim() || 'Unknown';
+	const impactCategories = deriveAlertImpactCategories(event, '', '');
+	const isMajor =
+		change.isMajor === true
+		|| isMajorImpactAlertEvent(event, severity, impactCategories);
+	return {
+		alertId: String(change.alertId || '').trim(),
+		stateCodes: dedupeStrings(change.stateCodes.map((stateCode) => String(stateCode).trim().toUpperCase()))
+			.filter((stateCode) => !!normalizeStateCode(stateCode))
+			.sort(),
+		countyCodes: dedupeStrings(
+			change.countyCodes
+				.map((countyCode) => String(countyCode).replace(/\D/g, '').padStart(3, '0').slice(-3))
+				.filter((countyCode) => /^\d{3}$/.test(countyCode)),
+		).sort(),
+		event,
+		areaDesc: String(change.areaDesc || ''),
+		changedAt: normalizeIsoTimestamp(change.changedAt) || new Date().toISOString(),
+		changeType: change.changeType,
+		severity,
+		category,
+		isMajor,
+		summary: buildAlertHistoryEntrySummary(change),
+		previousExpires: change.previousExpires ?? null,
+		nextExpires: change.nextExpires ?? null,
+	};
+}
+
+function buildNextAlertHistoryByDay(
+	previousHistoryByDay: AlertHistoryByDay | null,
+	map: Record<string, any>,
+	changes: AlertChangeRecord[],
+	nowIso = new Date().toISOString(),
+): AlertHistoryByDay {
+	const nextHistoryByDay: AlertHistoryByDay = {};
+	for (const value of Object.values(previousHistoryByDay || {})) {
+		const normalized = normalizeAlertHistoryDayRecord(value);
+		if (!normalized) continue;
+		nextHistoryByDay[normalized.day] = {
+			...normalized,
+			entries: [...normalized.entries],
+		};
+	}
+
+	const nowDay = dayKeyFromIso(nowIso) || dayKeyFromTimestampMs(Date.now());
+	const ensureDayRecord = (day: string): AlertHistoryDayRecord => {
+		const existing = nextHistoryByDay[day];
+		if (existing) {
+			return existing;
+		}
+		const created: AlertHistoryDayRecord = {
+			day,
+			updatedAt: nowIso,
+			snapshot: {
+				activeAlertCount: 0,
+				activeWarningCount: 0,
+				activeMajorCount: 0,
+				byState: {},
+				byStateCounty: {},
+			},
+			entries: [],
+		};
+		nextHistoryByDay[day] = created;
+		return created;
+	};
+
+	const todayRecord = ensureDayRecord(nowDay);
+	todayRecord.snapshot = createHistoryDaySnapshotFromMap(map);
+	todayRecord.updatedAt = nowIso;
+
+	for (const change of changes) {
+		const normalizedChange = normalizeAlertChangeRecord(change);
+		if (!normalizedChange) continue;
+		const day = dayKeyFromIso(normalizedChange.changedAt) || nowDay;
+		const dayRecord = ensureDayRecord(day);
+		const nextEntry = createAlertHistoryEntryFromChange(normalizedChange);
+		const nextEntryKey = `${nextEntry.alertId}|${nextEntry.changeType}|${nextEntry.changedAt}`;
+		const existingKeys = new Set(
+			dayRecord.entries.map((entry) => `${entry.alertId}|${entry.changeType}|${entry.changedAt}`),
+		);
+		if (!existingKeys.has(nextEntryKey)) {
+			dayRecord.entries.push(nextEntry);
+		}
+		dayRecord.entries.sort((a, b) => Date.parse(b.changedAt) - Date.parse(a.changedAt));
+		if (dayRecord.entries.length > 500) {
+			dayRecord.entries = dayRecord.entries.slice(0, 500);
+		}
+		dayRecord.updatedAt = nowIso;
+	}
+
+	return pruneAlertHistoryByDay(nextHistoryByDay, Date.parse(nowIso));
+}
+
+async function syncAlertHistoryDailySnapshots(
+	env: Env,
+	map: Record<string, any>,
+	changes: AlertChangeRecord[],
+): Promise<AlertHistoryByDay> {
+	const previousHistoryByDay = await readAlertHistoryByDay(env);
+	const nextHistoryByDay = buildNextAlertHistoryByDay(previousHistoryByDay, map, changes);
+	await writeAlertHistoryByDay(env, nextHistoryByDay);
+	return nextHistoryByDay;
+}
+
+function createLifecycleSnapshotEntry(
+	alertId: string,
+	feature: any,
+	previousEntry?: AlertLifecycleSnapshotEntry | null,
+): AlertLifecycleSnapshotEntry {
+	const properties = feature?.properties ?? {};
+	return {
+		alertId,
+		stateCodes: dedupeStrings(extractStateCodes(feature)).sort(),
+		countyCodes: extractCountyFipsCodes(feature),
+		event: String(properties.event || ''),
+		areaDesc: String(properties.areaDesc || ''),
+		headline: String(properties.headline || ''),
+		description: String(properties.description || ''),
+		instruction: String(properties.instruction || ''),
+		severity: String(properties.severity || ''),
+		urgency: String(properties.urgency || ''),
+		certainty: String(properties.certainty || ''),
+		updated: String(properties.updated || ''),
+		expires: String(properties.expires || ''),
+		lastChangeType: previousEntry?.lastChangeType || null,
+		lastChangedAt: previousEntry?.lastChangedAt || null,
+	};
+}
+
+function parseTimeMs(value: string): number | null {
+	const parsed = Date.parse(String(value || '').trim());
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasAlertBeenUpdated(
+	previousEntry: AlertLifecycleSnapshotEntry,
+	currentEntry: AlertLifecycleSnapshotEntry,
+): boolean {
+	return (
+		previousEntry.updated !== currentEntry.updated
+		|| previousEntry.headline !== currentEntry.headline
+		|| previousEntry.description !== currentEntry.description
+		|| previousEntry.instruction !== currentEntry.instruction
+		|| previousEntry.areaDesc !== currentEntry.areaDesc
+		|| previousEntry.severity !== currentEntry.severity
+		|| previousEntry.urgency !== currentEntry.urgency
+		|| previousEntry.certainty !== currentEntry.certainty
+	);
+}
+
+function hasAlertBeenExtended(
+	previousEntry: AlertLifecycleSnapshotEntry,
+	currentEntry: AlertLifecycleSnapshotEntry,
+): boolean {
+	const previousExpiresMs = parseTimeMs(previousEntry.expires);
+	const currentExpiresMs = parseTimeMs(currentEntry.expires);
+	if (previousExpiresMs === null || currentExpiresMs === null) return false;
+	return currentExpiresMs - previousExpiresMs > 60_000;
+}
+
+function createAlertChangeRecord(
+	entry: AlertLifecycleSnapshotEntry,
+	changedAt: string,
+	changeType: AlertChangeType,
+	previousExpires?: string | null,
+	nextExpires?: string | null,
+): AlertChangeRecord {
+	const category = classifyAlertCategoryFromEvent(entry.event || '');
+	const impactCategories = deriveAlertImpactCategories(
+		entry.event || '',
+		entry.headline || '',
+		entry.description || '',
+	);
+	return {
+		alertId: entry.alertId,
+		stateCodes: dedupeStrings(entry.stateCodes).sort(),
+		countyCodes: dedupeStrings(entry.countyCodes).sort(),
+		event: entry.event || 'Weather Alert',
+		areaDesc: entry.areaDesc,
+		changedAt,
+		changeType,
+		severity: entry.severity || null,
+		category,
+		isMajor: isMajorImpactAlertEvent(entry.event || '', entry.severity || '', impactCategories),
+		previousExpires: previousExpires ?? null,
+		nextExpires: nextExpires ?? null,
+	};
+}
+
+function countActiveAlertsByState(snapshot: AlertLifecycleSnapshot): Record<string, number> {
+	const counts: Record<string, number> = {};
+	for (const entry of Object.values(snapshot)) {
+		for (const stateCode of entry.stateCodes) {
+			if (!counts[stateCode]) counts[stateCode] = 0;
+			counts[stateCode] += 1;
+		}
+	}
+	return counts;
+}
+
+function diffAlertLifecycleSnapshots(
+	currentMap: Record<string, any>,
+	previousSnapshot: AlertLifecycleSnapshot | null,
+): AlertLifecycleDiffResult {
+	const changedAt = new Date().toISOString();
+	const currentSnapshot: AlertLifecycleSnapshot = {};
+	for (const [fallbackId, feature] of Object.entries(currentMap)) {
+		const alertId = String((feature as any)?.id ?? fallbackId ?? '');
+		if (!alertId) continue;
+		const previousEntry = previousSnapshot?.[alertId] || null;
+		currentSnapshot[alertId] = createLifecycleSnapshotEntry(alertId, feature, previousEntry);
+	}
+
+	if (!previousSnapshot) {
+		return {
+			currentSnapshot,
+			changes: [],
+			isInitialSnapshot: true,
+		};
+	}
+
+	const changes: AlertChangeRecord[] = [];
+
+	for (const [alertId, currentEntry] of Object.entries(currentSnapshot)) {
+		const previousEntry = previousSnapshot[alertId];
+		if (!previousEntry) {
+			currentEntry.lastChangeType = 'new';
+			currentEntry.lastChangedAt = changedAt;
+			changes.push(
+				createAlertChangeRecord(
+					currentEntry,
+					changedAt,
+					'new',
+					null,
+					currentEntry.expires || null,
+				),
+			);
+			continue;
+		}
+
+		if (hasAlertBeenExtended(previousEntry, currentEntry)) {
+			currentEntry.lastChangeType = 'extended';
+			currentEntry.lastChangedAt = changedAt;
+			changes.push(
+				createAlertChangeRecord(
+					currentEntry,
+					changedAt,
+					'extended',
+					previousEntry.expires || null,
+					currentEntry.expires || null,
+				),
+			);
+			continue;
+		}
+
+		if (hasAlertBeenUpdated(previousEntry, currentEntry)) {
+			currentEntry.lastChangeType = 'updated';
+			currentEntry.lastChangedAt = changedAt;
+			changes.push(
+				createAlertChangeRecord(
+					currentEntry,
+					changedAt,
+					'updated',
+					previousEntry.expires || null,
+					currentEntry.expires || null,
+				),
+			);
+			continue;
+		}
+
+		currentEntry.lastChangeType = previousEntry.lastChangeType || null;
+		currentEntry.lastChangedAt = previousEntry.lastChangedAt || null;
+	}
+
+	for (const [alertId, previousEntry] of Object.entries(previousSnapshot)) {
+		if (currentSnapshot[alertId]) continue;
+		changes.push(
+			createAlertChangeRecord(
+				previousEntry,
+				changedAt,
+				'expired',
+				previousEntry.expires || null,
+				null,
+			),
+		);
+	}
+
+	const previousCountsByState = countActiveAlertsByState(previousSnapshot);
+	const currentCountsByState = countActiveAlertsByState(currentSnapshot);
+	const stateCodes = dedupeStrings([
+		...Object.keys(previousCountsByState),
+		...Object.keys(currentCountsByState),
+	]);
+
+	for (const stateCode of stateCodes) {
+		const previousCount = previousCountsByState[stateCode] || 0;
+		const currentCount = currentCountsByState[stateCode] || 0;
+		if (previousCount <= 0 || currentCount > 0) continue;
+		changes.push({
+			alertId: `all-clear:${stateCode}`,
+			stateCodes: [stateCode],
+			countyCodes: [],
+			event: 'All Clear',
+			areaDesc: stateCodeDisplayName(stateCode),
+			changedAt,
+			changeType: 'all_clear',
+			severity: null,
+			category: null,
+			isMajor: true,
+			previousExpires: null,
+			nextExpires: null,
+		});
+	}
+
+	return {
+		currentSnapshot,
+		changes,
+		isInitialSnapshot: false,
+	};
+}
+
+function latestLifecycleStatusByAlertId(snapshot: AlertLifecycleSnapshot): Record<string, AlertChangeType | null> {
+	const map: Record<string, AlertChangeType | null> = {};
+	for (const [alertId, entry] of Object.entries(snapshot)) {
+		map[alertId] = entry.lastChangeType || null;
+	}
+	return map;
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -878,15 +2380,22 @@ function buildStatePushMessageData(stateCode: string, features: any[]): Record<s
 		const event = String(properties.event ?? 'Weather Alert');
 		const headline = String(properties.headline ?? '').trim();
 		const areaDesc = String(properties.areaDesc ?? '').trim();
+		const detailUrl = alertId
+			? canonicalAlertDetailUrl(alertId)
+			: `/alerts?state=${encodeURIComponent(stateCode)}`;
+		const fallbackUrl = `/alerts?state=${encodeURIComponent(stateCode)}`;
 		return {
 			title: `${event} - ${stateName}`,
 			body: truncateText(headline || areaDesc || 'Tap for details.', 140),
-			url: `/?state=${encodeURIComponent(stateCode)}`,
-			tag: `state-${stateCode}-${alertId || Date.now()}`,
+			url: detailUrl,
+			detailUrl,
+			fallbackUrl,
+			tag: alertId ? `alert-${alertId}` : `state-${stateCode}-latest`,
 			stateCode,
 			alertId,
-			icon: '/logo/Live Weather Alerts logo 192.png',
-			badge: '/logo/Live Weather Alerts logo 32.png',
+			changeType: 'new',
+			icon: NOTIFICATION_ICON_PATH,
+			badge: NOTIFICATION_BADGE_PATH,
 		};
 	}
 
@@ -900,100 +2409,362 @@ function buildStatePushMessageData(stateCode: string, features: any[]): Record<s
 	return {
 		title: `${features.length} new weather alerts - ${stateName}`,
 		body: truncateText(`Includes ${bodyParts.join(', ')}. Tap to review now.`, 140),
-		url: `/?state=${encodeURIComponent(stateCode)}`,
-		tag: `state-${stateCode}-${Date.now()}`,
+		url: `/alerts?state=${encodeURIComponent(stateCode)}`,
+		fallbackUrl: '/alerts',
+		tag: `state-${stateCode}-group`,
 		stateCode,
-		icon: '/logo/Live Weather Alerts logo 192.png',
-		badge: '/logo/Live Weather Alerts logo 32.png',
+		changeType: 'new',
+		icon: NOTIFICATION_ICON_PATH,
+		badge: NOTIFICATION_BADGE_PATH,
 	};
 }
 
-async function sendPushForState(env: Env, vapid: VapidKeys, stateCode: string, newFeatures: any[]): Promise<void> {
-	if (newFeatures.length === 0) return;
+function buildTestPushMessageData(stateCode: string, scopeCount: number): Record<string, any> {
+	return {
+		title: 'Live Weather Alerts test notification',
+		body:
+			scopeCount > 1
+				? `Notifications are active for ${scopeCount} scopes.`
+				: `Notifications are active for ${stateCode}.`,
+		url: '/settings',
+		fallbackUrl: `/alerts?state=${encodeURIComponent(stateCode)}`,
+		tag: `test-${stateCode}`,
+		stateCode,
+		icon: NOTIFICATION_ICON_PATH,
+		badge: NOTIFICATION_BADGE_PATH,
+		test: true,
+	};
+}
+
+type LifecyclePushEntry = {
+	change: AlertChangeRecord;
+	feature?: any;
+};
+
+function buildLifecyclePushMessageData(stateCode: string, entries: LifecyclePushEntry[]): Record<string, any> {
+	const stateName = stateCodeDisplayName(stateCode);
+	const usableEntries = entries.filter((entry) => !!entry.change);
+	if (usableEntries.length === 0) {
+		return {
+			title: `Weather alert update - ${stateName}`,
+			body: 'Tap to review recent alert updates.',
+			url: `/alerts?state=${encodeURIComponent(stateCode)}`,
+			fallbackUrl: '/alerts',
+			tag: `state-${stateCode}-lifecycle`,
+			stateCode,
+			changeType: 'grouped',
+			icon: NOTIFICATION_ICON_PATH,
+			badge: NOTIFICATION_BADGE_PATH,
+		};
+	}
+
+	if (usableEntries.length === 1) {
+		const entry = usableEntries[0];
+		const changeType = entry.change.changeType;
+		if (changeType === 'all_clear') {
+			return {
+				title: `All clear - ${stateName}`,
+				body: 'Active alerts have cleared for this area.',
+				url: `/alerts?state=${encodeURIComponent(stateCode)}`,
+				fallbackUrl: '/alerts',
+				tag: `state-${stateCode}-all-clear`,
+				stateCode,
+				changeType: 'all_clear',
+				icon: NOTIFICATION_ICON_PATH,
+				badge: NOTIFICATION_BADGE_PATH,
+			};
+		}
+
+		const feature = entry.feature ?? {};
+		const properties = feature?.properties ?? {};
+		const alertId = String(feature?.id ?? properties?.id ?? entry.change.alertId ?? '');
+		const event = String(properties.event ?? entry.change.event ?? 'Weather Alert');
+		const headline = String(properties.headline ?? '').trim();
+		const areaDesc = String(properties.areaDesc ?? entry.change.areaDesc ?? '').trim();
+		const detailUrl = alertId
+			? canonicalAlertDetailUrl(alertId)
+			: `/alerts?state=${encodeURIComponent(stateCode)}`;
+		const changeLabel =
+			changeType === 'extended'
+				? 'extended'
+				: changeType === 'updated'
+					? 'updated'
+					: changeType;
+
+		return {
+			title: `${event} ${changeLabel} - ${stateName}`,
+			body: truncateText(headline || areaDesc || 'Tap for details.', 140),
+			url: detailUrl,
+			detailUrl,
+			fallbackUrl: `/alerts?state=${encodeURIComponent(stateCode)}`,
+			tag: alertId ? `alert-${alertId}-${changeType}` : `state-${stateCode}-${changeType}`,
+			stateCode,
+			alertId: alertId || undefined,
+			changeType,
+			icon: NOTIFICATION_ICON_PATH,
+			badge: NOTIFICATION_BADGE_PATH,
+		};
+	}
+
+	const counts: Record<AlertChangeType, number> = {
+		new: 0,
+		updated: 0,
+		extended: 0,
+		expired: 0,
+		all_clear: 0,
+	};
+	for (const entry of usableEntries) {
+		counts[entry.change.changeType] += 1;
+	}
+
+	const bodyParts: string[] = [];
+	if (counts.new > 0) bodyParts.push(`${counts.new} new`);
+	if (counts.updated > 0) bodyParts.push(`${counts.updated} updated`);
+	if (counts.extended > 0) bodyParts.push(`${counts.extended} extended`);
+	if (counts.expired > 0) bodyParts.push(`${counts.expired} expired`);
+	if (counts.all_clear > 0) bodyParts.push(`${counts.all_clear} all clear`);
+	if (bodyParts.length === 0) bodyParts.push(`${usableEntries.length} lifecycle updates`);
+
+	const uniqueTypes = Object.entries(counts)
+		.filter(([, count]) => count > 0)
+		.map(([type]) => type);
+
+	return {
+		title: `${usableEntries.length} alert changes - ${stateName}`,
+		body: truncateText(`Includes ${bodyParts.join(', ')}. Tap to review now.`, 140),
+		url: `/alerts?state=${encodeURIComponent(stateCode)}`,
+		fallbackUrl: '/alerts',
+		tag: `state-${stateCode}-group`,
+		stateCode,
+		changeType: uniqueTypes.length === 1 ? uniqueTypes[0] : 'grouped',
+		changes: usableEntries.slice(0, 8).map((entry) => ({
+			alertId: entry.change.alertId,
+			changeType: entry.change.changeType,
+		})),
+		icon: NOTIFICATION_ICON_PATH,
+		badge: NOTIFICATION_BADGE_PATH,
+	};
+}
+
+function changeMatchesScope(change: AlertChangeRecord, scope: PushScope): boolean {
+	if (!scope.enabled) return false;
+	const scopeStateCode = normalizeStateCode(scope.stateCode);
+	if (!scopeStateCode || !change.stateCodes.includes(scopeStateCode)) return false;
+	if (!alertMatchesTypePrefs(change.event, scope.alertTypes)) return false;
+	if (scope.severeOnly && !isMajorImpactAlertEvent(change.event, '', deriveAlertImpactCategories(change.event, '', ''))) {
+		return false;
+	}
+	if (scope.deliveryScope !== 'county') return true;
+
+	const targetCountyFips = normalizeCountyFips(scope.countyFips);
+	if (targetCountyFips) {
+		return change.countyCodes.includes(targetCountyFips);
+	}
+	const countyName = cleanCountyToken(String(scope.countyName || ''));
+	if (!countyName) return false;
+	return cleanCountyToken(change.areaDesc).includes(countyName);
+}
+
+function shouldSendAllClearNotification(stateChanges: AlertChangeRecord[]): boolean {
+	const hasAllClear = stateChanges.some((change) => change.changeType === 'all_clear');
+	if (!hasAllClear) return false;
+	return stateChanges.some(
+		(change) =>
+			change.changeType === 'expired'
+			&& isMajorImpactAlertEvent(change.event, '', deriveAlertImpactCategories(change.event, '', '')),
+	);
+}
+
+function batchLifecycleEntriesForDeliveryMode(
+	deliveryMode: PushDeliveryMode,
+	entries: LifecyclePushEntry[],
+): LifecyclePushEntry[][] {
+	const usableEntries = entries.filter((entry) => !!entry.change);
+	if (usableEntries.length === 0) return [];
+	if (deliveryMode === 'digest') {
+		return [usableEntries];
+	}
+	return usableEntries.map((entry) => [entry]);
+}
+
+async function sendPushPayload(
+	vapid: VapidKeys,
+	subscription: WebPushSubscription,
+	data: Record<string, unknown>,
+	topic: string,
+): Promise<Response> {
+	const message: PushMessage = {
+		data,
+		options: { ttl: 900, urgency: 'high', topic },
+	};
+	const payload = await buildPushPayload(message, subscription, vapid);
+	return await fetch(subscription.endpoint, payload);
+}
+
+async function sendPushForState(
+	env: Env,
+	vapid: VapidKeys,
+	stateCode: string,
+	stateChanges: AlertChangeRecord[],
+	map: Record<string, any>,
+): Promise<void> {
+	if (stateChanges.length === 0) return;
 	const subscriptionIds = await readPushStateIndex(env, stateCode);
 	if (subscriptionIds.length === 0) return;
 
 	for (const subscriptionId of subscriptionIds) {
 		const record = await readPushSubscriptionRecordById(env, subscriptionId);
 		if (!record) {
+			await recordInvalidSubscription(
+				env,
+				`push_state_missing_record_${stateCode}_${subscriptionId.slice(0, 12)}`,
+			);
 			await removePushIdFromStateIndex(env, stateCode, subscriptionId);
 			continue;
 		}
-		if (record.stateCode !== stateCode) {
+		if (!record.indexedStateCodes.includes(stateCode)) {
+			await recordInvalidSubscription(
+				env,
+				`push_state_stale_index_${stateCode}_${subscriptionId.slice(0, 12)}`,
+			);
 			await removePushIdFromStateIndex(env, stateCode, subscriptionId);
 			continue;
 		}
 
-		const prefs = record.prefs || defaultPushPreferences(stateCode);
-
-		const matchingFeatures = newFeatures.filter((feature) => {
-			const event = String(feature?.properties?.event || '');
-
-			if (!alertMatchesTypePrefs(event, prefs)) return false;
-			if (!alertMatchesCountyPrefs(feature, prefs)) return false;
-
-			if (isWithinQuietHours(new Date(), prefs) && !alertBypassesQuietHours(event)) {
-				return false;
-			}
-
-			return true;
-		});
-
-		if (matchingFeatures.length === 0) {
+		const prefs = record.prefs;
+		const now = new Date();
+		if (isDeliveryPaused(prefs, now)) {
 			continue;
 		}
 
-		const payloadData = buildStatePushMessageData(stateCode, matchingFeatures);
+		const matchingScopes = prefs.scopes.filter(
+			(scope) => scope.enabled && normalizeStateCode(scope.stateCode) === stateCode,
+		);
+		if (matchingScopes.length === 0) {
+			continue;
+		}
 
-		try {
-			const message: PushMessage = {
-				data: payloadData,
-				options: { ttl: 900, urgency: 'high', topic: `state-${stateCode}` },
-			};
-			const payload = await buildPushPayload(message, record.subscription, vapid);
-			const response = await fetch(record.subscription.endpoint, payload);
-
-			// Endpoint is gone — clean up to avoid repeated failures.
-			if (response.status === 404 || response.status === 410) {
-				await removePushSubscriptionById(env, subscriptionId);
-			} else if (!response.ok) {
-				const body = await response.text().catch(() => '');
-				console.log(`[push] send failed state=${stateCode} status=${response.status} body=${body.slice(0, 240)}`);
+		const isQuietHoursActive = isWithinQuietHours(now, prefs);
+		const allowAllClearPush = shouldSendAllClearNotification(stateChanges);
+		const matchingEntries: LifecyclePushEntry[] = [];
+		for (const change of stateChanges) {
+			if (change.changeType === 'all_clear') {
+				if (!allowAllClearPush) continue;
+				const stateScopeEnabled = matchingScopes.some((scope) => scope.deliveryScope === 'state');
+				if (!stateScopeEnabled) continue;
+				if (isQuietHoursActive) continue;
+				matchingEntries.push({ change });
+				continue;
 			}
-		} catch (err) {
-			console.log(`[push] send exception state=${stateCode} err=${String(err)}`);
-			// Ignore transient send failures and retry on the next schedule cycle.
+
+			if (change.changeType === 'expired') {
+				if (prefs.deliveryMode !== 'digest') continue;
+				if (!isMajorImpactAlertEvent(change.event, '', deriveAlertImpactCategories(change.event, '', ''))) {
+					continue;
+				}
+				const matchedScope = matchingScopes.find((scope) => changeMatchesScope(change, scope));
+				if (!matchedScope) continue;
+				if (isQuietHoursActive) continue;
+				matchingEntries.push({ change });
+				continue;
+			}
+
+			const feature = map[change.alertId];
+			if (!feature) continue;
+
+			const matchedScope = matchingScopes.find((scope) =>
+				featureMatchesScope(feature, stateCode, scope),
+			);
+			if (!matchedScope) continue;
+
+			if (isQuietHoursActive && !alertBypassesQuietHours(feature)) {
+				continue;
+			}
+
+			matchingEntries.push({ change, feature });
+		}
+
+		if (matchingEntries.length === 0) {
+			continue;
+		}
+
+		const payloadBatches = batchLifecycleEntriesForDeliveryMode(
+			prefs.deliveryMode,
+			matchingEntries,
+		);
+		for (const [batchIndex, batch] of payloadBatches.entries()) {
+			const payloadData = buildLifecyclePushMessageData(stateCode, batch);
+			const firstChangeType = String(batch[0]?.change?.changeType || 'grouped');
+			const topic =
+				prefs.deliveryMode === 'digest'
+					? `state-${stateCode}-digest`
+					: `state-${stateCode}-${firstChangeType}-${batchIndex + 1}`;
+
+			try {
+				const response = await sendPushPayload(
+					vapid,
+					record.subscription,
+					payloadData,
+					topic,
+				);
+
+				// Endpoint is gone — clean up to avoid repeated failures.
+				if (response.status === 404 || response.status === 410) {
+					await removePushSubscriptionById(env, subscriptionId);
+					await recordInvalidSubscription(
+						env,
+						`push_endpoint_gone_${stateCode}_${response.status}`,
+					);
+					break;
+				}
+				if (!response.ok) {
+					const body = await response.text().catch(() => '');
+					await recordPushDeliveryFailure(env, {
+						stateCode,
+						subscriptionId,
+						status: response.status,
+						message: body || `push_send_failed_${response.status}`,
+					});
+					console.log(`[push] send failed state=${stateCode} status=${response.status} body=${body.slice(0, 240)}`);
+				}
+			} catch (err) {
+				await recordPushDeliveryFailure(env, {
+					stateCode,
+					subscriptionId,
+					message: String(err),
+				});
+				console.log(`[push] send exception state=${stateCode} err=${String(err)}`);
+				// Ignore transient send failures and retry on the next schedule cycle.
+			}
 		}
 	}
 }
 
-async function dispatchStatePushNotifications(env: Env, map: Record<string, any>): Promise<void> {
+async function dispatchStatePushNotifications(
+	env: Env,
+	map: Record<string, any>,
+	changes: AlertChangeRecord[],
+): Promise<void> {
 	const vapid = getVapidKeys(env);
 	if (!vapid) return;
-
-	const currentSnapshot = buildStateAlertSnapshot(map);
-	const previousSnapshot = await readPushStateAlertSnapshot(env);
-	if (!previousSnapshot) {
-		// First run: establish baseline to avoid blasting for all currently active alerts.
-		await writePushStateAlertSnapshot(env, currentSnapshot);
+	if (changes.length === 0) {
+		await writePushStateAlertSnapshot(env, buildStateAlertSnapshot(map));
 		return;
 	}
 
-	const allStateCodes = dedupeStrings([
-		...Object.keys(previousSnapshot),
-		...Object.keys(currentSnapshot),
-	]);
-
-	for (const stateCode of allStateCodes) {
-		const currentIds = new Set(currentSnapshot[stateCode] ?? []);
-		const previousIds = new Set(previousSnapshot[stateCode] ?? []);
-		const newIds = Array.from(currentIds).filter((id) => !previousIds.has(id));
-		if (newIds.length === 0) continue;
-		const newFeatures = newIds.map((id) => map[id]).filter(Boolean);
-		await sendPushForState(env, vapid, stateCode, newFeatures);
+	const changesByState: Record<string, AlertChangeRecord[]> = {};
+	for (const change of changes) {
+		for (const stateCode of change.stateCodes) {
+			if (!changesByState[stateCode]) changesByState[stateCode] = [];
+			changesByState[stateCode].push(change);
+		}
 	}
 
-	await writePushStateAlertSnapshot(env, currentSnapshot);
+	for (const [stateCode, stateChanges] of Object.entries(changesByState)) {
+		await sendPushForState(env, vapid, stateCode, stateChanges, map);
+	}
+
+	await writePushStateAlertSnapshot(env, buildStateAlertSnapshot(map));
 }
 
 /**
@@ -2015,6 +3786,256 @@ async function writeAlertMap(env: Env, map: Record<string, any>): Promise<void> 
 	await env.WEATHER_KV.put(KV_ALERT_MAP, JSON.stringify(map));
 }
 
+function normalizeIsoOrNull(value: unknown): string | null {
+	const text = String(value || '').trim();
+	if (!text) return null;
+	const parsed = Date.parse(text);
+	if (!Number.isFinite(parsed)) return null;
+	return new Date(parsed).toISOString();
+}
+
+function parseNonNegativeNumber(value: unknown, fallback = 0): number {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+	return parsed;
+}
+
+function defaultOperationalDiagnostics(): OperationalDiagnostics {
+	return {
+		lastSyncAttemptAt: null,
+		lastSuccessfulSyncAt: null,
+		lastSyncError: null,
+		lastKnownAlertCount: 0,
+		lastStaleDataAt: null,
+		lastStaleMinutes: null,
+		invalidSubscriptionCount: 0,
+		lastInvalidSubscriptionAt: null,
+		lastInvalidSubscriptionReason: null,
+		pushFailureCount: 0,
+		recentPushFailures: [],
+	};
+}
+
+function normalizePushFailureDiagnostic(value: unknown): PushFailureDiagnostic | null {
+	const input = value as Record<string, unknown> | null;
+	if (!input || typeof input !== 'object') return null;
+	const at = normalizeIsoOrNull(input.at);
+	const stateCode = normalizeStateCode(input.stateCode) || String(input.stateCode || '').trim().toUpperCase();
+	const message = String(input.message || '').trim();
+	if (!at || !stateCode || !message) return null;
+	const statusNumber = Number(input.status);
+	const status = Number.isFinite(statusNumber) ? statusNumber : undefined;
+	const subscriptionId = String(input.subscriptionId || '').trim() || null;
+	return {
+		at,
+		stateCode,
+		status,
+		subscriptionId,
+		message: truncateText(message, 240),
+	};
+}
+
+function normalizeOperationalDiagnostics(value: unknown): OperationalDiagnostics {
+	const input = value as Record<string, unknown> | null;
+	if (!input || typeof input !== 'object') {
+		return defaultOperationalDiagnostics();
+	}
+
+	const recentPushFailuresRaw = Array.isArray(input.recentPushFailures)
+		? input.recentPushFailures
+		: [];
+	const recentPushFailures = recentPushFailuresRaw
+		.map((item) => normalizePushFailureDiagnostic(item))
+		.filter((item): item is PushFailureDiagnostic => !!item)
+		.slice(0, MAX_RECENT_PUSH_FAILURES);
+
+	return {
+		lastSyncAttemptAt: normalizeIsoOrNull(input.lastSyncAttemptAt),
+		lastSuccessfulSyncAt: normalizeIsoOrNull(input.lastSuccessfulSyncAt),
+		lastSyncError: String(input.lastSyncError || '').trim() || null,
+		lastKnownAlertCount: parseNonNegativeNumber(input.lastKnownAlertCount),
+		lastStaleDataAt: normalizeIsoOrNull(input.lastStaleDataAt),
+		lastStaleMinutes: Number.isFinite(Number(input.lastStaleMinutes))
+			? parseNonNegativeNumber(input.lastStaleMinutes)
+			: null,
+		invalidSubscriptionCount: parseNonNegativeNumber(input.invalidSubscriptionCount),
+		lastInvalidSubscriptionAt: normalizeIsoOrNull(input.lastInvalidSubscriptionAt),
+		lastInvalidSubscriptionReason:
+			String(input.lastInvalidSubscriptionReason || '').trim() || null,
+		pushFailureCount: parseNonNegativeNumber(input.pushFailureCount),
+		recentPushFailures,
+	};
+}
+
+async function readOperationalDiagnostics(env: Env): Promise<OperationalDiagnostics> {
+	try {
+		const raw = await env.WEATHER_KV.get(KV_OPERATIONAL_DIAGNOSTICS);
+		if (!raw) return defaultOperationalDiagnostics();
+		const parsed = JSON.parse(raw) as unknown;
+		return normalizeOperationalDiagnostics(parsed);
+	} catch {
+		return defaultOperationalDiagnostics();
+	}
+}
+
+async function writeOperationalDiagnostics(
+	env: Env,
+	diagnostics: OperationalDiagnostics,
+): Promise<void> {
+	await env.WEATHER_KV.put(
+		KV_OPERATIONAL_DIAGNOSTICS,
+		JSON.stringify(normalizeOperationalDiagnostics(diagnostics)),
+	);
+}
+
+async function updateOperationalDiagnostics(
+	env: Env,
+	updater: (current: OperationalDiagnostics) => OperationalDiagnostics,
+): Promise<OperationalDiagnostics> {
+	const current = await readOperationalDiagnostics(env);
+	const next = normalizeOperationalDiagnostics(updater(current));
+	await writeOperationalDiagnostics(env, next);
+	return next;
+}
+
+async function recordSyncAttempt(env: Env): Promise<void> {
+	const nowIso = new Date().toISOString();
+	await updateOperationalDiagnostics(env, (current) => ({
+		...current,
+		lastSyncAttemptAt: nowIso,
+	}));
+}
+
+async function recordSyncSuccess(env: Env, activeAlertCount: number): Promise<void> {
+	const nowIso = new Date().toISOString();
+	await updateOperationalDiagnostics(env, (current) => ({
+		...current,
+		lastSyncAttemptAt: nowIso,
+		lastSuccessfulSyncAt: nowIso,
+		lastSyncError: null,
+		lastKnownAlertCount: Math.max(0, Math.floor(activeAlertCount)),
+	}));
+}
+
+async function recordSyncFailure(env: Env, message: string): Promise<void> {
+	const trimmed = truncateText(String(message || 'Unknown sync failure.'), 240);
+	console.error(`[ops] sync failure: ${trimmed}`);
+	await updateOperationalDiagnostics(env, (current) => ({
+		...current,
+		lastSyncError: trimmed,
+	}));
+}
+
+async function recordStaleDataCondition(
+	env: Env,
+	staleMinutes: number,
+	reason: string,
+): Promise<void> {
+	if (!Number.isFinite(staleMinutes) || staleMinutes < 15) return;
+	const nowMs = Date.now();
+	await updateOperationalDiagnostics(env, (current) => {
+		const previousAt = current.lastStaleDataAt ? Date.parse(current.lastStaleDataAt) : Number.NaN;
+		const previousMinutes = current.lastStaleMinutes ?? -1;
+		const withinCooldown = Number.isFinite(previousAt) && (nowMs - previousAt) < 10 * 60 * 1000;
+		if (withinCooldown && previousMinutes === Math.floor(staleMinutes)) {
+			return current;
+		}
+		console.warn(
+			`[ops] stale-data condition minutes=${Math.floor(staleMinutes)} reason=${truncateText(reason, 120)}`,
+		);
+		return {
+			...current,
+			lastStaleDataAt: new Date(nowMs).toISOString(),
+			lastStaleMinutes: Math.floor(staleMinutes),
+		};
+	});
+}
+
+async function recordInvalidSubscription(env: Env, reason: string): Promise<void> {
+	const nowIso = new Date().toISOString();
+	const normalizedReason = truncateText(String(reason || 'invalid_subscription'), 180);
+	console.warn(`[ops] invalid subscription: ${normalizedReason}`);
+	await updateOperationalDiagnostics(env, (current) => ({
+		...current,
+		invalidSubscriptionCount: current.invalidSubscriptionCount + 1,
+		lastInvalidSubscriptionAt: nowIso,
+		lastInvalidSubscriptionReason: normalizedReason,
+	}));
+}
+
+async function recordPushDeliveryFailure(
+	env: Env,
+	input: {
+		stateCode: string;
+		subscriptionId?: string;
+		status?: number;
+		message: string;
+	},
+): Promise<void> {
+	const stateCode = normalizeStateCode(input.stateCode) || String(input.stateCode || '').trim().toUpperCase() || 'US';
+	const status = Number.isFinite(Number(input.status)) ? Number(input.status) : undefined;
+	const message = truncateText(String(input.message || 'Push delivery failed.'), 240);
+	console.warn(
+		`[ops] push delivery failure state=${stateCode}${status ? ` status=${status}` : ''} msg=${message}`,
+	);
+	await updateOperationalDiagnostics(env, (current) => {
+		const nextFailure: PushFailureDiagnostic = {
+			at: new Date().toISOString(),
+			stateCode,
+			status,
+			subscriptionId: input.subscriptionId || null,
+			message,
+		};
+		return {
+			...current,
+			pushFailureCount: current.pushFailureCount + 1,
+			recentPushFailures: [
+				nextFailure,
+				...current.recentPushFailures,
+			].slice(0, MAX_RECENT_PUSH_FAILURES),
+		};
+	});
+}
+
+function staleMinutesFromLastPoll(lastPoll: string | null): number {
+	const lastPollMs = lastPoll ? Date.parse(lastPoll) : Number.NaN;
+	if (!Number.isFinite(lastPollMs)) return 0;
+	return Math.max(0, Math.floor((Date.now() - lastPollMs) / 60_000));
+}
+
+function isLocalDevRequest(request: Request): boolean {
+	try {
+		const { hostname } = new URL(request.url);
+		return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
+	} catch {
+		return false;
+	}
+}
+
+function shouldAutoRefreshStaleAlertsInLocalDev(
+	request: Request,
+	lastPoll: string | null,
+): boolean {
+	if (!isLocalDevRequest(request)) return false;
+	return staleMinutesFromLastPoll(lastPoll) >= 15;
+}
+
+async function countPushSubscriptionRecords(env: Env): Promise<number> {
+	let count = 0;
+	let cursor: string | undefined;
+	do {
+		const page = await env.WEATHER_KV.list({
+			prefix: KV_PUSH_SUB_PREFIX,
+			limit: 1000,
+			cursor,
+		});
+		count += page.keys.length;
+		cursor = page.list_complete ? undefined : page.cursor;
+	} while (cursor);
+
+	return count;
+}
+
 /**
  * Remove alerts whose `expires` timestamp is in the past.
  */
@@ -2096,13 +4117,28 @@ async function pollNWS(env: Env): Promise<
  *   4. Store new ETag + last-poll timestamp
  */
 async function syncAlerts(env: Env): Promise<{ map: Record<string, any>; error?: string }> {
+	await recordSyncAttempt(env);
 	const result = await pollNWS(env);
 
 	if (!result.changed) {
 		// Either 304 or a transient error — return what we have in KV
 		const map = pruneExpired(await readAlertMap(env));
 		await writeAlertMap(env, map);
-		return { map, error: (result as any).error };
+		const syncError = (result as { error?: string }).error;
+		if (syncError) {
+			await recordSyncFailure(env, syncError);
+			const lastPoll = await env.WEATHER_KV.get(KV_LAST_POLL);
+			const staleMinutes = staleMinutesFromLastPoll(lastPoll ?? null);
+			await recordStaleDataCondition(env, staleMinutes, 'sync_alerts_cached_fallback');
+			return { map, error: syncError };
+		}
+
+		const nowIso = new Date().toISOString();
+		await Promise.all([
+			env.WEATHER_KV.put(KV_LAST_POLL, nowIso),
+			recordSyncSuccess(env, Object.keys(map).length),
+		]);
+		return { map };
 	}
 
 	// 200 — NWS returned the full current active set. Build map keyed by alert ID.
@@ -2120,9 +4156,23 @@ async function syncAlerts(env: Env): Promise<{ map: Record<string, any>; error?:
 		writeAlertMap(env, pruned),
 		env.WEATHER_KV.put(KV_ETAG, result.etag),
 		env.WEATHER_KV.put(KV_LAST_POLL, new Date().toISOString()),
+		recordSyncSuccess(env, Object.keys(pruned).length),
 	]);
 
 	return { map: pruned };
+}
+
+async function syncAlertLifecycleState(
+	env: Env,
+	map: Record<string, any>,
+): Promise<AlertLifecycleDiffResult> {
+	const previousSnapshot = await readAlertLifecycleSnapshot(env);
+	const diffResult = diffAlertLifecycleSnapshots(map, previousSnapshot);
+	await writeAlertLifecycleSnapshot(env, diffResult.currentSnapshot);
+	if (!diffResult.isInitialSnapshot && diffResult.changes.length > 0) {
+		await appendAlertChangeRecords(env, diffResult.changes);
+	}
+	return diffResult;
 }
 
 async function parseRequestBody(request: Request): Promise<URLSearchParams> {
@@ -2189,7 +4239,7 @@ function corsHeaders() {
 }
 
 function apiCorsHeaders(origin?: string | null): Headers {
-	const allowedOrigin = origin === 'https://liveweatheralerts.com' ? origin : '*';
+	const allowedOrigin = origin === PRIMARY_APP_ORIGIN ? origin : '*';
 	return new Headers({
 		'Access-Control-Allow-Origin': allowedOrigin,
 		'Access-Control-Allow-Methods': 'GET, OPTIONS',
@@ -2200,11 +4250,23 @@ function apiCorsHeaders(origin?: string | null): Headers {
 }
 
 function pushCorsHeaders(origin?: string | null): Headers {
-	const allowedOrigin = origin === 'https://liveweatheralerts.com' ? origin : '*';
+	const allowedOrigin = origin === PRIMARY_APP_ORIGIN ? origin : '*';
 	return new Headers({
 		'Access-Control-Allow-Origin': allowedOrigin,
 		'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 		'Access-Control-Allow-Headers': 'Content-Type',
+		'Access-Control-Max-Age': '86400',
+		'Vary': 'Origin',
+	});
+}
+
+function debugCorsHeaders(origin?: string | null): Headers {
+	const isAllowedOrigin = origin === PRIMARY_APP_ORIGIN || origin === WWW_APP_ORIGIN;
+	const allowedOrigin = isAllowedOrigin ? origin : PRIMARY_APP_ORIGIN;
+	return new Headers({
+		'Access-Control-Allow-Origin': allowedOrigin,
+		'Access-Control-Allow-Methods': 'GET, OPTIONS',
+		'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 		'Access-Control-Max-Age': '86400',
 		'Vary': 'Origin',
 	});
@@ -2244,30 +4306,124 @@ async function handlePushSubscribe(request: Request, env: Env): Promise<Response
 		return new Response(JSON.stringify({ error: 'Invalid JSON body.' }), { status: 400, headers });
 	}
 
-	const stateCode = normalizeStateCode(body?.stateCode || body?.state);
-	if (!stateCode) {
-		return new Response(JSON.stringify({ error: 'A valid US state code is required.' }), { status: 400, headers });
+	const subscription = body?.subscription as WebPushSubscription;
+	if (!isValidPushSubscription(subscription)) {
+		await recordInvalidSubscription(env, 'subscribe_invalid_payload');
+		return new Response(JSON.stringify({ error: 'Invalid push subscription payload.' }), { status: 400, headers });
+	}
+
+	const requestedStateCode =
+		normalizeStateCode(body?.stateCode || body?.state)
+		|| normalizeStateCode(body?.prefs?.stateCode)
+		|| normalizeStateCode(body?.prefs?.scopes?.[0]?.stateCode);
+	if (!requestedStateCode && !body?.prefs) {
+		await recordInvalidSubscription(env, 'subscribe_missing_scope');
+		return new Response(JSON.stringify({ error: 'A valid US state code or push scope is required.' }), { status: 400, headers });
+	}
+
+	const record = await upsertPushSubscriptionRecord(
+		env,
+		subscription,
+		request.headers.get('user-agent') || undefined,
+		requestedStateCode || undefined,
+		body?.prefs,
+	);
+	const responseStateCode = firstStateCodeFromPreferences(record.prefs);
+
+	const payload: Record<string, unknown> = {
+		ok: true,
+		subscriptionId: record.id,
+		prefs: record.prefs,
+		indexedStateCodes: record.indexedStateCodes,
+	};
+	if (responseStateCode) {
+		payload.stateCode = responseStateCode;
+	}
+
+	return new Response(JSON.stringify(payload), { status: 200, headers });
+}
+
+async function handlePushTest(request: Request, env: Env): Promise<Response> {
+	const headers = pushCorsHeaders();
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	const vapid = getVapidKeys(env);
+	if (!vapid) {
+		return new Response(JSON.stringify({
+			error: 'Push notifications are not configured on the server.',
+		}), { status: 503, headers });
+	}
+
+	let body: any;
+	try {
+		body = await request.json();
+	} catch {
+		return new Response(JSON.stringify({ error: 'Invalid JSON body.' }), { status: 400, headers });
 	}
 
 	const subscription = body?.subscription as WebPushSubscription;
 	if (!isValidPushSubscription(subscription)) {
+		await recordInvalidSubscription(env, 'push_test_invalid_payload');
 		return new Response(JSON.stringify({ error: 'Invalid push subscription payload.' }), { status: 400, headers });
 	}
 
-	const prefs = body?.prefs;
-	const record = await upsertPushSubscriptionRecord(
-		env,
-		subscription,
+	const requestedStateCode =
+		normalizeStateCode(body?.stateCode || body?.state)
+		|| normalizeStateCode(body?.prefs?.stateCode)
+		|| normalizeStateCode(body?.prefs?.scopes?.[0]?.stateCode)
+		|| 'KY';
+	const prefs = normalizePushPreferences(body?.prefs, requestedStateCode);
+	const stateCode = firstStateCodeFromPreferences(prefs) || requestedStateCode;
+	const enabledScopeCount = prefs.scopes.filter((scope) => scope.enabled).length;
+	const payloadData = buildTestPushMessageData(
 		stateCode,
-		request.headers.get('user-agent') || undefined,
-		prefs,
+		enabledScopeCount > 0 ? enabledScopeCount : prefs.scopes.length,
 	);
 
-	return new Response(JSON.stringify({
-		ok: true,
-		stateCode: record.stateCode,
-		subscriptionId: record.id,
-	}), { status: 200, headers });
+	try {
+		const response = await sendPushPayload(
+			vapid,
+			subscription,
+			payloadData,
+			`test-${stateCode}`,
+		);
+		if (response.status === 404 || response.status === 410) {
+			await removePushSubscriptionByEndpoint(env, subscription.endpoint);
+			await recordInvalidSubscription(
+				env,
+				`push_test_endpoint_gone_${response.status}`,
+			);
+			return new Response(
+				JSON.stringify({
+					error: 'Push subscription is no longer valid. Please resubscribe.',
+				}),
+				{ status: 410, headers },
+			);
+		}
+		if (!response.ok) {
+			const bodyText = await response.text().catch(() => '');
+			await recordPushDeliveryFailure(env, {
+				stateCode,
+				status: response.status,
+				message: `push_test_failed_${response.status}`,
+			});
+			return new Response(
+				JSON.stringify({
+					error: `Test push failed (${response.status}). ${bodyText.slice(0, 160)}`.trim(),
+				}),
+				{ status: 502, headers },
+			);
+		}
+		return new Response(JSON.stringify({ ok: true }), { status: 200, headers });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : 'Unable to send test push.';
+		await recordPushDeliveryFailure(env, {
+			stateCode,
+			message: `push_test_exception_${message}`,
+		});
+		return new Response(JSON.stringify({ error: message }), { status: 502, headers });
+	}
 }
 
 async function handlePushUnsubscribe(request: Request, env: Env): Promise<Response> {
@@ -2295,39 +4451,267 @@ async function handlePushUnsubscribe(request: Request, env: Env): Promise<Respon
 	return new Response(JSON.stringify({ ok: true, removed }), { status: 200, headers });
 }
 
-async function handleApiAlerts(env: Env): Promise<Response> {
+function classifyAlertCategoryFromEvent(event: string): string {
+	const normalized = String(event || '').toLowerCase();
+	if (normalized.includes('warning')) return 'warning';
+	if (normalized.includes('watch')) return 'watch';
+	if (normalized.includes('advisory')) return 'advisory';
+	if (normalized.includes('statement')) return 'statement';
+	return 'other';
+}
+
+function deriveAlertImpactCategories(
+	event: string,
+	headline: string,
+	description: string,
+): AlertImpactCategory[] {
+	const text = `${String(event || '')} ${String(headline || '')} ${String(description || '')}`
+		.toLowerCase()
+		.replace(/\s+/g, ' ')
+		.trim();
+
+	const categories: AlertImpactCategory[] = [];
+	const addCategory = (value: AlertImpactCategory) => {
+		if (!categories.includes(value)) {
+			categories.push(value);
+		}
+	};
+
+	if (/\btornado\b/.test(text)) {
+		addCategory('tornado');
+		addCategory('wind');
+	}
+	if (/\bflood|inundation|hydrologic/.test(text)) {
+		addCategory('flood');
+	}
+	if (/\bwinter|snow|sleet|blizzard|ice storm|freezing rain|wind chill|freeze|frost/.test(text)) {
+		addCategory('winter');
+	}
+	if (/\bheat|hot weather|high temperature|heat index/.test(text)) {
+		addCategory('heat');
+	}
+	if (/\bwind|gust/.test(text)) {
+		addCategory('wind');
+	}
+	if (/\bred flag|fire weather|wildfire|smoke/.test(text)) {
+		addCategory('fire');
+	}
+	if (/\bcoastal|surf|rip current|storm surge/.test(text)) {
+		addCategory('coastal');
+	}
+	if (/\bmarine|gale|small craft|hazardous seas|tsunami/.test(text)) {
+		addCategory('marine');
+	}
+	if (/\bair quality|air stagnation|ozone|particulate/.test(text)) {
+		addCategory('air_quality');
+	}
+
+	if (categories.length === 0) {
+		addCategory('other');
+	}
+
+	return categories;
+}
+
+function isMajorImpactAlertEvent(
+	event: string,
+	severity: string,
+	impactCategories: AlertImpactCategory[] = [],
+): boolean {
+	const normalizedEvent = String(event || '').toLowerCase();
+	const normalizedSeverity = String(severity || '').toLowerCase();
+	if (normalizedSeverity === 'extreme') return true;
+	if (
+		/tornado warning|flash flood warning|flood warning|severe thunderstorm warning|extreme wind warning|high wind warning|hurricane warning|storm surge warning|blizzard warning|ice storm warning|excessive heat warning/.test(
+			normalizedEvent,
+		)
+	) {
+		return true;
+	}
+	if (normalizedEvent.includes('warning') && normalizedSeverity === 'severe') {
+		return true;
+	}
+	return impactCategories.includes('tornado') && normalizedEvent.includes('warning');
+}
+
+function compactAlertText(value: string): string {
+	return String(value || '')
+		.replace(/\r\n/g, '\n')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+function firstAlertSentence(value: string): string {
+	const normalized = formatAlertDescription(String(value || ''));
+	const lines = normalized
+		.split('\n')
+		.map((line) => line.trim())
+		.filter(Boolean);
+
+	for (const line of lines) {
+		const withoutLabel = line
+			.replace(/^[A-Z][A-Z/\s]{2,40}:\s*/i, '')
+			.replace(/^\*\s*/, '')
+			.trim();
+		if (withoutLabel) {
+			return withoutLabel;
+		}
+	}
+
+	return '';
+}
+
+function deriveAlertSummary(headline: string, description: string): string {
+	const explicitHeadline = compactAlertText(headline);
+	if (explicitHeadline) return truncateText(explicitHeadline, 220);
+	const fromDescription = compactAlertText(firstAlertSentence(description));
+	if (fromDescription) return truncateText(fromDescription, 220);
+	return 'Review details for location and timing.';
+}
+
+function deriveInstructionsSummary(instruction: string, description: string): string {
+	const explicitInstruction = compactAlertText(firstAlertSentence(instruction));
+	if (explicitInstruction) return truncateText(explicitInstruction, 220);
+	const fallback = compactAlertText(firstAlertSentence(description));
+	if (fallback) return truncateText(fallback, 220);
+	return '';
+}
+
+function canonicalAlertDetailUrl(alertId: string): string {
+	const normalizedId = String(alertId || '').trim();
+	if (!normalizedId) return '/alerts';
+	return `/alerts/${encodeURIComponent(normalizedId)}`;
+}
+
+function collectGeometryCoordinatePairs(geometry: any): Array<[number, number]> {
+	const pairs: Array<[number, number]> = [];
+	if (!geometry || typeof geometry !== 'object') return pairs;
+
+	const pushPair = (candidate: any) => {
+		if (!Array.isArray(candidate) || candidate.length < 2) return;
+		const lon = Number(candidate[0]);
+		const lat = Number(candidate[1]);
+		if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+		if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+		pairs.push([lat, lon]);
+	};
+
+	const visit = (node: any) => {
+		if (!Array.isArray(node)) return;
+		if (node.length >= 2 && typeof node[0] !== 'object' && typeof node[1] !== 'object') {
+			pushPair(node);
+			return;
+		}
+		for (const child of node) {
+			visit(child);
+		}
+	};
+
+	visit(geometry.coordinates);
+	return pairs;
+}
+
+function centroidFromGeometry(feature: any): { lat?: number; lon?: number } {
+	const pairs = collectGeometryCoordinatePairs(feature?.geometry);
+	if (pairs.length === 0) return {};
+	const [latTotal, lonTotal] = pairs.reduce(
+		(acc, [lat, lon]) => [acc[0] + lat, acc[1] + lon],
+		[0, 0],
+	);
+	return {
+		lat: Number((latTotal / pairs.length).toFixed(4)),
+		lon: Number((lonTotal / pairs.length).toFixed(4)),
+	};
+}
+
+function normalizeAlertFeature(
+	feature: any,
+	lifecycleByAlertId?: Record<string, AlertChangeType | null>,
+) {
+	const p = feature?.properties ?? {};
+	const id = String(feature?.id ?? p.id ?? '');
+	const event = String(p.event ?? '');
+	const headline = String(p.headline ?? '');
+	const description = String(p.description ?? '');
+	const instruction = String(p.instruction ?? '');
+	const location = centroidFromGeometry(feature);
+	const lifecycleStatus = lifecycleByAlertId?.[id] || null;
+	const impactCategories = deriveAlertImpactCategories(event, headline, description);
+	const isMajor = isMajorImpactAlertEvent(event, String(p.severity ?? ''), impactCategories);
+	return {
+		id,
+		stateCode: extractStateCode(feature),
+		category: classifyAlertCategoryFromEvent(event),
+		impactCategories,
+		isMajor,
+		detailUrl: canonicalAlertDetailUrl(id),
+		summary: deriveAlertSummary(headline, description),
+		instructionsSummary: deriveInstructionsSummary(instruction, description),
+		lifecycleStatus,
+		lat: location.lat ?? null,
+		lon: location.lon ?? null,
+		event,
+		areaDesc: String(p.areaDesc ?? ''),
+		severity: String(p.severity ?? ''),
+		status: String(p.status ?? ''),
+		urgency: String(p.urgency ?? ''),
+		certainty: String(p.certainty ?? ''),
+		headline,
+		description,
+		instruction,
+		sent: String(p.sent ?? ''),
+		effective: String(p.effective ?? ''),
+		onset: String(p.onset ?? ''),
+		expires: String(p.expires ?? ''),
+		updated: String(p.updated ?? ''),
+		nwsUrl: String(p['@id'] ?? p.url ?? ''),
+		ugc: Array.isArray(p.geocode?.UGC) ? p.geocode.UGC : [],
+	};
+}
+
+function buildAlertsMeta(input: {
+	lastPoll: string | null;
+	syncError?: string | null;
+	count: number;
+}) {
+	const generatedAt = new Date().toISOString();
+	const staleMinutes = staleMinutesFromLastPoll(input.lastPoll);
+	return {
+		lastPoll: input.lastPoll,
+		generatedAt,
+		syncError: input.syncError ?? null,
+		stale: staleMinutes >= 15,
+		staleMinutes,
+		count: input.count,
+	};
+}
+
+async function handleApiAlerts(request: Request, env: Env): Promise<Response> {
 	let map = await readAlertMap(env);
 	let error: string | undefined;
-	if (Object.keys(map).length === 0) {
+	const lastPollBefore = await env.WEATHER_KV.get(KV_LAST_POLL);
+	if (
+		Object.keys(map).length === 0
+		|| shouldAutoRefreshStaleAlertsInLocalDev(request, lastPollBefore ?? null)
+	) {
 		const syncResult = await syncAlerts(env);
 		map = syncResult.map;
 		error = syncResult.error;
 	}
-	const alerts = Object.values(map).map((feature: any) => {
-		const p = feature?.properties ?? {};
-		const id = String(feature?.id ?? p.id ?? '');
-		return {
-			id,
-			stateCode: extractStateCode(feature),
-			event: String(p.event ?? ''),
-			areaDesc: String(p.areaDesc ?? ''),
-			severity: String(p.severity ?? ''),
-			status: String(p.status ?? ''),
-			urgency: String(p.urgency ?? ''),
-			certainty: String(p.certainty ?? ''),
-			headline: String(p.headline ?? ''),
-			description: String(p.description ?? ''),
-			instruction: String(p.instruction ?? ''),
-			sent: String(p.sent ?? ''),
-			effective: String(p.effective ?? ''),
-			onset: String(p.onset ?? ''),
-			expires: String(p.expires ?? ''),
-			updated: String(p.updated ?? ''),
-			nwsUrl: String(p['@id'] ?? ''),
-			ugc: Array.isArray(p.geocode?.UGC) ? p.geocode.UGC : [],
-		};
-	});
+	const lifecycleSnapshot = await readAlertLifecycleSnapshot(env);
+	const lifecycleByAlertId = lifecycleSnapshot
+		? latestLifecycleStatusByAlertId(lifecycleSnapshot)
+		: {};
+	const alerts = Object.values(map).map((feature: any) =>
+		normalizeAlertFeature(feature, lifecycleByAlertId),
+	);
 	const lastPoll = await env.WEATHER_KV.get(KV_LAST_POLL);
+	const meta = buildAlertsMeta({
+		lastPoll: lastPoll ?? null,
+		syncError: error ?? null,
+		count: alerts.length,
+	});
+	await recordStaleDataCondition(env, meta.staleMinutes, 'api_alerts_response');
 	const headers = {
 		...corsHeaders(),
 		'Content-Type': 'application/json; charset=utf-8',
@@ -2335,12 +4719,442 @@ async function handleApiAlerts(env: Env): Promise<Response> {
 	};
 	return new Response(JSON.stringify({
 		alerts,
+		meta,
+		generatedAt: meta.generatedAt,
 		lastPoll: lastPoll ?? null,
 		syncError: error ?? null,
 	}), {
 		status: 200,
 		headers,
 	});
+}
+
+async function handleApiAlertDetail(request: Request, env: Env, alertId: string): Promise<Response> {
+	let map = await readAlertMap(env);
+	let error: string | undefined;
+	const lastPollBefore = await env.WEATHER_KV.get(KV_LAST_POLL);
+	if (
+		Object.keys(map).length === 0
+		|| shouldAutoRefreshStaleAlertsInLocalDev(request, lastPollBefore ?? null)
+	) {
+		const syncResult = await syncAlerts(env);
+		map = syncResult.map;
+		error = syncResult.error;
+	}
+
+	const directMatch = map[alertId];
+	const fallbackMatch = directMatch
+		? directMatch
+		: Object.values(map).find((feature: any) => {
+			const p = feature?.properties ?? {};
+			const id = String(feature?.id ?? p.id ?? '');
+			return id === alertId;
+		});
+
+	const headers = {
+		...corsHeaders(),
+		'Content-Type': 'application/json; charset=utf-8',
+		'Cache-Control': 'no-store',
+	};
+
+	if (!fallbackMatch) {
+		return new Response(JSON.stringify({ error: 'Alert not found.' }), {
+			status: 404,
+			headers,
+		});
+	}
+
+	const lastPoll = await env.WEATHER_KV.get(KV_LAST_POLL);
+	const meta = buildAlertsMeta({
+		lastPoll: lastPoll ?? null,
+		syncError: error ?? null,
+		count: 1,
+	});
+	await recordStaleDataCondition(env, meta.staleMinutes, 'api_alert_detail_response');
+	const lifecycleSnapshot = await readAlertLifecycleSnapshot(env);
+	const lifecycleByAlertId = lifecycleSnapshot
+		? latestLifecycleStatusByAlertId(lifecycleSnapshot)
+		: {};
+
+	return new Response(JSON.stringify({
+		alert: normalizeAlertFeature(fallbackMatch, lifecycleByAlertId),
+		meta,
+		generatedAt: meta.generatedAt,
+		lastPoll: meta.lastPoll,
+		syncError: error ?? null,
+	}), {
+		status: 200,
+		headers,
+	});
+}
+
+function normalizeHistorySeverityBucket(
+	value: string,
+): 'extreme' | 'severe' | 'moderate' | 'minor' | 'unknown' {
+	const normalized = String(value || '').trim().toLowerCase();
+	if (normalized === 'extreme') return 'extreme';
+	if (normalized === 'severe') return 'severe';
+	if (normalized === 'moderate') return 'moderate';
+	if (normalized === 'minor') return 'minor';
+	return 'unknown';
+}
+
+function summarizeAlertHistoryDay(
+	entries: AlertHistoryEntry[],
+	snapshot: AlertHistorySnapshotCounts,
+): {
+	totalEntries: number;
+	activeAlertCount: number;
+	activeWarningCount: number;
+	activeMajorCount: number;
+	byLifecycle: Record<AlertChangeType, number>;
+	byCategory: Record<'warning' | 'watch' | 'advisory' | 'statement' | 'other', number>;
+	bySeverity: Record<'extreme' | 'severe' | 'moderate' | 'minor' | 'unknown', number>;
+	topEvents: Array<{ event: string; count: number }>;
+	notableWarnings: Array<{
+		alertId: string;
+		event: string;
+		areaDesc: string;
+		severity: string;
+		changedAt: string;
+		changeType: AlertChangeType;
+	}>;
+} {
+	const byLifecycle: Record<AlertChangeType, number> = {
+		new: 0,
+		updated: 0,
+		extended: 0,
+		expired: 0,
+		all_clear: 0,
+	};
+	const byCategory: Record<'warning' | 'watch' | 'advisory' | 'statement' | 'other', number> = {
+		warning: 0,
+		watch: 0,
+		advisory: 0,
+		statement: 0,
+		other: 0,
+	};
+	const bySeverity: Record<'extreme' | 'severe' | 'moderate' | 'minor' | 'unknown', number> = {
+		extreme: 0,
+		severe: 0,
+		moderate: 0,
+		minor: 0,
+		unknown: 0,
+	};
+	const eventCounts = new Map<string, number>();
+
+	for (const entry of entries) {
+		byLifecycle[entry.changeType] += 1;
+		const category = String(entry.category || '').trim().toLowerCase();
+		if (
+			category === 'warning'
+			|| category === 'watch'
+			|| category === 'advisory'
+			|| category === 'statement'
+		) {
+			byCategory[category] += 1;
+		} else {
+			byCategory.other += 1;
+		}
+		bySeverity[normalizeHistorySeverityBucket(entry.severity)] += 1;
+		const eventKey = String(entry.event || 'Weather Alert').trim() || 'Weather Alert';
+		eventCounts.set(eventKey, (eventCounts.get(eventKey) || 0) + 1);
+	}
+
+	const topEvents = Array.from(eventCounts.entries())
+		.map(([event, count]) => ({ event, count }))
+		.sort((a, b) => {
+			if (a.count !== b.count) return b.count - a.count;
+			return a.event.localeCompare(b.event);
+		})
+		.slice(0, 4);
+
+	const notableWarnings = entries
+		.filter((entry) => {
+			const category = String(entry.category || '').trim().toLowerCase()
+				|| classifyAlertCategoryFromEvent(entry.event);
+			const severityBucket = normalizeHistorySeverityBucket(entry.severity);
+			return category === 'warning' && (entry.isMajor || severityBucket === 'extreme' || severityBucket === 'severe');
+		})
+		.sort((a, b) => Date.parse(b.changedAt) - Date.parse(a.changedAt))
+		.slice(0, 4)
+		.map((entry) => ({
+			alertId: entry.alertId,
+			event: entry.event,
+			areaDesc: entry.areaDesc,
+			severity: entry.severity,
+			changedAt: entry.changedAt,
+			changeType: entry.changeType,
+		}));
+
+	return {
+		totalEntries: entries.length,
+		activeAlertCount: snapshot.activeAlertCount,
+		activeWarningCount: snapshot.activeWarningCount,
+		activeMajorCount: snapshot.activeMajorCount,
+		byLifecycle,
+		byCategory,
+		bySeverity,
+		topEvents,
+		notableWarnings,
+	};
+}
+
+async function handleApiAlertHistory(request: Request, env: Env): Promise<Response> {
+	const headers = apiCorsHeaders(request.headers.get('Origin'));
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	const url = new URL(request.url);
+	const stateInput = String(url.searchParams.get('state') || '').trim();
+	const countyInput = String(url.searchParams.get('countyCode') || '').trim();
+	const daysInput = String(url.searchParams.get('days') || '').trim();
+
+	let stateCode: string | null = null;
+	if (stateInput) {
+		stateCode = normalizeStateCode(stateInput);
+		if (!stateCode) {
+			return new Response(JSON.stringify({ error: 'Invalid state filter.' }), {
+				status: 400,
+				headers,
+			});
+		}
+	}
+
+	let countyCode: string | null = null;
+	if (countyInput) {
+		countyCode = normalizeCountyFips(countyInput);
+		if (!countyCode) {
+			return new Response(JSON.stringify({ error: 'Invalid countyCode filter.' }), {
+				status: 400,
+				headers,
+			});
+		}
+	}
+
+	let requestedDays = 7;
+	if (daysInput) {
+		const parsedDays = Number(daysInput);
+		if (!Number.isInteger(parsedDays) || parsedDays <= 0 || parsedDays > ALERT_HISTORY_MAX_QUERY_DAYS) {
+			return new Response(
+				JSON.stringify({
+					error: `days must be an integer between 1 and ${ALERT_HISTORY_MAX_QUERY_DAYS}.`,
+				}),
+				{
+					status: 400,
+					headers,
+				},
+			);
+		}
+		requestedDays = parsedDays;
+	}
+
+	let historyByDay = await readAlertHistoryByDay(env);
+	if (Object.keys(historyByDay).length === 0) {
+		const { map } = await syncAlerts(env);
+		const lifecycleDiff = await syncAlertLifecycleState(env, map);
+		historyByDay = await syncAlertHistoryDailySnapshots(env, map, lifecycleDiff.changes);
+	}
+
+	const nowMs = Date.now();
+	const cutoffMs = nowMs - (requestedDays * 24 * 60 * 60 * 1000);
+	const dayRecords = Object.values(historyByDay)
+		.map((record) => normalizeAlertHistoryDayRecord(record))
+		.filter((record): record is AlertHistoryDayRecord => !!record)
+		.sort((a, b) => b.day.localeCompare(a.day));
+
+	const days = dayRecords
+		.map((record) => {
+			const dayMs = Date.parse(`${record.day}T00:00:00.000Z`);
+			if (!Number.isFinite(dayMs)) return null;
+			const dayEndsMs = dayMs + (24 * 60 * 60 * 1000);
+			if (dayEndsMs < cutoffMs) return null;
+
+			const scopedEntries = record.entries.filter((entry) => {
+				const changedAtMs = Date.parse(entry.changedAt);
+				if (!Number.isFinite(changedAtMs) || changedAtMs < cutoffMs) {
+					return false;
+				}
+				if (stateCode && !entry.stateCodes.includes(stateCode)) {
+					return false;
+				}
+				if (countyCode && !entry.countyCodes.includes(countyCode)) {
+					return false;
+				}
+				return true;
+			});
+
+			const stateScopedSnapshot = stateCode
+				? normalizeAlertHistorySnapshotCounts(record.snapshot.byState[stateCode])
+				: normalizeAlertHistorySnapshotCounts(record.snapshot);
+
+			let scopedSnapshot = stateScopedSnapshot;
+			if (countyCode) {
+				const countySnapshot = readAlertHistorySnapshotCountsByCounty(
+					record.snapshot,
+					countyCode,
+					stateCode,
+				);
+				scopedSnapshot = countySnapshot
+					? countySnapshot
+					: summarizeAlertHistoryEntriesAsSnapshot(scopedEntries);
+			}
+			const summary = summarizeAlertHistoryDay(scopedEntries, scopedSnapshot);
+
+			if (summary.totalEntries === 0 && summary.activeAlertCount === 0) {
+				return null;
+			}
+
+			return {
+				day: record.day,
+				generatedAt: record.updatedAt,
+				summary,
+				entries: scopedEntries,
+			};
+		})
+		.filter((record): record is {
+			day: string;
+			generatedAt: string;
+			summary: ReturnType<typeof summarizeAlertHistoryDay>;
+			entries: AlertHistoryEntry[];
+		} => !!record);
+
+	return new Response(
+		JSON.stringify({
+			days,
+			generatedAt: new Date().toISOString(),
+			meta: {
+				state: stateCode,
+				countyCode,
+				daysRequested: requestedDays,
+			},
+		}),
+		{
+			status: 200,
+			headers,
+		},
+	);
+}
+
+async function handleApiAlertChanges(request: Request, env: Env): Promise<Response> {
+	const headers = apiCorsHeaders(request.headers.get('Origin'));
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	const url = new URL(request.url);
+	const sinceInput = String(url.searchParams.get('since') || '').trim();
+	const stateInput = String(url.searchParams.get('state') || '').trim();
+	const countyInput = String(url.searchParams.get('countyCode') || '').trim();
+
+	let sinceMs: number | null = null;
+	if (sinceInput) {
+		const parsed = Date.parse(sinceInput);
+		if (!Number.isFinite(parsed)) {
+			return new Response(JSON.stringify({ error: 'Invalid since timestamp.' }), {
+				status: 400,
+				headers,
+			});
+		}
+		sinceMs = parsed;
+	}
+
+	let stateCode: string | null = null;
+	if (stateInput) {
+		stateCode = normalizeStateCode(stateInput);
+		if (!stateCode) {
+			return new Response(JSON.stringify({ error: 'Invalid state filter.' }), {
+				status: 400,
+				headers,
+			});
+		}
+	}
+
+	let countyCode: string | null = null;
+	if (countyInput) {
+		countyCode = normalizeCountyFips(countyInput);
+		if (!countyCode) {
+			return new Response(JSON.stringify({ error: 'Invalid countyCode filter.' }), {
+				status: 400,
+				headers,
+			});
+		}
+	}
+
+	const changes = await readAlertChangeRecords(env);
+	const filtered = changes.filter((change) => {
+		const changedAtMs = Date.parse(change.changedAt);
+		if (sinceMs !== null && (!Number.isFinite(changedAtMs) || changedAtMs <= sinceMs)) {
+			return false;
+		}
+		if (stateCode && !change.stateCodes.includes(stateCode)) {
+			return false;
+		}
+		if (countyCode && !change.countyCodes.includes(countyCode)) {
+			return false;
+		}
+		return true;
+	});
+
+	return new Response(
+		JSON.stringify({
+			changes: filtered,
+			generatedAt: new Date().toISOString(),
+		}),
+		{
+			status: 200,
+			headers,
+		},
+	);
+}
+
+async function handleApiDebugSummary(request: Request, env: Env): Promise<Response> {
+	const headers = debugCorsHeaders(request.headers.get('Origin'));
+	headers.set('Content-Type', 'application/json; charset=utf-8');
+	headers.set('Cache-Control', 'no-store');
+
+	const expectedBearerToken = getDebugSummaryBearerToken(env);
+	if (!expectedBearerToken) {
+		return new Response(
+			JSON.stringify({
+				error: 'Debug summary is disabled until DEBUG_SUMMARY_BEARER_TOKEN is configured.',
+			}),
+			{
+				status: 503,
+				headers,
+			},
+		);
+	}
+
+	if (!hasDebugSummaryAccess(request, expectedBearerToken)) {
+		headers.set('WWW-Authenticate', 'Bearer realm="debug-summary"');
+		return new Response(JSON.stringify({ error: 'Unauthorized.' }), {
+			status: 401,
+			headers,
+		});
+	}
+
+	const map = pruneExpired(await readAlertMap(env));
+	const diagnostics = await readOperationalDiagnostics(env);
+	const pushSubscriptionCount = await countPushSubscriptionRecords(env);
+
+	return new Response(
+		JSON.stringify({
+			generatedAt: new Date().toISOString(),
+			lastSuccessfulSync: diagnostics.lastSuccessfulSyncAt,
+			lastSyncAttempt: diagnostics.lastSyncAttemptAt,
+			lastSyncError: diagnostics.lastSyncError,
+			activeAlertCount: Object.keys(map).length,
+			pushSubscriptionCount,
+			invalidSubscriptionCount: diagnostics.invalidSubscriptionCount,
+			lastInvalidSubscriptionAt: diagnostics.lastInvalidSubscriptionAt,
+			lastInvalidSubscriptionReason: diagnostics.lastInvalidSubscriptionReason,
+			recentPushFailures: diagnostics.recentPushFailures,
+		}),
+		{
+			status: 200,
+			headers,
+		},
+	);
 }
 
 async function lookupCountyByLatLon(lat: number, lon: number): Promise<{ county?: string; countyCode?: string }> {
@@ -3348,9 +6162,7 @@ async function handleApiWeather(request: Request): Promise<Response> {
 			summary: String(observation?.properties?.textDescription || current.condition || ''),
 		});
 
-		console.log("SUN DATA", sun);
-		console.log("CURRENT OUTPUT", current);
-
+		const generatedAt = new Date().toISOString();
 		headers.set('Cache-Control', 'public, max-age=30, must-revalidate');
 		return new Response(JSON.stringify({
 			location: {
@@ -3369,7 +6181,11 @@ async function handleApiWeather(request: Request): Promise<Response> {
 			hourly,
 			daily,
 			radar,
-			updated: new Date().toISOString(),
+			updated: generatedAt,
+			generatedAt,
+			meta: {
+				generatedAt,
+			},
 		}), { status: 200, headers });
 	} catch (error) {
 		const status = error instanceof HttpError ? error.status : 500;
@@ -3391,6 +6207,7 @@ async function handleApiRadar(request: Request): Promise<Response> {
 		const images = radarImagesForStation(radarStation);
 		const direction = toCompassDirection(measurementValue(observation?.properties?.windDirection));
 
+		const generatedAt = new Date().toISOString();
 		headers.set('Cache-Control', 'public, max-age=30, must-revalidate');
 		return new Response(JSON.stringify({
 			location: {
@@ -3406,6 +6223,10 @@ async function handleApiRadar(request: Request): Promise<Response> {
 			updated: String(observation?.properties?.timestamp || new Date().toISOString()),
 			summary: String(observation?.properties?.textDescription || ''),
 			stormDirection: direction,
+			generatedAt,
+			meta: {
+				generatedAt,
+			},
 		}), { status: 200, headers });
 	} catch (error) {
 		const status = error instanceof HttpError ? error.status : 500;
@@ -3722,12 +6543,31 @@ async function handlePost(request: Request, env: Env): Promise<Response> {
 async function handleScheduled(env: Env): Promise<void> {
 	// Sync alerts with ETag — if NWS returns 304, this costs ~2 KV reads total
 	const { map } = await syncAlerts(env);
-	await dispatchStatePushNotifications(env, map);
+	const lifecycleDiff = await syncAlertLifecycleState(env, map);
+	await syncAlertHistoryDailySnapshots(env, map, lifecycleDiff.changes);
+	await dispatchStatePushNotifications(env, map, lifecycleDiff.changes);
 }
 
 // ---------------------------------------------------------------------------
 // Exported worker — fetch + scheduled handlers
 // ---------------------------------------------------------------------------
+
+export const __testing = {
+	normalizeAlertFeature,
+	buildStatePushMessageData,
+	buildLifecyclePushMessageData,
+	deriveAlertImpactCategories,
+	isMajorImpactAlertEvent,
+	shouldSendAllClearNotification,
+	batchLifecycleEntriesForDeliveryMode,
+	diffAlertLifecycleSnapshots,
+	normalizeAlertChangeRecord,
+	normalizeAlertHistoryDayRecord,
+	buildNextAlertHistoryByDay,
+	canonicalAlertDetailUrl,
+	extractCountyFipsCodes,
+	alertMatchesScopeCounty,
+};
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -3776,32 +6616,60 @@ export default {
 		}
 
 		if (request.method === 'OPTIONS') {
+			if (url.pathname === '/api/debug/summary') {
+				return new Response(null, {
+					status: 204,
+					headers: debugCorsHeaders(request.headers.get('Origin')),
+				});
+			}
+			if (url.pathname.startsWith('/api/push/')) {
+				return new Response(null, {
+					status: 204,
+					headers: pushCorsHeaders(request.headers.get('Origin')),
+				});
+			}
+			if (url.pathname.startsWith('/api/')) {
+				return new Response(null, {
+					status: 204,
+					headers: apiCorsHeaders(request.headers.get('Origin')),
+				});
+			}
 			return new Response(null, {
 				status: 204,
 				headers: corsHeaders(),
 			});
 		}
-
-		if (url.pathname === '/api/alerts' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
-		}
-		if (url.pathname === '/api/geocode' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
-		}
-		if (url.pathname === '/api/location' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
-		}
-		if (url.pathname === '/api/weather' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
-		}
-		if (url.pathname === '/api/radar' && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: apiCorsHeaders(request.headers.get('Origin')) });
-		}
-		if (url.pathname.startsWith('/api/push/') && request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: pushCorsHeaders() });
-		}
 		if (url.pathname === '/api/alerts' && request.method === 'GET') {
-			return await handleApiAlerts(env);
+			return await handleApiAlerts(request, env);
+		}
+		if (url.pathname === '/api/alerts/changes' && request.method === 'GET') {
+			return await handleApiAlertChanges(request, env);
+		}
+		if (url.pathname === '/api/alerts/history' && request.method === 'GET') {
+			return await handleApiAlertHistory(request, env);
+		}
+		if (url.pathname === '/api/debug/summary' && request.method === 'GET') {
+			return await handleApiDebugSummary(request, env);
+		}
+		if (url.pathname.startsWith('/api/alerts/') && request.method === 'GET') {
+			const rawAlertId = url.pathname.slice('/api/alerts/'.length);
+			let alertId = rawAlertId;
+			try {
+				alertId = decodeURIComponent(rawAlertId);
+			} catch {
+				alertId = rawAlertId;
+			}
+			if (!alertId) {
+				return new Response(JSON.stringify({ error: 'Alert not found.' }), {
+					status: 404,
+					headers: {
+						...corsHeaders(),
+						'Content-Type': 'application/json; charset=utf-8',
+						'Cache-Control': 'no-store',
+					},
+				});
+			}
+			return await handleApiAlertDetail(request, env, alertId);
 		}
 		if (url.pathname === '/api/geocode' && request.method === 'GET') {
 			return await handleApiGeocode(request);
@@ -3820,6 +6688,9 @@ export default {
 		}
 		if (url.pathname === '/api/push/subscribe' && request.method === 'POST') {
 			return await handlePushSubscribe(request, env);
+		}
+		if (url.pathname === '/api/push/test' && request.method === 'POST') {
+			return await handlePushTest(request, env);
 		}
 		if (url.pathname === '/api/push/unsubscribe' && request.method === 'POST') {
 			return await handlePushUnsubscribe(request, env);

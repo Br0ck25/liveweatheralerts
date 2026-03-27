@@ -74,7 +74,7 @@ npm run build
 ```bash
 cd "C:\Users\James\Desktop\Live Weather Alerts\frontend"
 npm run build
-npx wrangler pages deploy dist --project-name liveweatheralerts-frontend
+npx wrangler pages deploy dist --project-name liveweatheralerts
 ```
 
 4. Attach custom domain `liveweatheralerts.com` to the Pages project.
