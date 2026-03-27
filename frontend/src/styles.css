@@ -1577,6 +1577,21 @@ select {
   line-height: 1.58;
 }
 
+.sheet-actions {
+  margin-top: 0.48rem;
+}
+
+.sheet-actions .alert-action-tools {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.sheet-action-message {
+  margin-top: 0.58rem;
+  color: #31557d;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
 .sheet-toggle {
   margin-top: 0.78rem;
   width: 100%;

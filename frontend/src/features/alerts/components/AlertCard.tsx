@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { trackEvent } from "../../../lib/analytics/events";
 import type { AlertRecord } from "../../../types";
+import { AlertActionTools } from "./AlertActionTools";
 import { AlertLifecycleBadge } from "./AlertLifecycleBadge";
 import {
   alertAnchorId,
@@ -23,7 +25,9 @@ type AlertCardProps = {
 };
 
 export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProps) {
+  const navigate = useNavigate();
   const [isExpanded, setIsExpanded] = useState(isHighlighted);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (isHighlighted) {
@@ -71,6 +75,74 @@ export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProp
     countyCount === 1 ? "county" : "counties"
   }`;
   const lifecycleStatus = deriveAlertLifecycleStatus(alert);
+  const canonicalAbsoluteUrl = useMemo(() => {
+    if (typeof window === "undefined") return detailPath;
+    return new URL(detailPath, window.location.origin).toString();
+  }, [detailPath]);
+
+  const copyToClipboard = async (value: string): Promise<boolean> => {
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+      return false;
+    }
+
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const setCopyResult = (ok: boolean, successText: string) => {
+    if (ok) {
+      setActionMessage(successText);
+      return;
+    }
+    setActionMessage("Copy is unavailable in this browser context.");
+  };
+
+  const handleCopyLink = async () => {
+    const ok = await copyToClipboard(canonicalAbsoluteUrl);
+    setCopyResult(ok, "Alert link copied.");
+    if (ok) {
+      trackEvent("alert_detail_link_copied", { alertId: alert.id });
+    }
+  };
+
+  const handleCopySafetySteps = async () => {
+    const safetyText = instructionsText || summary;
+    const ok = await copyToClipboard(safetyText);
+    setCopyResult(ok, "Safety guidance copied.");
+    if (ok) {
+      trackEvent("alert_detail_safety_copied", { alertId: alert.id });
+    }
+  };
+
+  const handleShare = async () => {
+    if (typeof navigator !== "undefined" && navigator.share) {
+      try {
+        await navigator.share({
+          title: alert.headline || alert.event || "Weather alert",
+          text: summary || alert.event || "Weather alert details",
+          url: canonicalAbsoluteUrl
+        });
+        setActionMessage("Alert shared.");
+        trackEvent("alert_detail_shared", { alertId: alert.id });
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+      }
+    }
+
+    await handleCopyLink();
+  };
+
+  const handleOpenRadar = () => {
+    trackEvent("alert_detail_radar_clicked", { alertId: alert.id });
+    navigate(`${detailPath}#alert-radar-panel`);
+  };
 
   return (
     <article
@@ -113,10 +185,6 @@ export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProp
           <p>{formatTimeLeft(alert.expires)}</p>
         </div>
       </section>
-
-      <Link className="sheet-detail-link" to={detailPath}>
-        Open full alert details
-      </Link>
 
       <button
         type="button"
@@ -167,6 +235,23 @@ export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProp
               <p>{additional}</p>
             </section>
           ) : null}
+
+          <section className="sheet-section">
+            <h4>ALERT ACTIONS</h4>
+            <div className="sheet-actions">
+              <AlertActionTools
+                onShare={handleShare}
+                onCopyLink={handleCopyLink}
+                onCopySafetySteps={handleCopySafetySteps}
+                onOpenRadar={handleOpenRadar}
+              />
+            </div>
+            {actionMessage ? (
+              <p className="sheet-action-message" role="status" aria-live="polite">
+                {actionMessage}
+              </p>
+            ) : null}
+          </section>
 
           <footer className="sheet-footer">
             <div>

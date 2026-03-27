@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import { AlertCard } from "./AlertCard";
@@ -50,7 +50,7 @@ describe("AlertCard highlight sync", () => {
     });
   });
 
-  it("links to the canonical alert detail route", () => {
+  it("shows inline actions after expanding and removes the standalone detail link", () => {
     render(
       <MemoryRouter>
         <AlertCard alert={sampleAlert} index={0} />
@@ -58,7 +58,22 @@ describe("AlertCard highlight sync", () => {
     );
 
     expect(
-      screen.getByRole("link", { name: "Open full alert details" })
-    ).toHaveAttribute("href", "/alerts/alert-1");
+      screen.queryByRole("link", { name: "Open full alert details" })
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand details" }));
+
+    expect(
+      screen.getByRole("button", { name: "Share" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy link" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy safety steps" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "View radar" })
+    ).toBeInTheDocument();
   });
 });
