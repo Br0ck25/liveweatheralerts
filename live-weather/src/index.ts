@@ -2562,6 +2562,109 @@ async function fetchNwsJson(url: string, label: string): Promise<any> {
 	return await response.json();
 }
 
+async function fetchMapClickForecastJson(lat: number, lon: number): Promise<any | null> {
+	const url = new URL('https://forecast.weather.gov/MapClick.php');
+	url.searchParams.set('lat', lat.toFixed(2));
+	url.searchParams.set('lon', lon.toFixed(2));
+	url.searchParams.set('unit', '0');
+	url.searchParams.set('lg', 'english');
+	url.searchParams.set('FcstType', 'json');
+
+	try {
+		const response = await fetch(url.toString(), {
+			headers: {
+				'User-Agent': NWS_USER_AGENT,
+				Accept: 'application/json, text/plain;q=0.9, */*;q=0.8',
+			},
+		});
+		if (!response.ok) return null;
+		const payload = await response.json();
+		return payload && typeof payload === 'object' ? payload : null;
+	} catch {
+		return null;
+	}
+}
+
+type MapClickPeriodOverride = {
+	name: string;
+	startMs: number;
+	shortForecast: string;
+	detailedForecast: string;
+	precipitationChance: number | null;
+	icon: string;
+};
+
+function normalizeMapClickText(value: unknown): string {
+	return String(value ?? '')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+function normalizeMapClickPop(value: unknown): number | null {
+	const n = Number(value);
+	return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+}
+
+function buildMapClickPeriodOverrides(payload: any): MapClickPeriodOverride[] {
+	const periodNames = Array.isArray(payload?.time?.startPeriodName)
+		? payload.time.startPeriodName
+		: [];
+	const startTimes = Array.isArray(payload?.time?.startValidTime)
+		? payload.time.startValidTime
+		: [];
+	const texts = Array.isArray(payload?.data?.text) ? payload.data.text : [];
+	const weather = Array.isArray(payload?.data?.weather) ? payload.data.weather : [];
+	const pops = Array.isArray(payload?.data?.pop) ? payload.data.pop : [];
+	const icons = Array.isArray(payload?.data?.iconLink) ? payload.data.iconLink : [];
+
+	const total = Math.min(periodNames.length, startTimes.length);
+	const overrides: MapClickPeriodOverride[] = [];
+
+	for (let i = 0; i < total; i++) {
+		const startMs = Date.parse(String(startTimes[i] ?? ''));
+		if (!Number.isFinite(startMs)) continue;
+
+		const name = normalizeMapClickText(periodNames[i]);
+		const shortForecast = normalizeMapClickText(weather[i]);
+		const detailedForecast = normalizeMapClickText(texts[i]);
+		const precipitationChance = normalizeMapClickPop(pops[i]);
+		const icon = normalizeMapClickText(icons[i]);
+
+		overrides.push({
+			name,
+			startMs,
+			shortForecast,
+			detailedForecast,
+			precipitationChance,
+			icon,
+		});
+	}
+
+	return overrides;
+}
+
+function findMapClickPeriodOverride(
+	overrides: MapClickPeriodOverride[],
+	period: any,
+): MapClickPeriodOverride | null {
+	if (!overrides.length) return null;
+
+	const periodStartMs = Date.parse(String(period?.startTime || ''));
+	const periodName = String(period?.name || '').trim().toLowerCase();
+
+	if (Number.isFinite(periodStartMs)) {
+		const byStart = overrides.find((item) => item.startMs === periodStartMs);
+		if (byStart) return byStart;
+	}
+
+	if (periodName) {
+		const byName = overrides.find((item) => item.name.toLowerCase() === periodName);
+		if (byName) return byName;
+	}
+
+	return null;
+}
+
 function measurementValue(measurement: any): number | null {
 	const value = Number(measurement?.value);
 	return Number.isFinite(value) ? value : null;
@@ -2846,7 +2949,7 @@ function normalizeHourlyPeriods(hourlyPeriods: any[]): any[] {
 		});
 }
 
-function normalizeDailyPeriods(periods: any[]): any[] {
+function normalizeDailyPeriods(periods: any[], mapClickOverrides: MapClickPeriodOverride[] = []): any[] {
 	const normalized: any[] = [];
 
 	for (let i = 0; i < periods.length; i++) {
@@ -2855,14 +2958,36 @@ function normalizeDailyPeriods(periods: any[]): any[] {
 
 		// Prefer daytime periods as the main day cards
 		if (period.isDaytime === true) {
+			const override = findMapClickPeriodOverride(mapClickOverrides, period);
 			const next = periods[i + 1];
+			const nightPeriod = next && next.isDaytime === false ? next : null;
+			const nightOverride = nightPeriod
+				? findMapClickPeriodOverride(mapClickOverrides, nightPeriod)
+				: null;
 			const highF = forecastTemperatureToF(period);
 			const lowF =
-				next && next.isDaytime === false
-					? forecastTemperatureToF(next)
+				nightPeriod
+					? forecastTemperatureToF(nightPeriod)
 					: null;
 
-			const forecastText = String(period?.shortForecast || "");
+			const forecastText = String(
+				override?.shortForecast || period?.shortForecast || '',
+			);
+			const detailedForecastText = String(
+				override?.detailedForecast || period?.detailedForecast || '',
+			);
+			const precipitationChance = firstFinite(
+				override?.precipitationChance ?? null,
+				Number.isFinite(Number(period?.probabilityOfPrecipitation?.value))
+					? Number(period?.probabilityOfPrecipitation?.value)
+					: null,
+			);
+			const nightPrecipitationChance = firstFinite(
+				nightOverride?.precipitationChance ?? null,
+				Number.isFinite(Number(nightPeriod?.probabilityOfPrecipitation?.value))
+					? Number(nightPeriod?.probabilityOfPrecipitation?.value)
+					: null,
+			);
 			normalized.push({
 				name: String(period?.name || ""),
 				startTime: String(period?.startTime || ""),
@@ -2871,11 +2996,20 @@ function normalizeDailyPeriods(periods: any[]): any[] {
 				lowF: lowF !== null ? roundTo(lowF, 0) : null,
 				temperatureF: roundTo(highF, 0),
 				shortForecast: forecastText,
-				detailedForecast: String(period?.detailedForecast || ""),
+				detailedForecast: detailedForecastText,
 				windSpeed: String(period?.windSpeed || ""),
 				windDirection: String(period?.windDirection || ""),
-				precipitationChance: Number(period?.probabilityOfPrecipitation?.value ?? 0),
-				icon: String(period?.icon || ""),
+				precipitationChance: roundTo(precipitationChance, 0),
+				icon: String(override?.icon || period?.icon || ''),
+				nightName: String(nightPeriod?.name || ""),
+				nightShortForecast: String(
+					nightOverride?.shortForecast || nightPeriod?.shortForecast || '',
+				),
+				nightDetailedForecast: String(
+					nightOverride?.detailedForecast || nightPeriod?.detailedForecast || '',
+				),
+				nightPrecipitationChance: roundTo(nightPrecipitationChance, 0),
+				nightIcon: String(nightOverride?.icon || nightPeriod?.icon || ''),
 				severity: severityFromForecastText(forecastText),
 			});
 		}
@@ -3161,10 +3295,11 @@ async function handleApiWeather(request: Request): Promise<Response> {
 			throw new HttpError(502, 'Forecast endpoints are unavailable for this location.');
 		}
 
-		const [forecastPayload, hourlyPayload, observation] = await Promise.all([
+		const [forecastPayload, hourlyPayload, observation, mapClickPayload] = await Promise.all([
 			fetchNwsJson(point.forecast, 'Daily forecast'),
 			fetchNwsJson(point.forecastHourly, 'Hourly forecast'),
 			fetchLatestObservation(point.observationStations, point.lat, point.lon),
+			fetchMapClickForecastJson(point.lat, point.lon),
 		]);
 
 		const hourlyPeriodsRaw = Array.isArray(hourlyPayload?.properties?.periods)
@@ -3175,7 +3310,8 @@ async function handleApiWeather(request: Request): Promise<Response> {
 			: [];
 
 		const hourly = normalizeHourlyPeriods(hourlyPeriodsRaw);
-		const daily = normalizeDailyPeriods(dailyPeriodsRaw);
+		const mapClickOverrides = buildMapClickPeriodOverrides(mapClickPayload);
+		const daily = normalizeDailyPeriods(dailyPeriodsRaw, mapClickOverrides);
 		const sun = buildSunTimesFromDailyPeriods(dailyPeriodsRaw);
 		if (!sun.sunrise && observation?.properties?.sunrise) {
 			sun.sunrise = String(observation.properties.sunrise);

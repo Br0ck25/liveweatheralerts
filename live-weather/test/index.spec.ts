@@ -240,6 +240,129 @@ describe('Live Weather Admin worker', () => {
 		expect(json.hourly[0].startTime).toBe(hourlyPeriods[2].startTime);
 	});
 
+	it('uses MapClick text for daily details when it differs from api.weather.gov', async () => {
+		(globalThis.fetch as any).mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes('api.weather.gov/points/')) {
+				return new Response(JSON.stringify({ properties: {
+					forecast: 'https://api.weather.gov/mock_forecast',
+					forecastHourly: 'https://api.weather.gov/mock_hourly',
+					observationStations: 'https://api.weather.gov/mock_observations',
+				} }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url === 'https://api.weather.gov/mock_forecast') {
+				return new Response(JSON.stringify({ properties: { periods: [
+					{
+						name: 'Tonight',
+						startTime: '2026-03-26T20:00:00-04:00',
+						isDaytime: false,
+						temperature: 64,
+						temperatureUnit: 'F',
+						shortForecast: 'Partly Cloudy',
+						detailedForecast: 'Tonight baseline text.',
+						icon: 'night',
+						windSpeed: '9 mph',
+						windDirection: 'SW',
+						probabilityOfPrecipitation: { value: 2 },
+					},
+					{
+						name: 'Friday',
+						startTime: '2026-03-27T06:00:00-04:00',
+						isDaytime: true,
+						temperature: 66,
+						temperatureUnit: 'F',
+						shortForecast: 'Rain Showers',
+						detailedForecast: 'Rain showers after 9am. Baseline text.',
+						icon: 'day-rain',
+						windSpeed: '7 mph',
+						windDirection: 'NW',
+						probabilityOfPrecipitation: { value: 91 },
+					},
+					{
+						name: 'Friday Night',
+						startTime: '2026-03-27T18:00:00-04:00',
+						isDaytime: false,
+						temperature: 28,
+						temperatureUnit: 'F',
+						shortForecast: 'Chance Rain Showers then Widespread Frost',
+						detailedForecast: 'Night baseline text.',
+						icon: 'night-rain',
+						windSpeed: '7 mph',
+						windDirection: 'N',
+						probabilityOfPrecipitation: { value: 30 },
+					},
+				] } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url === 'https://api.weather.gov/mock_hourly') {
+				const futureStart = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+				return new Response(JSON.stringify({ properties: { periods: [
+					{
+						startTime: futureStart,
+						temperature: 66,
+						temperatureUnit: 'F',
+						shortForecast: 'Cloudy',
+						icon: 'cloudy',
+						windSpeed: '6 mph',
+						windDirection: 'SW',
+						probabilityOfPrecipitation: { value: 5 },
+					},
+				] } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url === 'https://api.weather.gov/mock_observations') {
+				return new Response(JSON.stringify({ features: [{ properties: { stationIdentifier: 'TEST' } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('/stations/TEST/observations/latest')) {
+				return new Response(JSON.stringify({ properties: {
+					temperature: { value: 66, unitCode: 'unit:degF' },
+					relativeHumidity: { value: 55 },
+					barometricPressure: { value: 101000, unitCode: 'unit:Pa' },
+					visibility: { value: 16000, unitCode: 'unit:m' },
+					dewpoint: { value: 52, unitCode: 'unit:degF' },
+					windSpeed: { value: 6, unitCode: 'unit:mi_h-1' },
+					windDirection: { value: 210 },
+					textDescription: 'Cloudy',
+					icon: 'cloudy',
+					timestamp: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+				} }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.startsWith('https://forecast.weather.gov/MapClick.php')) {
+				return new Response(JSON.stringify({
+					time: {
+						startPeriodName: ['Tonight', 'Friday', 'Friday Night'],
+						startValidTime: [
+							'2026-03-26T20:00:00-04:00',
+							'2026-03-27T06:00:00-04:00',
+							'2026-03-27T18:00:00-04:00',
+						],
+					},
+					data: {
+						weather: ['Partly Cloudy', 'Chance Showers then Showers', 'Chance Showers then Frost'],
+						text: [
+							'Tonight mapclick text.',
+							'Showers, mainly after 1pm. Temperature falling to around 52 by 5pm.',
+							'Friday night mapclick text.',
+						],
+						pop: [null, '90', '30'],
+						iconLink: ['icon-tonight', 'icon-friday', 'icon-friday-night'],
+					},
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			return new Response('not found', { status: 404 });
+		});
+
+		const request = new IncomingRequest('https://live-weather.example/api/weather?lat=37.17&lon=-83.31');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+		const json = await response.json() as any;
+		expect(json.daily[0].detailedForecast).toContain('mainly after 1pm');
+		expect(json.daily[0].detailedForecast).not.toContain('after 9am');
+		expect(json.daily[0].shortForecast).toBe('Chance Showers then Showers');
+		expect(json.daily[0].nightShortForecast).toBe('Chance Showers then Frost');
+		expect(json.daily[0].nightDetailedForecast).toContain('Friday night mapclick text.');
+	});
+
 	it('posts a single alert to Facebook via /admin/post when authenticated', async () => {
 		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword', FB_PAGE_ID: '1097328350123101', FB_PAGE_ACCESS_TOKEN: 'dummy-token' };
 		const loginResp = await worker.fetch(

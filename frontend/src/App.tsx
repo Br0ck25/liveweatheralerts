@@ -111,8 +111,14 @@ interface WeatherPayload {
     highF?: number | null;
     lowF?: number | null;
     shortForecast?: string;
+    detailedForecast?: string;
     icon?: string;
     precipitationChance?: number | null;
+    nightName?: string;
+    nightShortForecast?: string;
+    nightDetailedForecast?: string;
+    nightIcon?: string;
+    nightPrecipitationChance?: number | null;
   }>;
   updated?: string;
   error?: string;
@@ -129,6 +135,7 @@ interface BeforeInstallPromptEvent extends Event {
 const LOCATION_STORAGE_KEY = "lwa:preferred-state:v1";
 const LOCATION_MODAL_DISMISSED_KEY = "lwa:location-modal-dismissed:v1";
 const ACTIVE_TAB_STORAGE_KEY = "lwa:active-tab:v1";
+const FORECAST_ALERT_CARRYOVER_MS = 3 * 60 * 60 * 1000;
 
 const STATE_NAME_BY_CODE: Record<string, string> = {
   AL: "alabama",
@@ -681,10 +688,17 @@ function formatHourLabel(value: string | undefined, index: number): string {
   }).format(date);
 }
 
-function formatDayLabel(value: string | undefined, index: number): string {
-  if (index === 0) return "Today";
+function formatDayLabel(value: string | undefined): string {
   const date = toDate(value);
   if (!date) return "Day";
+  const now = new Date();
+  if (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  ) {
+    return "Today";
+  }
   return new Intl.DateTimeFormat("en-US", {
     weekday: "short"
   }).format(date);
@@ -699,9 +713,41 @@ function formatMonthDay(value: string | undefined): string {
   }).format(date);
 }
 
+function formatLongDay(value: string | undefined): string {
+  const date = toDate(value);
+  if (!date) return "Selected day";
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric"
+  }).format(date);
+}
+
 function formatPercent(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "\u00A0";
   return `${Math.round(value)}%`;
+}
+
+function alertAnchorId(rawId: string): string {
+  const normalized = String(rawId || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return normalized ? `alert-${normalized}` : "alert-item";
+}
+
+function alertEffectiveStartMs(alert: AlertRecord): number | null {
+  return (
+    parseTime(alert.onset) ??
+    parseTime(alert.effective) ??
+    parseTime(alert.sent) ??
+    parseTime(alert.updated)
+  );
+}
+
+function alertEffectiveEndMs(alert: AlertRecord): number | null {
+  return parseTime(alert.expires);
 }
 
 type ForecastIconKind =
@@ -1083,6 +1129,7 @@ function priorityScore(alert: AlertRecord): number {
 function AlertCard({ alert, index }: { alert: AlertRecord; index: number }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const alertType = classifyAlertType(alert.event);
+  const anchorId = alertAnchorId(alert.id);
   const description = textLines(alert.description);
   const instruction = textLines(alert.instruction);
   const sourceLabel = alert.stateCode.trim() ? alert.stateCode : "US";
@@ -1121,6 +1168,7 @@ function AlertCard({ alert, index }: { alert: AlertRecord; index: number }) {
 
   return (
     <article
+      id={anchorId}
       className={`alert-sheet alert-sheet-${alertType}`}
       style={{ animationDelay: `${Math.min(index * 45, 420)}ms` }}
     >
@@ -1261,6 +1309,7 @@ export default function App() {
     useState<SeverityFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("priority");
   const [showFilters, setShowFilters] = useState(false);
+  const [selectedForecastDayIndex, setSelectedForecastDayIndex] = useState(0);
   const hourlyStripRef = useRef<HTMLDivElement | null>(null);
   const dailyStripRef = useRef<HTMLDivElement | null>(null);
 
@@ -1603,10 +1652,126 @@ export default function App() {
     }
   };
 
+  const forecastStateCode = (
+    forecastData?.location?.state ||
+    savedPreference?.stateCode ||
+    (stateFilter !== "all" ? stateFilter : "")
+  )
+    .trim()
+    .toUpperCase();
+  const forecastCountyName =
+    savedPreference?.stateCode === forecastStateCode
+      ? savedPreference.countyName ?? ""
+      : "";
+  const forecastCountyCode =
+    savedPreference?.stateCode === forecastStateCode
+      ? savedPreference.countyCode ?? ""
+      : "";
+  const forecastScopedAlerts = useMemo(() => {
+    if (!forecastStateCode) return [] as AlertRecord[];
+
+    return alerts.filter((alert) => {
+      const state = alert.stateCode.trim().toUpperCase() || "US";
+      if (state !== forecastStateCode) return false;
+      if (!forecastCountyName && !forecastCountyCode) return true;
+      return alertMatchesCounty(alert, state, forecastCountyName, forecastCountyCode);
+    });
+  }, [alerts, forecastCountyCode, forecastCountyName, forecastStateCode]);
+
+  const openAlertFromForecast = (alertId: string) => {
+    setQuery("");
+    setTypeFilter("all");
+    setSeverityFilter("all");
+    if (forecastStateCode) {
+      setStateFilter(forecastStateCode);
+    }
+    setActiveTab("alerts");
+
+    const anchor = alertAnchorId(alertId);
+    window.setTimeout(() => {
+      const element = document.getElementById(anchor);
+      if (!element) return;
+      element.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      });
+    }, 140);
+  };
+
   const forecastLocation =
     forecastData?.location?.label || savedPreference?.label || "Default location";
   const hourlyForecast = (forecastData?.hourly ?? []).slice(0, 12);
   const dailyForecast = (forecastData?.daily ?? []).slice(0, 7);
+  const dayWindows = useMemo(
+    () =>
+      dailyForecast.map((day, index) => {
+        const startMs = parseTime(day.startTime || "");
+        const nextStartMs =
+          index < dailyForecast.length - 1
+            ? parseTime(dailyForecast[index + 1]?.startTime || "")
+            : null;
+        const endMs =
+          startMs !== null
+            ? nextStartMs && nextStartMs > startMs
+              ? nextStartMs
+              : startMs + 24 * 60 * 60 * 1000
+            : null;
+        return { startMs, endMs };
+      }),
+    [dailyForecast]
+  );
+  const forecastAlertsByDay = useMemo(() => {
+    const buckets = dayWindows.map(() => [] as AlertRecord[]);
+
+    for (const alert of forecastScopedAlerts) {
+      const startMs = alertEffectiveStartMs(alert);
+      if (startMs === null) continue;
+      const parsedEndMs = alertEffectiveEndMs(alert);
+      const endMs = parsedEndMs !== null && parsedEndMs > startMs ? parsedEndMs : startMs + 1;
+
+      let firstMatch = -1;
+      for (let dayIndex = 0; dayIndex < dayWindows.length; dayIndex += 1) {
+        const window = dayWindows[dayIndex];
+        if (window.startMs === null || window.endMs === null) continue;
+
+        const overlapStart = Math.max(startMs, window.startMs);
+        const overlapEnd = Math.min(endMs, window.endMs);
+        const overlapMs = overlapEnd - overlapStart;
+        if (overlapMs <= 0) continue;
+
+        if (firstMatch === -1) {
+          buckets[dayIndex].push(alert);
+          firstMatch = dayIndex;
+          continue;
+        }
+
+        if (overlapMs >= FORECAST_ALERT_CARRYOVER_MS) {
+          buckets[dayIndex].push(alert);
+        }
+      }
+    }
+
+    return buckets.map((dayAlerts) => {
+      const seen = new Set<string>();
+      return dayAlerts.filter((alert) => {
+        if (seen.has(alert.id)) return false;
+        seen.add(alert.id);
+        return true;
+      });
+    });
+  }, [dayWindows, forecastScopedAlerts]);
+
+  useEffect(() => {
+    setSelectedForecastDayIndex(0);
+  }, [dailyForecast.length, dailyForecast[0]?.startTime]);
+
+  const clampedSelectedForecastDayIndex =
+    selectedForecastDayIndex >= 0 && selectedForecastDayIndex < dailyForecast.length
+      ? selectedForecastDayIndex
+      : 0;
+  const selectedForecastDay = dailyForecast[clampedSelectedForecastDayIndex];
+  const selectedForecastAlerts =
+    forecastAlertsByDay[clampedSelectedForecastDayIndex] ?? [];
   const todayForecast = dailyForecast[0];
   const currentCondition = forecastData?.current?.condition || "Conditions unavailable";
   const currentIsNight =
@@ -1911,27 +2076,114 @@ export default function App() {
                   </header>
 
                   <div className="forecast-daily-strip" ref={dailyStripRef}>
-                    {dailyForecast.map((day, index) => (
-                      <article key={`${day.name || "day"}-${index}`} className="forecast-day-pill">
-                        <p className="forecast-day-high">{formatTemp(day.highF)}</p>
-                        <p className="forecast-day-low">{formatTemp(day.lowF)}</p>
-                        <WeatherIcon
-                          className="forecast-day-icon"
-                          condition={day.shortForecast}
-                          isNight={false}
-                        />
-                        <p className="forecast-day-precip">
-                          {formatPercent(day.precipitationChance)}
-                        </p>
-                        <p className="forecast-day-title">
-                          {formatDayLabel(day.startTime, index)}
-                        </p>
-                        <p className="forecast-day-date">
-                          {formatMonthDay(day.startTime)}
-                        </p>
-                      </article>
-                    ))}
+                    {dailyForecast.map((day, index) => {
+                      const dayAlerts = forecastAlertsByDay[index] ?? [];
+                      const isSelected = index === clampedSelectedForecastDayIndex;
+                      const dayName = formatDayLabel(day.startTime);
+                      const dayDate = formatMonthDay(day.startTime);
+                      const alertCount = dayAlerts.length;
+                      return (
+                        <button
+                          type="button"
+                          key={`${day.name || "day"}-${index}`}
+                          className={`forecast-day-pill${isSelected ? " selected" : ""}`}
+                          onClick={() => setSelectedForecastDayIndex(index)}
+                          aria-pressed={isSelected}
+                          aria-label={`${dayName} ${dayDate}${
+                            alertCount
+                              ? `, ${alertCount} alert${alertCount === 1 ? "" : "s"}`
+                              : ""
+                          }`}
+                        >
+                          {alertCount ? (
+                            <span className="forecast-day-alert-pill" aria-hidden="true">
+                              {alertCount}
+                            </span>
+                          ) : null}
+                          <p className="forecast-day-high">{formatTemp(day.highF)}</p>
+                          <p className="forecast-day-low">{formatTemp(day.lowF)}</p>
+                          <WeatherIcon
+                            className="forecast-day-icon"
+                            condition={day.shortForecast}
+                            isNight={false}
+                          />
+                          <p className="forecast-day-precip">
+                            {formatPercent(day.precipitationChance)}
+                          </p>
+                          <p className="forecast-day-title">{dayName}</p>
+                          <p className="forecast-day-date">{dayDate}</p>
+                        </button>
+                      );
+                    })}
                   </div>
+
+                  {selectedForecastDay ? (
+                    <section className="forecast-day-details">
+                      {(() => {
+                        const daySummary =
+                          selectedForecastDay.shortForecast?.trim() || "Day forecast";
+                        const dayDetails =
+                          selectedForecastDay.detailedForecast?.trim() ||
+                          selectedForecastDay.shortForecast ||
+                          "No daytime forecast details available.";
+                        const nightSummary =
+                          selectedForecastDay.nightShortForecast?.trim() ||
+                          selectedForecastDay.nightName?.trim() ||
+                          "";
+                        const nightDetails =
+                          selectedForecastDay.nightDetailedForecast?.trim() || "";
+                        const showNight = Boolean(nightSummary || nightDetails);
+
+                        return (
+                          <>
+                            <header>
+                              <h4>{formatLongDay(selectedForecastDay.startTime)}</h4>
+                            </header>
+
+                            <section className="forecast-day-period">
+                              <p className="forecast-day-period-label">Day</p>
+                              <p className="forecast-day-period-summary">{daySummary}</p>
+                              <p className="forecast-day-details-text">{dayDetails}</p>
+                            </section>
+
+                            {showNight ? (
+                              <section className="forecast-day-period forecast-day-period-night">
+                                <p className="forecast-day-period-label">Night</p>
+                                <p className="forecast-day-period-summary">
+                                  {nightSummary || "Night forecast"}
+                                </p>
+                                <p className="forecast-day-details-text">
+                                  {nightDetails || "No overnight details available."}
+                                </p>
+                              </section>
+                            ) : null}
+                          </>
+                        );
+                      })()}
+
+                      {selectedForecastAlerts.length ? (
+                        <div className="forecast-day-alerts">
+                          <p className="forecast-day-alerts-title">Alerts for this day</p>
+                          <div className="forecast-day-alert-links">
+                            {selectedForecastAlerts.map((alert) => (
+                              <button
+                                key={alert.id}
+                                type="button"
+                                className="forecast-day-alert-link"
+                                onClick={() => openAlertFromForecast(alert.id)}
+                              >
+                                {alert.event} - View on alerts page
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="forecast-day-no-alerts">
+                          No active alerts mapped to this day.
+                        </p>
+                      )}
+                    </section>
+                  ) : null}
                 </article>
 
                 {forecastData.updated ? (

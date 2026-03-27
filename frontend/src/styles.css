@@ -526,6 +526,43 @@ select {
   display: grid;
   justify-items: center;
   gap: 0.2rem;
+  position: relative;
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.forecast-day-pill:hover {
+  border-color: #9fbee8;
+}
+
+.forecast-day-pill:focus-visible {
+  outline: 2px solid #6b97e7;
+  outline-offset: 1px;
+}
+
+.forecast-day-pill.selected {
+  border-color: #2b6dd8;
+  background: linear-gradient(180deg, #eef5ff 0%, #e4efff 100%);
+  box-shadow: 0 7px 16px rgba(21, 64, 132, 0.16);
+}
+
+.forecast-day-alert-pill {
+  position: absolute;
+  top: 0.28rem;
+  right: 0.28rem;
+  min-width: 1.04rem;
+  height: 1.04rem;
+  border-radius: 999px;
+  background: #d73e53;
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 0.18rem;
 }
 
 .forecast-day-high,
@@ -566,6 +603,114 @@ select {
 
 .forecast-day-date {
   margin-top: 0;
+}
+
+.forecast-day-details {
+  margin-top: 0.5rem;
+  border: 1px solid #c5daf4;
+  border-radius: 1rem;
+  background: #ffffff;
+  padding: 0.72rem 0.74rem 0.76rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.forecast-day-details header {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.forecast-day-details h4 {
+  margin: 0;
+  font-size: 0.98rem;
+  color: #0f2745;
+}
+
+.forecast-day-details header p {
+  margin: 0;
+  color: #264d79;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.forecast-day-details-text {
+  margin: 0;
+  color: #153659;
+  font-size: 0.9rem;
+  line-height: 1.42;
+}
+
+.forecast-day-period {
+  border: 1px solid #d5e3f7;
+  border-radius: 0.78rem;
+  padding: 0.48rem 0.55rem 0.52rem;
+  display: grid;
+  gap: 0.24rem;
+  background: #fbfdff;
+}
+
+.forecast-day-period-night {
+  background: #f4f8ff;
+  border-color: #c9dbf4;
+}
+
+.forecast-day-period-label {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #3f648f;
+  font-weight: 700;
+}
+
+.forecast-day-period-summary {
+  margin: 0;
+  color: #183f6b;
+  font-size: 0.88rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.forecast-day-alerts {
+  display: grid;
+  gap: 0.42rem;
+}
+
+.forecast-day-alerts-title {
+  margin: 0;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #2c537f;
+  font-weight: 700;
+}
+
+.forecast-day-alert-links {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.forecast-day-alert-link {
+  border: 1px solid #b9cfea;
+  background: #f4f9ff;
+  color: #124682;
+  border-radius: 0.7rem;
+  font-weight: 600;
+  font: inherit;
+  text-align: left;
+  padding: 0.48rem 0.62rem;
+  min-height: 2.25rem;
+  cursor: pointer;
+}
+
+.forecast-day-alert-link:hover {
+  filter: brightness(0.98);
+}
+
+.forecast-day-no-alerts {
+  margin: 0;
+  color: #395f8b;
+  font-size: 0.84rem;
 }
 
 .forecast-updated {
@@ -1171,6 +1316,14 @@ select {
     padding: 0.4rem 0.24rem 0.36rem;
   }
 
+  .forecast-day-alert-pill {
+    top: 0.2rem;
+    right: 0.2rem;
+    min-width: 0.9rem;
+    height: 0.9rem;
+    font-size: 0.54rem;
+  }
+
   .forecast-day-high,
   .forecast-day-low {
     font-size: 0.8rem;
@@ -1189,6 +1342,31 @@ select {
 
   .forecast-updated {
     font-size: 0.68rem;
+  }
+
+  .forecast-day-details h4 {
+    font-size: 0.88rem;
+  }
+
+  .forecast-day-details header p {
+    font-size: 0.78rem;
+  }
+
+  .forecast-day-period-label {
+    font-size: 0.64rem;
+  }
+
+  .forecast-day-period-summary {
+    font-size: 0.78rem;
+  }
+
+  .forecast-day-details-text {
+    font-size: 0.82rem;
+  }
+
+  .forecast-day-alert-link {
+    font-size: 0.76rem;
+    padding: 0.42rem 0.52rem;
   }
 
   .sheet-head {
@@ -1231,13 +1409,14 @@ select {
   }
 
   .modal-backdrop {
-    align-items: flex-end;
+    place-items: center;
     padding: 0.5rem;
   }
 
   .location-modal {
-    border-bottom-left-radius: 0.6rem;
-    border-bottom-right-radius: 0.6rem;
+    border-radius: 1rem;
+    max-height: min(88vh, 36rem);
+    overflow-y: auto;
   }
 }
 
@@ -1308,6 +1487,14 @@ select {
     padding: 0.34rem 0.2rem 0.3rem;
   }
 
+  .forecast-day-alert-pill {
+    top: 0.16rem;
+    right: 0.16rem;
+    min-width: 0.8rem;
+    height: 0.8rem;
+    font-size: 0.5rem;
+  }
+
   .forecast-day-high,
   .forecast-day-low {
     font-size: 0.72rem;
@@ -1322,5 +1509,34 @@ select {
   .forecast-day-title,
   .forecast-day-date {
     font-size: 0.56rem;
+  }
+
+  .forecast-day-details {
+    padding: 0.56rem 0.55rem 0.6rem;
+    gap: 0.45rem;
+  }
+
+  .forecast-day-details h4 {
+    font-size: 0.8rem;
+  }
+
+  .forecast-day-details header p {
+    font-size: 0.72rem;
+  }
+
+  .forecast-day-period-label {
+    font-size: 0.58rem;
+  }
+
+  .forecast-day-period-summary {
+    font-size: 0.72rem;
+  }
+
+  .forecast-day-details-text {
+    font-size: 0.74rem;
+  }
+
+  .forecast-day-alert-link {
+    font-size: 0.68rem;
   }
 }
