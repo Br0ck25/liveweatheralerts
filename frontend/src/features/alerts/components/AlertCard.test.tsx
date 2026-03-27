@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AlertCard } from "./AlertCard";
 
 const sampleAlert = {
@@ -24,6 +24,10 @@ const sampleAlert = {
   nwsUrl: "https://example.com/alert-1",
   detailUrl: "/alerts/alert-1"
 };
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("AlertCard highlight sync", () => {
   it("auto-expands when isHighlighted changes after mount", async () => {
@@ -75,5 +79,34 @@ describe("AlertCard highlight sync", () => {
     expect(
       screen.getByRole("button", { name: "View radar" })
     ).toBeInTheDocument();
+  });
+
+  it("copies a list-card link that reopens the expanded alert card", async () => {
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: writeTextMock
+      }
+    });
+
+    render(
+      <MemoryRouter>
+        <AlertCard alert={sampleAlert} index={0} />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
+
+    const expectedUrl = new URL(
+      "/alerts?focusAlert=alert-1#alert-alert-1",
+      window.location.origin
+    ).toString();
+
+    await waitFor(() => {
+      expect(writeTextMock).toHaveBeenCalledWith(expectedUrl);
+    });
+    expect(screen.getByText("Alert link copied.")).toBeInTheDocument();
   });
 });

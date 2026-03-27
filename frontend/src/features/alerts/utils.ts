@@ -446,6 +446,17 @@ export function canonicalAlertDetailPath(alert: Pick<AlertRecord, "id" | "detail
   return `/alerts/${encodeURIComponent(id)}`;
 }
 
+export function canonicalAlertCardPath(alert: Pick<AlertRecord, "id">): string {
+  const id = String(alert.id || "").trim();
+  const anchorId = alertAnchorId(id);
+  const params = new URLSearchParams();
+  if (id) {
+    params.set("focusAlert", id);
+  }
+  const query = params.toString();
+  return `/alerts${query ? `?${query}` : ""}#${anchorId}`;
+}
+
 export function priorityScore(alert: AlertRecord): number {
   const type = classifyAlertType(alert.event);
   const severity = normalizeSeverity(alert.severity);

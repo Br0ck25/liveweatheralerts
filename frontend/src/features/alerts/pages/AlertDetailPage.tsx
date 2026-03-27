@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getAlertById, getAlertChanges } from "../../../lib/api/alerts";
 import { trackEvent } from "../../../lib/analytics/events";
+import { copyTextToClipboard } from "../../../lib/browser/clipboard";
 import type {
   AlertChangeRecord,
   AlertRecord,
@@ -41,19 +42,6 @@ function decodeAlertId(value: string | undefined): string | null {
     return decodeURIComponent(value);
   } catch {
     return value;
-  }
-}
-
-async function copyToClipboard(value: string): Promise<boolean> {
-  if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
-    return false;
-  }
-
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -214,7 +202,7 @@ export function AlertDetailPage({
   };
 
   const handleCopyLink = async () => {
-    const ok = await copyToClipboard(canonicalAbsoluteUrl);
+    const ok = await copyTextToClipboard(canonicalAbsoluteUrl);
     setCopyResult(ok, "Alert link copied.");
     if (ok && alert) {
       trackEvent("alert_detail_link_copied", { alertId: alert.id });
@@ -223,7 +211,7 @@ export function AlertDetailPage({
 
   const handleCopySafetySteps = async () => {
     const safetyText = instructions || instructionsSummary || summary;
-    const ok = await copyToClipboard(safetyText);
+    const ok = await copyTextToClipboard(safetyText);
     setCopyResult(ok, "Safety guidance copied.");
     if (ok && alert) {
       trackEvent("alert_detail_safety_copied", { alertId: alert.id });

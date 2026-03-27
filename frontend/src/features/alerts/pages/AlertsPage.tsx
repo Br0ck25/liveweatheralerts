@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import type {
   AlertChangeRecord,
   AlertRecord,
@@ -15,6 +15,7 @@ import {
 } from "../../../lib/storage/preferences";
 import { AlertLifecycleBadge } from "../components/AlertLifecycleBadge";
 import {
+  alertAnchorId,
   buildAlertChangeSummaryCards,
   formatDateTime,
   selectClosureHighlights
@@ -59,6 +60,15 @@ const alertTypeLabel: Record<AlertTypeFilter, string> = {
   other: "Other"
 };
 
+function decodeFocusedAlertId(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 export function AlertsPage({
   isOffline,
   alertsMeta,
@@ -87,6 +97,7 @@ export function AlertsPage({
   onSortModeChange,
   onShowFiltersChange
 }: AlertsPageProps) {
+  const location = useLocation();
   const [lastSeenAt, setLastSeenAt] = useState<string | null>(() =>
     readAlertsLastSeenAt(changeSummaryStorageKey)
   );
@@ -159,6 +170,37 @@ export function AlertsPage({
   );
   const closureHighlights = useMemo(() => selectClosureHighlights(changes, 4), [changes]);
   const hasChangeSummary = Boolean(lastSeenAt && summaryCards.length > 0);
+  const focusedAlertId = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const focusAlertFromQuery = decodeFocusedAlertId(params.get("focusAlert"));
+    if (focusAlertFromQuery) {
+      return focusAlertFromQuery;
+    }
+
+    const hashAnchorId = location.hash.replace(/^#/, "").trim();
+    if (!hashAnchorId) {
+      return null;
+    }
+
+    const matchedAlert = alerts.find((alert) => alertAnchorId(alert.id) === hashAnchorId);
+    return matchedAlert?.id ?? null;
+  }, [alerts, location.hash, location.search]);
+  const visibleAlerts = useMemo(() => {
+    if (!focusedAlertId) {
+      return sortedAlerts;
+    }
+
+    const focusedAlert = alerts.find((alert) => alert.id === focusedAlertId);
+    if (!focusedAlert) {
+      return sortedAlerts;
+    }
+
+    if (sortedAlerts.some((alert) => alert.id === focusedAlertId)) {
+      return sortedAlerts;
+    }
+
+    return [focusedAlert, ...sortedAlerts];
+  }, [alerts, focusedAlertId, sortedAlerts]);
 
   return (
     <>
@@ -381,7 +423,7 @@ export function AlertsPage({
           </div>
         ) : null}
 
-        {loadState !== "loading" && sortedAlerts.length === 0 ? (
+        {loadState !== "loading" && visibleAlerts.length === 0 ? (
           <div className="empty-state">
             <h2>{closureHighlights.length > 0 ? "No active alerts right now" : "No matching alerts"}</h2>
             <p>
@@ -397,8 +439,13 @@ export function AlertsPage({
           </div>
         ) : null}
 
-      {sortedAlerts.map((alert, index) => (
-        <AlertCard key={`${alert.id}-${alert.sent}-${index}`} alert={alert} index={index} />
+      {visibleAlerts.map((alert, index) => (
+        <AlertCard
+          key={`${alert.id}-${alert.sent}-${index}`}
+          alert={alert}
+          index={index}
+          isHighlighted={alert.id === focusedAlertId}
+        />
       ))}
     </section>
 

@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { trackEvent } from "../../../lib/analytics/events";
+import { copyTextToClipboard } from "../../../lib/browser/clipboard";
 import type { AlertRecord } from "../../../types";
 import { AlertActionTools } from "./AlertActionTools";
 import { AlertLifecycleBadge } from "./AlertLifecycleBadge";
 import {
   alertAnchorId,
+  canonicalAlertCardPath,
   canonicalAlertDetailPath,
   classifyAlertType,
   deriveAlertLifecycleStatus,
@@ -28,11 +30,34 @@ export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProp
   const navigate = useNavigate();
   const [isExpanded, setIsExpanded] = useState(isHighlighted);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const cardRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (isHighlighted) {
       setIsExpanded(true);
     }
+  }, [isHighlighted]);
+
+  useEffect(() => {
+    if (!isHighlighted) return;
+    const cardNode = cardRef.current;
+    if (!cardNode) return;
+
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const scheduleScroll =
+      typeof window !== "undefined" && typeof window.requestAnimationFrame === "function"
+        ? window.requestAnimationFrame.bind(window)
+        : (callback: FrameRequestCallback) => window.setTimeout(callback, 0);
+
+    scheduleScroll(() => {
+      cardNode.scrollIntoView?.({
+        behavior: prefersReducedMotion ? "auto" : "smooth",
+        block: "start"
+      });
+    });
   }, [isHighlighted]);
 
   const alertType = classifyAlertType(alert.event);
@@ -71,27 +96,15 @@ export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProp
   const countyCount = areaList.length || 1;
   const stateLabel = stateLabelFromCode(sourceLabel);
   const detailPath = canonicalAlertDetailPath(alert);
+  const cardPath = canonicalAlertCardPath(alert);
   const stateCountySummary = `${stateLabel} • ${countyCount} ${
     countyCount === 1 ? "county" : "counties"
   }`;
   const lifecycleStatus = deriveAlertLifecycleStatus(alert);
   const canonicalAbsoluteUrl = useMemo(() => {
-    if (typeof window === "undefined") return detailPath;
-    return new URL(detailPath, window.location.origin).toString();
-  }, [detailPath]);
-
-  const copyToClipboard = async (value: string): Promise<boolean> => {
-    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
-      return false;
-    }
-
-    try {
-      await navigator.clipboard.writeText(value);
-      return true;
-    } catch {
-      return false;
-    }
-  };
+    if (typeof window === "undefined") return cardPath;
+    return new URL(cardPath, window.location.origin).toString();
+  }, [cardPath]);
 
   const setCopyResult = (ok: boolean, successText: string) => {
     if (ok) {
@@ -102,7 +115,7 @@ export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProp
   };
 
   const handleCopyLink = async () => {
-    const ok = await copyToClipboard(canonicalAbsoluteUrl);
+    const ok = await copyTextToClipboard(canonicalAbsoluteUrl);
     setCopyResult(ok, "Alert link copied.");
     if (ok) {
       trackEvent("alert_detail_link_copied", { alertId: alert.id });
@@ -111,7 +124,7 @@ export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProp
 
   const handleCopySafetySteps = async () => {
     const safetyText = instructionsText || summary;
-    const ok = await copyToClipboard(safetyText);
+    const ok = await copyTextToClipboard(safetyText);
     setCopyResult(ok, "Safety guidance copied.");
     if (ok) {
       trackEvent("alert_detail_safety_copied", { alertId: alert.id });
@@ -147,6 +160,7 @@ export function AlertCard({ alert, index, isHighlighted = false }: AlertCardProp
   return (
     <article
       id={anchorId}
+      ref={cardRef}
       className={`alert-sheet alert-sheet-${alertType}${
         isHighlighted ? " alert-sheet-highlighted" : ""
       }`}

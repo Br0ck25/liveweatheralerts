@@ -351,6 +351,19 @@ describe("appRouter", () => {
     expect(screen.queryByText("No matching alerts")).not.toBeInTheDocument();
   });
 
+  it("opens a shared alert-card link in expanded list view even when filters would exclude it", async () => {
+    seedSavedPlaces();
+    window.history.pushState({}, "", "/alerts?focusAlert=alert-1#alert-alert-1");
+    const router = createAppRouter();
+
+    render(<RouterProvider router={router} />);
+
+    expect(await screen.findByText("Ohio • 1 county")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse details" })).toBeInTheDocument();
+    expect(screen.queryByText("No matching alerts")).not.toBeInTheDocument();
+    expect(getAlertByIdMock).not.toHaveBeenCalled();
+  });
+
   it("uses detail endpoint metadata for freshness messaging", async () => {
     getAlertByIdMock.mockResolvedValueOnce({
       alert: {
