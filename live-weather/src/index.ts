@@ -4644,6 +4644,7 @@ function normalizeAlertFeature(
 	return {
 		id,
 		stateCode: extractStateCode(feature),
+		stateCodes: extractStateCodes(feature),
 		category: classifyAlertCategoryFromEvent(event),
 		impactCategories,
 		isMajor,
