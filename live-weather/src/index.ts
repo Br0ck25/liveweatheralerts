@@ -6695,7 +6695,7 @@ export default {
 		if (url.pathname === '/api/push/unsubscribe' && request.method === 'POST') {
 			return await handlePushUnsubscribe(request, env);
 		}
-		if (url.pathname === '/live-weather-alerts' && request.method === 'GET') {
+		if ((url.pathname === '/' || url.pathname === '/index.html' || url.pathname === '/live-weather-alerts') && request.method === 'GET') {
 			return await handlePublicAlertsPage(env);
 		}
 		if (url.pathname === '/admin' && request.method === 'GET') {
