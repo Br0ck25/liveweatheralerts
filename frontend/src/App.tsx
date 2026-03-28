@@ -755,10 +755,30 @@ function AppInner() {
     try {
       const perm = await Notification.requestPermission()
       if (perm === 'granted') {
-        new Notification('Live Weather Alerts', {
+        const notifOptions = {
           body: '\u2705 Test alert \u2014 your notifications are working!',
-          icon: '/favicon.ico',
-        })
+          icon: '/icon-192.svg',
+        }
+        let shown = false
+        // Mobile Chrome/Brave require SW-based notifications; new Notification() throws on Android.
+        // Race against a 500 ms timeout so dev (no SW registered) falls back to the constructor.
+        if ('serviceWorker' in navigator) {
+          try {
+            const reg = await Promise.race([
+              navigator.serviceWorker.ready,
+              new Promise<ServiceWorkerRegistration>((_, reject) =>
+                setTimeout(() => reject(new Error('sw-timeout')), 500)
+              ),
+            ])
+            await reg.showNotification('Live Weather Alerts', notifOptions)
+            shown = true
+          } catch {
+            // SW not available — fall through
+          }
+        }
+        if (!shown) {
+          new Notification('Live Weather Alerts', notifOptions)
+        }
       } else if (perm === 'denied') {
         setError('Notifications are blocked. Enable them in your browser or device settings.')
       }
