@@ -315,6 +315,197 @@ function formatAlertDescription(text: string): string {
     .join('\n\n')
 }
 
+// ─── Standalone Alert Detail Page ────────────────────────────────────────────
+// Rendered instead of the main App when ?alert=<id> is in the URL.
+// Completely independent of the user's saved location.
+const ALERT_PAGE_BG: Record<string, string> = {
+  blue: '#091320', purple: '#0d091e', emerald: '#071510',
+  amber: '#150e04', rose: '#17080b', teal: '#071514',
+}
+const ALERT_PAGE_CARD: Record<string, string> = {
+  blue: 'bg-sky-950/60', purple: 'bg-purple-950/60', emerald: 'bg-emerald-950/60',
+  amber: 'bg-amber-950/60', rose: 'bg-rose-950/60', teal: 'bg-teal-950/60',
+}
+const ALERT_PAGE_ACCENT: Record<string, string> = {
+  blue: 'text-sky-400', purple: 'text-purple-400', emerald: 'text-emerald-400',
+  amber: 'text-amber-400', rose: 'text-rose-400', teal: 'text-teal-400',
+}
+
+function AlertDetailPage({ alertId }: { alertId: string }) {
+  const theme = window.localStorage.getItem('lwa_theme_v1') || 'blue'
+  const pageBg = ALERT_PAGE_BG[theme] || '#091320'
+  const cardCls = ALERT_PAGE_CARD[theme] || 'bg-sky-950/60'
+  const accentCls = ALERT_PAGE_ACCENT[theme] || 'text-sky-400'
+
+  const [alert, setAlert] = useState<Record<string, unknown> | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/alerts/${encodeURIComponent(alertId)}`)
+      .then((r) => r.json())
+      .then((json: { alert?: Record<string, unknown>; error?: string }) => {
+        if (json?.alert) setAlert(json.alert)
+        else setError(json?.error || 'Alert not found.')
+      })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : 'Failed to load alert.'))
+      .finally(() => setLoading(false))
+  }, [alertId])
+
+  const styles = alert
+    ? alertBorderClass(String(alert.event || ''), String(alert.severity || ''))
+    : { border: 'border-blue-400', label: 'text-blue-300' }
+
+  const navBg = NAV_BG[theme] || '#0c1b30'
+
+  const navTo = (tab: string) => {
+    try {
+      const u = new URL(window.location.href)
+      u.searchParams.delete('alert')
+      window.history.replaceState(null, '', u.pathname + (u.search || ''))
+    } catch { /* ignore */ }
+    window.localStorage.setItem('lwa_active_tab_v1', tab)
+    window.location.reload()
+  }
+
+  return (
+    <div className="min-h-screen text-white" style={{ backgroundColor: pageBg }}>
+      <div className="mx-auto min-h-screen w-full max-w-md px-4 pb-28 pt-6">
+        {/* Header */}
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <div className={`text-xs tracking-wide ${accentCls} opacity-70`}>LIVE WEATHER ALERTS</div>
+            <div className="text-xs text-white/40 mt-0.5">Alert Detail</div>
+          </div>
+          <button
+            onClick={() => navTo('alerts')}
+            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/70 hover:bg-white/10 transition-colors"
+          >
+            Open App <ChevronRight className="h-3 w-3" />
+          </button>
+        </div>
+
+        {loading && (
+          <div className="flex items-center justify-center py-24">
+            <Loader2 className="h-8 w-8 animate-spin text-white/40" />
+          </div>
+        )}
+
+        {error && (
+          <div className="rounded-xl border border-red-500/30 bg-red-900/20 p-5 text-sm text-red-200">
+            {error}
+          </div>
+        )}
+
+        {alert && (
+          <div className={`rounded-xl border-l-4 ${cardCls} p-5 ${styles.border}`}>
+            <div className={`mb-1 text-xs font-semibold uppercase tracking-wide ${styles.label}`}>
+              {String(alert.event || 'WEATHER ALERT')}
+            </div>
+            <div className="text-xl font-bold leading-snug">
+              {(alert.event as string) || 'Weather Alert'}
+            </div>
+            <div className="mt-1 text-sm text-white/70">
+              {(alert.summary as string) || (alert.headline as string) || ''}
+            </div>
+
+            <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
+              {(alert.areaDesc as string) ? (
+                <div>
+                  <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Area</div>
+                  <div className="text-sm text-white/70">{alert.areaDesc as string}</div>
+                </div>
+              ) : null}
+              {(alert.description as string) ? (
+                <div>
+                  <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Description</div>
+                  <div className="whitespace-pre-wrap text-sm leading-relaxed text-white/80">
+                    {formatAlertDescription(alert.description as string)}
+                  </div>
+                </div>
+              ) : null}
+              {(alert.instruction as string) ? (
+                <div>
+                  <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Instructions</div>
+                  <div className="whitespace-pre-wrap text-sm leading-relaxed text-yellow-200/80">
+                    {formatAlertDescription(alert.instruction as string)}
+                  </div>
+                </div>
+              ) : null}
+              {(alert.expires as string) ? (
+                <div className="text-xs text-white/40">
+                  Expires {formatDateTime(alert.expires as string)}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="mt-4 flex items-center justify-between border-t border-white/10 pt-3">
+              <div className="text-xs text-white/40">
+                Issued {formatDateTime((alert.sent as string) || (alert.updated as string))}
+              </div>
+              <div className="flex items-center gap-3">
+                {(alert.nwsUrl as string) ? (
+                  <a
+                    href={alert.nwsUrl as string}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-white/40 hover:text-white/70 transition-colors"
+                    aria-label="View on NWS"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                  </a>
+                ) : null}
+                <button
+                  onClick={async () => {
+                    const url = window.location.href
+                    if (navigator.share) {
+                      try { await navigator.share({ title: String(alert.event || 'Weather Alert'), url }) } catch { /* cancelled */ }
+                    } else {
+                      await navigator.clipboard.writeText(url).catch(() => {})
+                    }
+                  }}
+                  className="text-white/40 hover:text-white/70 transition-colors"
+                  aria-label="Share"
+                >
+                  <Share2 className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Nav bar — tapping any tab opens the app on that tab */}
+      <div className="fixed bottom-0 left-1/2 w-full max-w-md -translate-x-1/2 px-4 pb-4">
+        <div className="rounded-2xl border border-white/10 p-2 shadow-2xl backdrop-blur" style={{ backgroundColor: navBg }}>
+          <div className="grid grid-cols-5 gap-1">
+            {([
+              { id: 'home',     label: 'Home',     icon: House },
+              { id: 'forecast', label: 'Forecast', icon: CloudSun },
+              { id: 'radar',    label: 'Radar',    icon: Radar },
+              { id: 'alerts',   label: 'Alerts',   icon: TriangleAlert },
+              { id: 'more',     label: 'More',     icon: MoreHorizontal },
+            ] as { id: string; label: string; icon: React.ElementType }[]).map((tab) => {
+              const Icon = tab.icon
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => navTo(tab.id)}
+                  className="flex flex-col items-center gap-1 rounded-xl px-2 py-2.5 text-white/45 transition hover:bg-white/5 hover:text-white/80"
+                >
+                  <Icon className="h-4 w-4" />
+                  <span className="text-[11px] font-medium">{tab.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 3958.8 // Earth radius in miles
   const dLat = ((lat2 - lat1) * Math.PI) / 180
@@ -365,14 +556,8 @@ function normalizeAlertCount(alerts: Array<Record<string, unknown>>) {
   return { warnings, advisories }
 }
 
-export default function App() {
-  // Read deep-link alert ID from URL (?alert=...) once on mount
-  const deepLinkedAlertId = (() => {
-    try { return new URLSearchParams(window.location.search).get('alert') || null } catch { return null }
-  })()
-
+function AppInner() {
   const [activeTab, setActiveTab] = useState<AppTab>(() => {
-    if (deepLinkedAlertId) return 'alerts'
     const s = window.localStorage.getItem('lwa_active_tab_v1') as AppTab | null
     return s && ['home','forecast','radar','alerts','more'].includes(s) ? s : 'forecast'
   })
@@ -578,26 +763,6 @@ export default function App() {
   useEffect(() => { window.localStorage.setItem('lwa_theme_v1', themeKey) }, [themeKey])
   useEffect(() => { window.localStorage.setItem('lwa_alert_radius_v1', String(alertRadius)) }, [alertRadius])
   useEffect(() => { window.localStorage.setItem('lwa_alert_toggles_v1', JSON.stringify(alertToggles)) }, [alertToggles])
-
-  // Handle deep-linked alert: once alerts are loaded, expand the matching card and clean the URL
-  useEffect(() => {
-    if (!deepLinkedAlertId || loading || !alertsData) return
-    setActiveTab('alerts')
-    setShowAllAlerts(true)
-    setExpandedAlertId(deepLinkedAlertId)
-    // Clean the ?alert= param from the URL without a page reload
-    try {
-      const u = new URL(window.location.href)
-      u.searchParams.delete('alert')
-      window.history.replaceState(null, '', u.pathname + (u.search || ''))
-    } catch { /* ignore */ }
-    // Scroll to the expanded card after a short paint delay
-    setTimeout(() => {
-      const el = document.getElementById(`alert-card-${CSS.escape(deepLinkedAlertId)}`)
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }, 300)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, alertsData])
 
   // Enrich location with countyCode and zoneCode if missing
   useEffect(() => {
@@ -1652,4 +1817,12 @@ export default function App() {
       )}
     </div>
   )
+}
+
+export default function App() {
+  const alertIdParam = (() => {
+    try { return new URLSearchParams(window.location.search).get('alert') || null } catch { return null }
+  })()
+  if (alertIdParam) return <AlertDetailPage alertId={alertIdParam} />
+  return <AppInner />
 }
