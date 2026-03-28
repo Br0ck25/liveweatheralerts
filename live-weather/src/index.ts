@@ -264,6 +264,7 @@ interface SavedLocation {
 	zip?: string;
 	county?: string;
 	countyCode?: string;
+	zoneCode?: string;
 	label: string;
 }
 
@@ -4043,9 +4044,11 @@ function pruneExpired(map: Record<string, any>): Record<string, any> {
 	const now = Date.now();
 	const pruned: Record<string, any> = {};
 	for (const [id, feature] of Object.entries(map)) {
-		const expires = feature?.properties?.expires ?? feature?.properties?.ends;
-		if (expires) {
-			const ms = new Date(expires).getTime();
+		// Prefer "ends" (hazard end time) over "expires" (product expiry)
+		// so alerts aren't dropped before the actual hazard is over
+		const expiry = feature?.properties?.ends ?? feature?.properties?.expires;
+		if (expiry) {
+			const ms = new Date(expiry).getTime();
 			if (!Number.isNaN(ms) && ms < now) continue; // expired — drop it
 		}
 		pruned[id] = feature;
@@ -5157,6 +5160,22 @@ async function handleApiDebugSummary(request: Request, env: Env): Promise<Respon
 	);
 }
 
+async function lookupNwsZoneCode(lat: number, lon: number): Promise<string | undefined> {
+	try {
+		const endpoint = `https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`;
+		const res = await fetch(endpoint, {
+			headers: { 'User-Agent': NWS_USER_AGENT, Accept: NWS_ACCEPT },
+		});
+		if (!res.ok) return undefined;
+		const payload = await res.json() as any;
+		const zoneUrl = String(payload?.properties?.forecastZone || '');
+		const match = zoneUrl.match(/\/([A-Z]{2}Z\d{3})$/i);
+		return match ? match[1].toUpperCase() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 async function lookupCountyByLatLon(lat: number, lon: number): Promise<{ county?: string; countyCode?: string }> {
 	try {
 		const endpoint = new URL('https://geo.fcc.gov/api/census/block/find');
@@ -5242,6 +5261,7 @@ async function geocodePlaceQuery(query: string): Promise<SavedLocation> {
 	const fccCounty = await lookupCountyByLatLon(lat, lon);
 	const county = fccCounty.county || String(address?.county || '').trim() || undefined;
 	const countyCode = fccCounty.countyCode;
+	const zoneCode = await lookupNwsZoneCode(lat, lon);
 	const label = city && state ? `${city}, ${state}` : (state || query);
 
 	return {
@@ -5251,6 +5271,7 @@ async function geocodePlaceQuery(query: string): Promise<SavedLocation> {
 		state: state || undefined,
 		county,
 		countyCode,
+		zoneCode,
 		label,
 	};
 }
@@ -5286,6 +5307,7 @@ async function geocodeZip(zip: string): Promise<SavedLocation> {
 	const state = String(place?.['state abbreviation'] || '').trim() || undefined;
 	const label = city && state ? `${city}, ${state}` : zip;
 	const county = await lookupCountyByLatLon(lat, lon);
+	const zoneCode = await lookupNwsZoneCode(lat, lon);
 
 	return {
 		lat,
@@ -5295,6 +5317,7 @@ async function geocodeZip(zip: string): Promise<SavedLocation> {
 		zip,
 		county: county.county,
 		countyCode: county.countyCode,
+		zoneCode,
 		label,
 	};
 }
@@ -5321,6 +5344,10 @@ async function reverseGeocodePoint(lat: number, lon: number): Promise<SavedLocat
 	const state = String(relative?.state || '').trim() || undefined;
 	const label = city && state ? `${city}, ${state}` : `Lat ${lat.toFixed(2)}, Lon ${lon.toFixed(2)}`;
 	const county = await lookupCountyByLatLon(lat, lon);
+	// Extract forecast zone code from the NWS points response (e.g. KYZ040)
+	const zoneUrl = String(payload?.properties?.forecastZone || '');
+	const zoneMatch = zoneUrl.match(/\/([A-Z]{2}Z\d{3})$/i);
+	const zoneCode = zoneMatch ? zoneMatch[1].toUpperCase() : undefined;
 
 	return {
 		lat,
@@ -5329,6 +5356,7 @@ async function reverseGeocodePoint(lat: number, lon: number): Promise<SavedLocat
 		state,
 		county: county.county,
 		countyCode: county.countyCode,
+		zoneCode,
 		label,
 	};
 }

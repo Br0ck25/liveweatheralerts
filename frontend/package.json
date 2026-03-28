@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "preinstall": "node ./scripts/ensure-rollup-native.cjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
@@ -15,6 +16,10 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-leaflet": "^4.2.1"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "4.60.0",
+    "@rollup/rollup-win32-x64-msvc": "4.60.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

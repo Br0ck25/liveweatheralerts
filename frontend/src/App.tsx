@@ -37,6 +37,7 @@ type SavedLocation = {
   zip?: string
   county?: string
   countyCode?: string
+  zoneCode?: string
   label: string
 }
 
@@ -342,6 +343,15 @@ const THEME_BG: Record<string, string> = {
   teal:    '#071514',
 }
 
+const NAV_BG: Record<string, string> = {
+  blue:    '#0c1b30',
+  purple:  '#130d24',
+  emerald: '#0a1a14',
+  amber:   '#1a1204',
+  rose:    '#1c090e',
+  teal:    '#0a1a18',
+}
+
 function normalizeAlertCount(alerts: Array<Record<string, unknown>>) {
   const warnings = alerts.filter((alert) =>
     String(alert?.category || alert?.event || '')
@@ -563,24 +573,24 @@ export default function App() {
   useEffect(() => { window.localStorage.setItem('lwa_alert_radius_v1', String(alertRadius)) }, [alertRadius])
   useEffect(() => { window.localStorage.setItem('lwa_alert_toggles_v1', JSON.stringify(alertToggles)) }, [alertToggles])
 
-  // Enrich location with countyCode if missing (needed for county-precise alerts)
+  // Enrich location with countyCode and zoneCode if missing
   useEffect(() => {
-    if (!location?.lat || !location?.lon || location?.countyCode) return
+    if (!location?.lat || !location?.lon || (location?.countyCode && location?.zoneCode)) return
     const lat = location.lat, lon = location.lon
     fetch(`${API_BASE}/api/geocode?lat=${lat}&lon=${lon}`)
       .then((r) => r.json())
       .then((json: SavedLocation) => {
-        if (json?.countyCode) {
+        if (json?.countyCode || json?.zoneCode) {
           setLocation((prev) => {
             if (!prev) return prev
-            const enriched = { ...prev, countyCode: json.countyCode, county: json.county }
+            const enriched = { ...prev, countyCode: json.countyCode, county: json.county, zoneCode: json.zoneCode }
             window.localStorage.setItem('lwa_saved_location_v1', JSON.stringify(enriched))
             return enriched
           })
         }
       })
       .catch(() => {})
-  }, [location?.lat, location?.lon, location?.countyCode])
+  }, [location?.lat, location?.lon, location?.countyCode, location?.zoneCode])
 
   const tc = THEMES[themeKey] ?? THEMES.blue
 
@@ -601,22 +611,27 @@ export default function App() {
     )
   }, [alerts, location])
 
-  // County-level filtered alerts for the home screen (precise UGC matching only)
+  // County-level filtered alerts for the home screen (UGC county AND zone code matching)
   const countyAlerts = useMemo(() => {
-    const ugcCode =
+    const countyUgc =
       location?.countyCode && location?.state
         ? `${String(location.state).toUpperCase()}C${String(location.countyCode).padStart(3, '0')}`
         : null
+    const zoneUgc = location?.zoneCode ? String(location.zoneCode).toUpperCase() : null
 
-    const byCounty = ugcCode
-      ? localAlerts.filter((alert) => {
-          const ugcs = Array.isArray(alert?.ugc) ? (alert.ugc as string[]) : []
-          return ugcs.some((u) => String(u).toUpperCase() === ugcCode)
-        })
-      : []
+    // Build set of UGC codes that apply to this user
+    const userUgcs = new Set<string>([
+      ...(countyUgc ? [countyUgc] : []),
+      ...(zoneUgc ? [zoneUgc] : []),
+    ])
 
-    // Precise county match found — use it
-    if (byCounty.length > 0) return byCounty
+    if (userUgcs.size > 0) {
+      const byUgc = localAlerts.filter((alert) => {
+        const ugcs = Array.isArray(alert?.ugc) ? (alert.ugc as string[]) : []
+        return ugcs.some((u) => userUgcs.has(String(u).toUpperCase()))
+      })
+      if (byUgc.length > 0) return byUgc
+    }
 
     // No county code available yet (still geocoding) — fall back to state-level
     return localAlerts
@@ -859,7 +874,7 @@ export default function App() {
                     </button>
                   )}
 
-                  <div className="mt-2 rounded-2xl border border-white/10 bg-gradient-to-br from-[#16233b] to-[#0f172a] p-5">
+                  <div className={`mt-2 rounded-2xl border border-white/10 p-5 ${tc.cardBg}`}>
                     <div className="flex items-start justify-between gap-4">
                       <div>
                         <div className={`mb-2 text-xs tracking-wide ${tc.t300}`}>CURRENT</div>
@@ -907,7 +922,7 @@ export default function App() {
             {activeTab === 'forecast' && (
               <>
                 <div className="px-4 pt-4">
-                  <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#16233b] to-[#0f172a] p-5">
+                  <div className={`rounded-2xl border border-white/10 p-5 ${tc.cardBg}`}>
                     <div className="flex items-start justify-between gap-4">
                       <div>
                         <div className={`mb-2 text-xs tracking-wide ${tc.t300}`}>FORECAST</div>
@@ -1339,7 +1354,7 @@ export default function App() {
             {activeTab === 'more' && (
               <>
                 <div className="px-4 pt-4">
-                  <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#16233b] to-[#0f172a] p-5">
+                  <div className={`rounded-2xl border border-white/10 p-5 ${tc.cardBg}`}>
                     <div className="flex items-center justify-between">
                       <div>
                         <div className={`mb-1 text-xs tracking-wide ${tc.t300}`}>LOCATION</div>
@@ -1376,7 +1391,7 @@ export default function App() {
                           onChange={(e) => setLocationInput(e.target.value)}
                           onKeyDown={(e) => { if (e.key === 'Enter') void useSearchLocation() }}
                           placeholder="City, State or ZIP code"
-                          className="w-full rounded-lg border border-white/10 bg-[#0f172a] py-2.5 pl-9 pr-3 text-sm outline-none"
+                          className="w-full rounded-lg border border-white/10 bg-white/5 py-2.5 pl-9 pr-3 text-sm outline-none"
                         />
                       </div>
                       <button
@@ -1498,7 +1513,7 @@ export default function App() {
         )}
 
         <div className="fixed bottom-0 left-1/2 w-full max-w-md -translate-x-1/2 px-4 pb-4">
-          <div className="rounded-2xl border border-white/10 bg-[#0f172a]/95 p-2 shadow-2xl backdrop-blur">
+          <div className="rounded-2xl border border-white/10 p-2 shadow-2xl backdrop-blur" style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}>
             <div className="grid grid-cols-5 gap-1">
               {[
                 { id: 'home', label: 'Home', icon: House },
@@ -1532,7 +1547,7 @@ export default function App() {
       {/* Location setup modal */}
       {showSetupModal === 'location' && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-t-3xl border-t border-white/10 bg-[#0f172a] p-6 pb-10">
+          <div className="w-full max-w-md rounded-t-3xl border-t border-white/10 p-6 pb-10" style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}>
             <div className={`mb-1 text-center text-xs tracking-wide ${tc.t300}`}>GET STARTED</div>
             <div className="mb-2 text-center text-2xl font-bold">Set Your Location</div>
             <div className="mb-6 text-center text-sm text-white/60">
@@ -1578,7 +1593,7 @@ export default function App() {
       {/* Notifications permission modal */}
       {showSetupModal === 'notif' && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-t-3xl border-t border-white/10 bg-[#0f172a] p-6 pb-10">
+          <div className="w-full max-w-md rounded-t-3xl border-t border-white/10 p-6 pb-10" style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}>
             <div className={`mb-1 text-center text-xs tracking-wide ${tc.t300}`}>STAY SAFE</div>
             <div className="mb-2 text-center text-2xl font-bold">Enable Notifications</div>
             <div className="mb-6 text-center text-sm text-white/60">
