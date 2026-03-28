@@ -1,0 +1,24 @@
+{
+  "name": "Live Weather Alerts",
+  "short_name": "LWA",
+  "description": "Real-time local weather alerts and forecasts",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#091320",
+  "theme_color": "#091320",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -25,9 +25,16 @@ import {
   Share2,
   ExternalLink,
   Palette,
+  Download,
+  X,
 } from 'lucide-react'
 
 type AppTab = 'home' | 'forecast' | 'radar' | 'alerts' | 'more'
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt(): Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
+}
 
 type SavedLocation = {
   lat: number
@@ -587,6 +594,8 @@ function AppInner() {
   const [showSetupModal, setShowSetupModal] = useState<'location' | 'notif' | null>(
     () => window.localStorage.getItem('lwa_setup_done_v1') ? null : 'location'
   )
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
+  const [showInstallBanner, setShowInstallBanner] = useState(false)
 
   useEffect(() => {
     const saved = window.localStorage.getItem('lwa_saved_location_v1')
@@ -764,6 +773,54 @@ function AppInner() {
   useEffect(() => { window.localStorage.setItem('lwa_alert_radius_v1', String(alertRadius)) }, [alertRadius])
   useEffect(() => { window.localStorage.setItem('lwa_alert_toggles_v1', JSON.stringify(alertToggles)) }, [alertToggles])
 
+  // PWA install banner
+  useEffect(() => {
+    if (window.matchMedia('(display-mode: standalone)').matches) return
+    const stored = (() => {
+      try { return JSON.parse(window.localStorage.getItem('lwa_install_v1') || '{}') } catch { return {} }
+    })() as { count?: number; last?: number | null }
+    const dismissCount = stored.count ?? 0
+    const lastDismissed = stored.last ?? null
+    const handler = (e: Event) => {
+      e.preventDefault()
+      setInstallPrompt(e as unknown as BeforeInstallPromptEvent)
+      if (dismissCount >= 3) return
+      if (lastDismissed && Date.now() - lastDismissed < 48 * 60 * 60 * 1000) return
+      setShowInstallBanner(true)
+    }
+    const onInstalled = () => {
+      window.localStorage.setItem('lwa_install_v1', JSON.stringify({ count: 3, last: null }))
+      setShowInstallBanner(false)
+      setInstallPrompt(null)
+    }
+    window.addEventListener('beforeinstallprompt', handler)
+    window.addEventListener('appinstalled', onInstalled)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handler)
+      window.removeEventListener('appinstalled', onInstalled)
+    }
+  }, [])
+
+  const triggerInstall = async () => {
+    if (!installPrompt) return
+    await installPrompt.prompt()
+    const { outcome } = await installPrompt.userChoice
+    if (outcome === 'accepted') {
+      window.localStorage.setItem('lwa_install_v1', JSON.stringify({ count: 3, last: null }))
+      setShowInstallBanner(false)
+      setInstallPrompt(null)
+    }
+  }
+
+  const dismissInstallBanner = () => {
+    setShowInstallBanner(false)
+    const stored = (() => {
+      try { return JSON.parse(window.localStorage.getItem('lwa_install_v1') || '{}') } catch { return {} }
+    })() as { count?: number }
+    const count = (stored.count ?? 0) + 1
+    window.localStorage.setItem('lwa_install_v1', JSON.stringify({ count, last: Date.now() }))
+  }
+
   // Enrich location with countyCode and zoneCode if missing
   useEffect(() => {
     if (!location?.lat || !location?.lon || (location?.countyCode && location?.zoneCode)) return
@@ -873,6 +930,38 @@ function AppInner() {
 
   return (
     <div className="min-h-screen text-white" style={{ backgroundColor: THEME_BG[themeKey] || '#091320' }}>
+      {/* PWA install banner — slides down from top */}
+      <div
+        className={`fixed left-1/2 z-40 w-full max-w-md -translate-x-1/2 px-4 transition-all duration-300 ease-out ${
+          showInstallBanner ? 'top-3 opacity-100' : '-top-24 opacity-0 pointer-events-none'
+        }`}
+      >
+        <div
+          className="flex items-center gap-3 rounded-2xl border border-white/10 p-3 shadow-xl backdrop-blur-md"
+          style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}
+        >
+          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${tc.bg500}`}>
+            <TriangleAlert className="h-5 w-5 text-white" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold leading-none">Live Weather Alerts</div>
+            <div className="mt-0.5 text-xs text-white/50">Add to home screen for quick access</div>
+          </div>
+          <button
+            onClick={() => void triggerInstall()}
+            className={`shrink-0 rounded-lg ${tc.bg500} px-3 py-2 text-xs font-semibold text-white`}
+          >
+            Install
+          </button>
+          <button
+            onClick={dismissInstallBanner}
+            className="shrink-0 rounded-lg p-1.5 text-white/40 transition-colors hover:bg-white/10 hover:text-white/70"
+            aria-label="Dismiss install banner"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
       <div className="mx-auto min-h-screen w-full max-w-md pb-28">
         <div className="flex items-center justify-between border-b border-white/10 px-4 pb-3 pt-4">
           <div>
@@ -1704,6 +1793,24 @@ function AppInner() {
                     <Bell className={`h-5 w-5 ${tc.t400}`} />
                   </button>
                 </div>
+
+                {installPrompt && (
+                  <div className="mt-4 px-4">
+                    <div className="mb-3 text-sm font-semibold tracking-wide text-white/70">
+                      APP
+                    </div>
+                    <button
+                      onClick={() => void triggerInstall()}
+                      className={`flex w-full items-center justify-between rounded-xl border border-white/10 ${tc.cardBg} p-4 text-left ${tc.hoverBorder} transition-colors`}
+                    >
+                      <div>
+                        <div className="text-sm font-medium">Install App</div>
+                        <div className="mt-1 text-xs text-white/45">Add to your home screen for quick access</div>
+                      </div>
+                      <Download className={`h-5 w-5 ${tc.t400}`} />
+                    </button>
+                  </div>
+                )}
               </>
             )}
           </>
