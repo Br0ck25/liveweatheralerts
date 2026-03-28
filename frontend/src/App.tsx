@@ -366,7 +366,13 @@ function normalizeAlertCount(alerts: Array<Record<string, unknown>>) {
 }
 
 export default function App() {
+  // Read deep-link alert ID from URL (?alert=...) once on mount
+  const deepLinkedAlertId = (() => {
+    try { return new URLSearchParams(window.location.search).get('alert') || null } catch { return null }
+  })()
+
   const [activeTab, setActiveTab] = useState<AppTab>(() => {
+    if (deepLinkedAlertId) return 'alerts'
     const s = window.localStorage.getItem('lwa_active_tab_v1') as AppTab | null
     return s && ['home','forecast','radar','alerts','more'].includes(s) ? s : 'forecast'
   })
@@ -573,6 +579,26 @@ export default function App() {
   useEffect(() => { window.localStorage.setItem('lwa_alert_radius_v1', String(alertRadius)) }, [alertRadius])
   useEffect(() => { window.localStorage.setItem('lwa_alert_toggles_v1', JSON.stringify(alertToggles)) }, [alertToggles])
 
+  // Handle deep-linked alert: once alerts are loaded, expand the matching card and clean the URL
+  useEffect(() => {
+    if (!deepLinkedAlertId || loading || !alertsData) return
+    setActiveTab('alerts')
+    setShowAllAlerts(true)
+    setExpandedAlertId(deepLinkedAlertId)
+    // Clean the ?alert= param from the URL without a page reload
+    try {
+      const u = new URL(window.location.href)
+      u.searchParams.delete('alert')
+      window.history.replaceState(null, '', u.pathname + (u.search || ''))
+    } catch { /* ignore */ }
+    // Scroll to the expanded card after a short paint delay
+    setTimeout(() => {
+      const el = document.getElementById(`alert-card-${CSS.escape(deepLinkedAlertId)}`)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 300)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, alertsData])
+
   // Enrich location with countyCode and zoneCode if missing
   useEffect(() => {
     if (!location?.lat || !location?.lon || (location?.countyCode && location?.zoneCode)) return
@@ -606,13 +632,22 @@ export default function App() {
   const localAlerts = useMemo(() => {
     if (!location?.state) return []
     const stateCode = String(location.state).toUpperCase()
-    return alerts.filter(
-      (alert) => String(alert?.stateCode || '').toUpperCase() === stateCode,
-    )
+    return alerts.filter((alert) => {
+      // Check primary stateCode first
+      if (String(alert?.stateCode || '').toUpperCase() === stateCode) return true
+      // Also check stateCodes array for multi-state alerts (e.g. IL+IN+KY+MO)
+      const codes = Array.isArray(alert?.stateCodes) ? (alert.stateCodes as string[]) : []
+      return codes.some((c) => String(c).toUpperCase() === stateCode)
+    })
   }, [alerts, location])
 
-  // County-level filtered alerts for the home screen (UGC county AND zone code matching)
+  // County/radius-filtered alerts for the home screen
+  // alertRadius=0 → UGC county+zone matching (precise)
+  // alertRadius>0 → show all state-level alerts (user opted into wider view)
   const countyAlerts = useMemo(() => {
+    // Radius mode: return all state-level alerts unfiltered
+    if (alertRadius > 0) return localAlerts
+
     const countyUgc =
       location?.countyCode && location?.state
         ? `${String(location.state).toUpperCase()}C${String(location.countyCode).padStart(3, '0')}`
@@ -635,7 +670,7 @@ export default function App() {
 
     // No county code available yet (still geocoding) — fall back to state-level
     return localAlerts
-  }, [localAlerts, location])
+  }, [localAlerts, location, alertRadius])
 
   const scopedAlerts = useMemo(() => {
     return alertsScope === 'local' ? countyAlerts : alerts
@@ -1032,11 +1067,7 @@ export default function App() {
                         <div
                           key={idx}
                           onClick={() => setExpandedDayIndex(expanded ? null : idx)}
-                          className={`cursor-pointer rounded-2xl border p-4 ${
-                            idx === 0
-                              ? `${tc.borderMuted} bg-[#17233a]`
-                              : `border-white/10 ${tc.cardBg}`
-                          } ${expanded ? `ring-2 ${tc.ring}` : ''}`}
+                          className={`cursor-pointer rounded-2xl border p-4 ${tc.borderMuted} ${tc.cardBg} ${expanded ? `ring-2 ${tc.ring}` : ''}`}
                         >
                           <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0 flex items-center gap-3">
@@ -1260,6 +1291,7 @@ export default function App() {
                     return (
                       <div
                         key={alertId}
+                        id={`alert-card-${alertId}`}
                         onClick={() => setExpandedAlertId(isExpanded ? null : alertId)}
                         className={`cursor-pointer rounded-xl border-l-4 ${tc.cardBg} p-4 ${styles.border}`}
                       >
@@ -1546,8 +1578,8 @@ export default function App() {
 
       {/* Location setup modal */}
       {showSetupModal === 'location' && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-t-3xl border-t border-white/10 p-6 pb-10" style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-white/10 p-6" style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}>
             <div className={`mb-1 text-center text-xs tracking-wide ${tc.t300}`}>GET STARTED</div>
             <div className="mb-2 text-center text-2xl font-bold">Set Your Location</div>
             <div className="mb-6 text-center text-sm text-white/60">
@@ -1592,8 +1624,8 @@ export default function App() {
 
       {/* Notifications permission modal */}
       {showSetupModal === 'notif' && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-t-3xl border-t border-white/10 p-6 pb-10" style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-white/10 p-6" style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}>
             <div className={`mb-1 text-center text-xs tracking-wide ${tc.t300}`}>STAY SAFE</div>
             <div className="mb-2 text-center text-2xl font-bold">Enable Notifications</div>
             <div className="mb-6 text-center text-sm text-white/60">
