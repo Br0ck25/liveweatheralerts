@@ -530,6 +530,7 @@ const THEMES: Record<string, { t300: string; t400: string; bg500: string; border
   amber:   { t300: 'text-amber-300',   t400: 'text-amber-400',   bg500: 'bg-amber-500',   borderAccent: 'border-amber-400',   bgMuted: 'bg-amber-500/20',   borderMuted: 'border-amber-400/20',   ring: 'ring-amber-400/70',   iconBg: 'bg-amber-400/10',   iconBorder: 'border-amber-300/10',   hoverBorder: 'hover:border-amber-500/40',   extraBorderMuted: 'border-amber-500/20',   cardBg: 'bg-amber-950/60' },
   rose:    { t300: 'text-rose-300',    t400: 'text-rose-400',    bg500: 'bg-rose-500',    borderAccent: 'border-rose-400',    bgMuted: 'bg-rose-500/20',    borderMuted: 'border-rose-400/20',    ring: 'ring-rose-400/70',    iconBg: 'bg-rose-400/10',    iconBorder: 'border-rose-300/10',    hoverBorder: 'hover:border-rose-500/40',    extraBorderMuted: 'border-rose-500/20',    cardBg: 'bg-rose-950/60' },
   teal:    { t300: 'text-teal-300',    t400: 'text-teal-400',    bg500: 'bg-teal-500',    borderAccent: 'border-teal-400',    bgMuted: 'bg-teal-500/20',    borderMuted: 'border-teal-400/20',    ring: 'ring-teal-400/70',    iconBg: 'bg-teal-400/10',    iconBorder: 'border-teal-300/10',    hoverBorder: 'hover:border-teal-500/40',    extraBorderMuted: 'border-teal-500/20',    cardBg: 'bg-teal-950/60' },
+  white:   { t300: 'text-black/70',    t400: 'text-black',       bg500: 'bg-sky-500',     borderAccent: 'border-sky-400',     bgMuted: 'bg-slate-200',      borderMuted: 'border-slate-400',      ring: 'ring-sky-400/70',     iconBg: 'bg-sky-400/10',     iconBorder: 'border-sky-300/10',     hoverBorder: 'hover:border-sky-500/40',     extraBorderMuted: 'border-sky-500/20',     cardBg: 'bg-slate-100' },
 }
 
 const THEME_BG: Record<string, string> = {
@@ -539,6 +540,7 @@ const THEME_BG: Record<string, string> = {
   amber:   '#150e04',
   rose:    '#17080b',
   teal:    '#071514',
+  white:   '#091320',
 }
 
 const NAV_BG: Record<string, string> = {
@@ -548,6 +550,7 @@ const NAV_BG: Record<string, string> = {
   amber:   '#1a1204',
   rose:    '#1c090e',
   teal:    '#0a1a18',
+  white:   '#ffffff',
 }
 
 function normalizeAlertCount(alerts: Array<Record<string, unknown>>) {
@@ -861,14 +864,22 @@ function AppInner() {
   }, [location?.lat, location?.lon, location?.countyCode, location?.zoneCode])
 
   const tc = THEMES[themeKey] ?? THEMES.blue
+  const isWhiteTheme = themeKey === 'white'
+  const rootText = isWhiteTheme ? 'text-black' : 'text-white'
+  const cardBase = `card rounded-2xl border p-5 ${tc.cardBg} ${isWhiteTheme ? 'border-slate-300 shadow-md' : 'border-white/10 shadow-2xl'}`
 
   const current = weather?.current || {}
   const hourly = useMemo(() => (weather?.hourly || []).slice(0, 6), [weather?.hourly])
   const daily = useMemo(() => (weather?.daily || []).slice(0, 7), [weather?.daily])
 
   // Use all alerts from the active feed (NWS /alerts/active already returns only active alerts)
+  // Filter out test alerts and messages that include 'test'.
   const alerts = useMemo(() => {
-    return alertsData?.alerts ?? []
+    const raw = alertsData?.alerts ?? []
+    return raw.filter((alert) => {
+      const text = `${String(alert?.event || '')} ${String(alert?.headline || alert?.summary || '')} ${String(alert?.description || '')}`.toLowerCase()
+      return !text.includes('test')
+    })
   }, [alertsData?.alerts])
 
   const localAlerts = useMemo(() => {
@@ -949,7 +960,7 @@ function AppInner() {
   const activeAlertHero = countyAlerts[0] || null
 
   return (
-    <div className="min-h-screen text-white" style={{ backgroundColor: THEME_BG[themeKey] || '#091320' }}>
+    <div className={`min-h-screen ${rootText} ${isWhiteTheme ? 'theme-white' : ''}`} style={{ backgroundColor: THEME_BG[themeKey] || '#091320' }}>
       {/* PWA install banner — slides down from top */}
       <div
         className={`fixed left-1/2 z-40 w-full max-w-md -translate-x-1/2 px-4 transition-all duration-300 ease-out ${
@@ -957,7 +968,7 @@ function AppInner() {
         }`}
       >
         <div
-          className="flex items-center gap-3 rounded-2xl border border-white/10 p-3 shadow-xl backdrop-blur-md"
+          className={`flex items-center gap-3 rounded-2xl p-3 ${isWhiteTheme ? 'border-slate-300 shadow-md' : 'border-white/10 shadow-xl'} backdrop-blur-md`}
           style={{ backgroundColor: NAV_BG[themeKey] || '#0c1b30' }}
         >
           <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${tc.bg500}`}>
@@ -1020,27 +1031,27 @@ function AppInner() {
                 {activeAlertHero ? (
                   <div className="px-4 pt-4">
                     <div className="rounded-2xl border border-red-500/30 bg-gradient-to-b from-red-700 to-red-900 p-5">
-                      <div className="mb-2 text-xs font-semibold tracking-wide text-red-200">
+                      <div className="mb-2 text-xs font-semibold tracking-wide text-white force-white">
                         {String(activeAlertHero.event || 'ACTIVE ALERT').toUpperCase()}
                       </div>
-                      <div className="mb-1 text-3xl font-bold">{currentLocationLabel}</div>
-                      <div className="mb-3 text-sm text-red-100">
+                      <div className="mb-1 text-3xl font-bold text-white force-white">{currentLocationLabel}</div>
+                      <div className="mb-3 text-sm text-white force-white">
                         {(activeAlertHero.summary as string) ||
                           (activeAlertHero.headline as string) ||
                           'Weather alert in effect'}
                       </div>
                       <div className="mb-4 flex flex-wrap gap-2 text-xs">
-                        <span className="rounded bg-red-500/20 px-2 py-1">
+                        <span className="rounded bg-red-500/20 px-2 py-1 text-white force-white">
                           {(activeAlertHero.severity as string) || 'Alert'}
                         </span>
                         {activeAlertHero.urgency ? (
-                          <span className="rounded bg-red-500/20 px-2 py-1">
+                          <span className="rounded bg-red-500/20 px-2 py-1 text-white force-white">
                             {activeAlertHero.urgency as string}
                           </span>
                         ) : null}
                       </div>
                       <div className="flex items-center justify-between">
-                        <div className="text-xs text-red-200">
+                        <div className="text-xs text-white force-white">
                           Until {formatDateTime(activeAlertHero.expires as string)}
                         </div>
                         <button
@@ -1057,12 +1068,12 @@ function AppInner() {
                       {expandedAlertId === String(activeAlertHero.id || 'hero') && (
                         <div className="mt-3 space-y-2 border-t border-white/20 pt-3 text-sm">
                           {(activeAlertHero.description as string) ? (
-                            <div className="whitespace-pre-wrap leading-relaxed text-red-100/90">
+                            <div className="whitespace-pre-wrap leading-relaxed text-white/90 force-white">
                               {formatAlertDescription(activeAlertHero.description as string)}
                             </div>
                           ) : null}
                           {(activeAlertHero.instruction as string) ? (
-                            <div className="mt-2 whitespace-pre-wrap leading-relaxed text-yellow-200/80">
+                            <div className="mt-2 whitespace-pre-wrap leading-relaxed text-white/70 force-white">
                               {formatAlertDescription(activeAlertHero.instruction as string)}
                             </div>
                           ) : null}
@@ -1183,7 +1194,7 @@ function AppInner() {
                     </button>
                   )}
 
-                  <div className={`mt-2 rounded-2xl border border-white/10 p-5 ${tc.cardBg}`}>
+                  <div className={cardBase}>
                     <div className="flex items-start justify-between gap-4">
                       <div>
                         <div className={`mb-2 text-xs tracking-wide ${tc.t300}`}>CURRENT</div>
@@ -1231,7 +1242,7 @@ function AppInner() {
             {activeTab === 'forecast' && (
               <>
                 <div className="px-4 pt-4">
-                  <div className={`rounded-2xl border border-white/10 p-5 ${tc.cardBg}`}>
+                  <div className={cardBase}>
                     <div className="flex items-start justify-between gap-4">
                       <div>
                         <div className={`mb-2 text-xs tracking-wide ${tc.t300}`}>FORECAST</div>
@@ -1239,7 +1250,7 @@ function AppInner() {
                           {formatTemp(getCurrentTemp(current))}
                         </div>
                         <div className="mt-2 text-lg font-medium">{getCurrentCondition(current)}</div>
-                        <div className="mt-1 text-sm text-white/60">
+                        <div className={`mt-1 text-sm ${tc.t300}`}>
                           Tonight low {formatTemp(getDailyLow(daily[0] || {}))} • Tomorrow high{' '}
                           {formatTemp(getDailyHigh(daily[1] || daily[0] || {}))}
                         </div>
@@ -1313,9 +1324,9 @@ function AppInner() {
                           key={index}
                           className={`min-w-[84px] rounded-2xl border border-white/10 ${tc.cardBg} p-3 text-center`}
                         >
-                          <div className="text-[11px] text-white/45">{getHourlyTime(item)}</div>
+                          <div className={`text-[11px] ${tc.t300}`}>{getHourlyTime(item)}</div>
                           <Icon className={`mx-auto my-3 h-5 w-5 ${tc.t300}`} />
-                          <div className="text-xl font-semibold">{formatTemp(getHourlyTemp(item))}</div>
+                          <div className={`text-xl font-semibold ${tc.t400}`}>{formatTemp(getHourlyTemp(item))}</div>
                           <div className={`mt-1 text-xs ${tc.t400}`}>
                             {formatPercent(getHourlyRain(item))}
                           </div>
@@ -1363,27 +1374,27 @@ function AppInner() {
                               </div>
                             </div>
                             <div className="shrink-0 text-right">
-                              <div className="mb-1 text-sm text-white/45">
+                              <div className={`mb-1 text-sm ${tc.t400}`}>
                                 {formatPercent(getDailyPrecip(day))} rain
                               </div>
                               <div className="text-base font-semibold">
                                 {formatTemp(getDailyHigh(day))}{' '}
-                                <span className="font-normal text-white/35">
+                                <span className={`font-normal ${tc.t300}`}>
                                   / {formatTemp(getDailyLow(day))}
                                 </span>
                               </div>
                             </div>
                           </div>
                           {expanded ? (
-                            <div className={`mt-3 space-y-2 rounded-xl border ${tc.extraBorderMuted} bg-[#0d1b36] p-3 text-sm text-white/80`}>
+                            <div className={`mt-3 space-y-2 rounded-xl border ${tc.extraBorderMuted} ${tc.bgMuted} p-3 text-sm ${tc.t400}`}>
                               {/* Daytime */}
                               <div className={`text-[11px] font-semibold uppercase tracking-wide ${tc.t400}`}>Day</div>
                               <div>{getDailySummary(day)}</div>
                               {String(day?.detailedForecast || '') && String(day?.detailedForecast) !== getDailySummary(day) && (
-                                <div className="text-white/60">{String(day?.detailedForecast)}</div>
+                                <div className={tc.t300}>{String(day?.detailedForecast)}</div>
                               )}
-                              <div className="text-white/70">Wind: {String(day?.windDirection || '')} {String(day?.windSpeed || '')}</div>
-                              <div className="text-white/70">Rain: {formatPercent(getDailyPrecip(day))}</div>
+                              <div className={tc.t300}>Wind: {String(day?.windDirection || '')} {String(day?.windSpeed || '')}</div>
+                              <div className={tc.t300}>Rain: {formatPercent(getDailyPrecip(day))}</div>
 
                               {/* Nighttime */}
                               {getDailyNightSummary(day) && (
@@ -1660,7 +1671,7 @@ function AppInner() {
             {activeTab === 'more' && (
               <>
                 <div className="px-4 pt-4">
-                  <div className={`rounded-2xl border border-white/10 p-5 ${tc.cardBg}`}>
+                  <div className={cardBase}>
                     <div className="flex items-center justify-between">
                       <div>
                         <div className={`mb-1 text-xs tracking-wide ${tc.t300}`}>LOCATION</div>
@@ -1745,6 +1756,7 @@ function AppInner() {
                         { key: 'amber',   dot: 'bg-amber-400',   label: 'Amber' },
                         { key: 'rose',    dot: 'bg-rose-400',    label: 'Rose' },
                         { key: 'teal',    dot: 'bg-teal-400',    label: 'Teal' },
+                        { key: 'white',   dot: 'bg-white',       label: 'White' },
                       ] as const).map((t) => (
                         <button
                           key={t.key}
