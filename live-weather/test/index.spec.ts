@@ -67,7 +67,14 @@ describe('Live Weather Admin worker', () => {
 			if (url.includes('api.weather.gov/alerts/active')) {
 				return new Response(JSON.stringify(sampleAlerts), { status: 200, headers: { 'Content-Type': 'application/json' } });
 			}
-			if (url.startsWith('https://live-weather.example/images/') || url.startsWith('https://live-weather.example/virginia/') || url.startsWith('https://live-weather.example/advisory/')) {
+			if (
+				url.startsWith('https://live-weather.example/images/')
+				|| url.startsWith('https://live-weather.example/virginia/')
+				|| url.startsWith('https://live-weather.example/advisory/')
+				|| url.startsWith('https://liveweatheralerts.com/images/')
+				|| url.startsWith('https://liveweatheralerts.com/virginia/')
+				|| url.startsWith('https://liveweatheralerts.com/advisory/')
+			) {
 				if (init?.method === 'HEAD') {
 					if (url.endsWith('/images/warning/tornado-warning-warning.jpg')) {
 						return new Response('', { status: 404 });
@@ -82,6 +89,9 @@ describe('Live Weather Admin worker', () => {
 				}
 				if (url.includes('/feed')) {
 					return new Response(JSON.stringify({ id: '12345' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+				}
+				if (url.includes('/comments')) {
+					return new Response(JSON.stringify({ id: 'comment-12345' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 				}
 			}
 			if (url.startsWith('https://push.example/')) {
@@ -135,6 +145,8 @@ describe('Live Weather Admin worker', () => {
 		expect(response.status).toBe(200);
 		expect(body).toContain('Live Weather Alerts Admin');
 		expect(body).toContain('Tornado Warning');
+		expect(body).toContain('autoPostTornadoWarnings');
+		expect(body).toContain('liveWeatherAdminFilters:v1');
 	});
 
 	it('fails closed when ADMIN_PASSWORD is missing', async () => {
@@ -1437,6 +1449,114 @@ describe('Live Weather Admin worker', () => {
 		const json = await response.json();
 		expect(json.results[0].status).toBe('posted');
 		expect((globalThis.fetch as any).mock.calls.some(([input]) => String(input).includes('/photos'))).toBe(true);
+	});
+
+	it('saves the tornado warning auto-post toggle and renders it checked on admin refresh', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+
+		const saveRequest = new IncomingRequest('https://live-weather.example/admin/auto-post-config', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: cookie,
+			},
+			body: JSON.stringify({ tornadoWarningsEnabled: true }),
+		});
+		const saveCtx = createExecutionContext();
+		const saveResponse = await worker.fetch(saveRequest, goodEnv as any, saveCtx);
+		await waitOnExecutionContext(saveCtx);
+		expect(saveResponse.status).toBe(200);
+		const savePayload = await saveResponse.json() as any;
+		expect(savePayload.success).toBe(true);
+		expect(savePayload.config.tornadoWarningsEnabled).toBe(true);
+
+		const storedConfigRaw = await goodEnv.WEATHER_KV.get('fb:auto-post-config');
+		expect(storedConfigRaw).toBeTruthy();
+		expect(JSON.parse(storedConfigRaw || '{}').tornadoWarningsEnabled).toBe(true);
+
+		const pageRequest = new IncomingRequest('https://live-weather.example/admin', {
+			headers: { Cookie: cookie },
+		});
+		const pageCtx = createExecutionContext();
+		const pageResponse = await worker.fetch(pageRequest, goodEnv as any, pageCtx);
+		await waitOnExecutionContext(pageCtx);
+		expect(pageResponse.status).toBe(200);
+		const body = await pageResponse.text();
+		expect(body).toContain('Auto-post Tornado Warnings');
+		expect(body).toContain('id="autoPostTornadoWarnings" type="checkbox" checked');
+	});
+
+	it('auto-posts updated tornado warnings as Facebook comments during the scheduled sync', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowIso = new Date().toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			tornadoWarningsEnabled: true,
+			updatedAt: nowIso,
+		}));
+		await goodEnv.WEATHER_KV.put('alerts:lifecycle-snapshot:v1', JSON.stringify({
+			'alert-1': {
+				alertId: 'alert-1',
+				stateCodes: ['KY'],
+				countyCodes: ['001'],
+				event: 'Tornado Warning',
+				areaDesc: 'Test County',
+				lat: 37.17,
+				lon: -83.28,
+				headline: 'Test tornado warning',
+				description: 'Previous tornado warning details',
+				instruction: '',
+				severity: 'Severe',
+				urgency: '',
+				certainty: '',
+				updated: '',
+				expires: '2026-03-29T23:00:00-04:00',
+				lastChangeType: 'new',
+				lastChangedAt: '2026-03-29T20:00:00.000Z',
+			},
+		}));
+		await goodEnv.WEATHER_KV.put('thread:KYC001:tornado_warning', JSON.stringify({
+			postId: 'existing-post-1',
+			nwsAlertId: 'alert-1',
+			expiresAt: Math.floor(Date.now() / 1000) + 3600,
+			county: 'Test County',
+			alertType: 'Tornado Warning',
+			updateCount: 1,
+		}));
+
+		const ctx = createExecutionContext();
+		await worker.scheduled(
+			{
+				cron: '*/2 * * * *',
+				scheduledTime: Date.now(),
+			} as any,
+			goodEnv as any,
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(
+			(globalThis.fetch as any).mock.calls.some(([input]) =>
+				String(input).includes('/existing-post-1/comments'),
+			),
+		).toBe(true);
+
+		const threadRaw = await goodEnv.WEATHER_KV.get('thread:KYC001:tornado_warning');
+		expect(threadRaw).toBeTruthy();
+		expect(JSON.parse(threadRaw || '{}').updateCount).toBe(2);
 	});
 
 	it('subscribes with multi-scope prefs and writes state indexes', async () => {

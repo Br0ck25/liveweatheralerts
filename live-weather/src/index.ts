@@ -40,6 +40,7 @@ const KV_ALERT_MAP  = 'alerts:map';       // JSON: Record<alertId, feature> — 
 const KV_ETAG       = 'alerts:etag';      // Last ETag string from NWS
 const KV_LAST_POLL  = 'alerts:last-poll'; // ISO timestamp of last successful poll
 const KV_FB_APP_CONFIG = 'fb:app-config';  // JSON: { appId, appSecret }
+const KV_FB_AUTO_POST_CONFIG = 'fb:auto-post-config'; // JSON: { tornadoWarningsEnabled, updatedAt }
 const KV_ADMIN_SESSION_PREFIX = 'admin:session:'; // admin:session:{opaqueToken}
 const KV_PUSH_SUB_PREFIX = 'push:sub:'; // push:sub:{sha256(endpoint)}
 const KV_PUSH_STATE_INDEX_PREFIX = 'push:index:state:'; // push:index:state:{stateCode}
@@ -70,6 +71,29 @@ interface FbAppConfig {
 	appId?: string;
 	appSecret?: string;
 }
+
+interface FbAutoPostConfig {
+	tornadoWarningsEnabled: boolean;
+	updatedAt: string | null;
+}
+
+type FacebookPublishThreadAction = '' | 'new_post' | 'comment';
+
+type FacebookPublishOptions = {
+	request?: Request | null;
+	customMessage?: string;
+	threadAction?: FacebookPublishThreadAction | string;
+	imageUrl?: string;
+};
+
+type FacebookPublishResult = {
+	id: string;
+	status: 'posted' | 'commented';
+	postId: string;
+	commentId?: string;
+	updateCount?: number;
+	chainBreak?: boolean;
+};
 
 interface AdminSessionRecord {
 	createdAt: string;
@@ -314,6 +338,39 @@ async function writeFbAppConfig(env: Env, config: FbAppConfig): Promise<void> {
 	await env.WEATHER_KV.put(KV_FB_APP_CONFIG, JSON.stringify(config));
 }
 
+function normalizeFbAutoPostConfig(value: unknown): FbAutoPostConfig {
+	if (typeof value === 'boolean') {
+		return {
+			tornadoWarningsEnabled: value,
+			updatedAt: null,
+		};
+	}
+	const config = value as Record<string, unknown> | null;
+	const updatedAtRaw = String(config?.updatedAt || '').trim();
+	const updatedAtMs = Date.parse(updatedAtRaw);
+	return {
+		tornadoWarningsEnabled: config?.tornadoWarningsEnabled === true,
+		updatedAt: Number.isFinite(updatedAtMs) ? new Date(updatedAtMs).toISOString() : null,
+	};
+}
+
+async function readFbAutoPostConfig(env: Env): Promise<FbAutoPostConfig> {
+	try {
+		const raw = await env.WEATHER_KV.get(KV_FB_AUTO_POST_CONFIG);
+		if (!raw) return normalizeFbAutoPostConfig(null);
+		return normalizeFbAutoPostConfig(JSON.parse(raw));
+	} catch {
+		return normalizeFbAutoPostConfig(null);
+	}
+}
+
+async function writeFbAutoPostConfig(env: Env, config: FbAutoPostConfig): Promise<void> {
+	await env.WEATHER_KV.put(
+		KV_FB_AUTO_POST_CONFIG,
+		JSON.stringify(normalizeFbAutoPostConfig(config)),
+	);
+}
+
 function threadKvKey(ugcCode: string, event: string): string {
 	const slug = event.toLowerCase().replace(/\s+/g, '_');
 	return `thread:${ugcCode}:${slug}`;
@@ -347,6 +404,30 @@ async function writeThread(env: Env, ugcCode: string, thread: AlertThread): Prom
 
 async function deleteThread(env: Env, ugcCode: string, event: string): Promise<void> {
 	await env.WEATHER_KV.delete(threadKvKey(ugcCode, event));
+}
+
+async function readExistingThreadForAlert(
+	env: Env,
+	ugcCodes: string[],
+	event: string,
+): Promise<AlertThread | null> {
+	for (const ugcCode of ugcCodes) {
+		const thread = await readThread(env, ugcCode, event);
+		if (thread) return thread;
+	}
+	return null;
+}
+
+function normalizeFacebookPublishThreadAction(
+	value: unknown,
+): FacebookPublishThreadAction {
+	const normalized = String(value || '').trim().toLowerCase();
+	if (normalized === 'new_post' || normalized === 'comment') return normalized;
+	return '';
+}
+
+function isTornadoWarningEvent(event: string): boolean {
+	return /\btornado warning\b/i.test(String(event || '').trim());
 }
 
 /**
@@ -3155,9 +3236,22 @@ function severityBadgeColor(severity: string): string {
 	return '#555';
 }
 
-function renderAdminPage(alerts: any[], lastPoll?: string, syncError?: string, appConfig?: FbAppConfig): string {
+function renderAdminPage(
+	alerts: any[],
+	lastPoll?: string,
+	syncError?: string,
+	appConfig?: FbAppConfig,
+	autoPostConfig?: FbAutoPostConfig,
+): string {
 	const savedAppId = appConfig?.appId ?? '';
 	const savedAppSecret = appConfig?.appSecret ? '********' : '';
+	const tornadoAutoPostEnabled = autoPostConfig?.tornadoWarningsEnabled === true;
+	const autoPostSavedText = autoPostConfig?.updatedAt
+		? `Saved ${formatLastSynced(autoPostConfig.updatedAt)}.`
+		: 'Changes save immediately.';
+	const autoPostStatusText = tornadoAutoPostEnabled
+		? `Auto-post tornado warnings is enabled. ${autoPostSavedText}`
+		: `Auto-post tornado warnings is disabled. ${autoPostSavedText}`;
 	// Build post text map keyed by numeric index.
 	// We NEVER inject post text into onclick attributes — NWS text contains quotes,
 	// apostrophes, and special chars that break HTML attribute parsing. Instead we
@@ -3242,6 +3336,9 @@ function renderAdminPage(alerts: any[], lastPoll?: string, syncError?: string, a
 	// JSON.stringify fully escapes all characters including quotes, backslashes,
 	// and newlines — safe to embed directly in a <script> block.
 	const postTextsJs = 'const POST_TEXTS = ' + JSON.stringify(postTextMap) + ';';
+	const autoPostConfigJs = 'const AUTO_POST_CONFIG = ' + JSON.stringify(
+		normalizeFbAutoPostConfig(autoPostConfig),
+	) + ';';
 
 	const stateOptions = Array.from(states).sort().map((s) =>
 		'<option value="' + safeHtml(s) + '">' + safeHtml(s) + '</option>'
@@ -3261,6 +3358,15 @@ function renderAdminPage(alerts: any[], lastPoll?: string, syncError?: string, a
 		'.filter-bar input, .filter-bar select { margin-left: 6px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; }',
 		'.filter-bar button { padding: 6px 10px; border: 1px solid #bbb; border-radius: 5px; background: #f0f0f0; cursor: pointer; font-size: 0.85rem; }',
 		'.filter-bar button:hover { background: #e0e0e0; }',
+		'.admin-panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-bottom: 22px; }',
+		'.admin-panel h2 { margin: 0 0 8px; font-size: 1rem; }',
+		'.admin-panel p { margin: 8px 0; font-size: 0.88rem; color: #444; }',
+		'.toggle-row { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-top: 10px; }',
+		'.toggle-row input { width: 18px; height: 18px; margin: 0; }',
+		'.toggle-help { margin-top: 8px; color: #555; }',
+		'.auto-post-status { margin-top: 10px; font-size: 0.83rem; color: #333; }',
+		'.auto-post-status.ok { color: #1a7f37; }',
+		'.auto-post-status.err { color: #b30000; }',
 		'.token-exchange { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-bottom: 22px; }',
 		'.token-exchange h2 { margin: 0 0 8px; font-size: 1rem; }',
 		'.token-exchange label { display: block; margin: 8px 0; font-size: 0.87rem; }',
@@ -3314,11 +3420,12 @@ function renderAdminPage(alerts: any[], lastPoll?: string, syncError?: string, a
     '.sync-error { background: #fff8e1; color: #7a5a00; border: 1px solid #ffe082; border-radius: 5px; padding: 6px 12px; font-size: 0.84rem; margin-bottom: 12px; }',
 	].join('\n');
 
-	const js = postTextsJs + `
+	const js = postTextsJs + '\n' + autoPostConfigJs + `
 let currentAlertId = null;
 let currentThreadAction = 'new_post'; // 'new_post' | 'comment'
 let currentPostId = null;
 let currentImageUrl = null;
+const ADMIN_FILTERS_STORAGE_KEY = 'liveWeatherAdminFilters:v1';
 
 const STATE_CODE_TO_NAME = {
   AL: 'alabama', AK: 'alaska', AZ: 'arizona', AR: 'arkansas', CA: 'california',
@@ -3669,6 +3776,8 @@ function applyFilters() {
 
     card.style.display = (matchesState && matchesSeverity && matchesSearch) ? '' : 'none';
   });
+
+  saveFilters();
 }
 
 function clearFilters() {
@@ -3676,6 +3785,44 @@ function clearFilters() {
   document.getElementById('filterState').value = 'all';
   document.getElementById('filterSeverity').value = 'all';
   applyFilters();
+}
+
+function saveFilters() {
+  try {
+    const payload = {
+      search: (document.getElementById('filterSearch').value || '').trim(),
+      state: document.getElementById('filterState').value || 'all',
+      severity: document.getElementById('filterSeverity').value || 'all',
+    };
+    window.localStorage.setItem(ADMIN_FILTERS_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage failures and keep the filters working in-memory.
+  }
+}
+
+function restoreSavedFilters() {
+  try {
+    const raw = window.localStorage.getItem(ADMIN_FILTERS_STORAGE_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw) || {};
+    const search = document.getElementById('filterSearch');
+    const state = document.getElementById('filterState');
+    const severity = document.getElementById('filterSeverity');
+
+    if (search && typeof saved.search === 'string') {
+      search.value = saved.search;
+    }
+    if (state && typeof saved.state === 'string') {
+      const hasStateOption = Array.from(state.options || []).some((option) => option.value === saved.state);
+      state.value = hasStateOption ? saved.state : 'all';
+    }
+    if (severity && typeof saved.severity === 'string') {
+      const hasSeverityOption = Array.from(severity.options || []).some((option) => option.value === saved.severity);
+      severity.value = hasSeverityOption ? saved.severity : 'all';
+    }
+  } catch {
+    // Ignore malformed saved filters.
+  }
 }
 
 const filterSearchInput = document.getElementById('filterSearch');
@@ -3687,6 +3834,46 @@ if (filterSearchInput) filterSearchInput.addEventListener('input', applyFilters)
 if (filterStateSelect) filterStateSelect.addEventListener('change', applyFilters);
 if (filterSeveritySelect) filterSeveritySelect.addEventListener('change', applyFilters);
 if (clearFiltersBtn) clearFiltersBtn.addEventListener('click', clearFilters);
+
+const autoPostToggleInput = document.getElementById('autoPostTornadoWarnings');
+const autoPostStatus = document.getElementById('autoPostStatus');
+
+function setAutoPostStatus(message, variant) {
+  if (!autoPostStatus) return;
+  autoPostStatus.className = variant ? 'auto-post-status ' + variant : 'auto-post-status';
+  autoPostStatus.textContent = message;
+}
+
+async function saveAutoPostToggle() {
+  if (!autoPostToggleInput) return;
+  const previousChecked = !autoPostToggleInput.checked;
+  autoPostToggleInput.disabled = true;
+  setAutoPostStatus('Saving auto-post setting...', '');
+
+  try {
+    const response = await fetch('/admin/auto-post-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tornadoWarningsEnabled: autoPostToggleInput.checked }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || 'Unable to save auto-post setting');
+    }
+    setAutoPostStatus(data.message || 'Auto-post setting saved.', 'ok');
+  } catch (err) {
+    autoPostToggleInput.checked = previousChecked;
+    const message = err instanceof Error ? err.message : String(err);
+    setAutoPostStatus('Error saving auto-post setting: ' + message, 'err');
+  } finally {
+    autoPostToggleInput.disabled = false;
+  }
+}
+
+if (autoPostToggleInput) {
+  autoPostToggleInput.checked = AUTO_POST_CONFIG.tornadoWarningsEnabled === true;
+  autoPostToggleInput.addEventListener('change', saveAutoPostToggle);
+}
 
 const btnTokenExchange = document.getElementById('btnTokenExchange');
 if (btnTokenExchange) {
@@ -3767,6 +3954,7 @@ if (btnSaveAppConfig) {
   });
 }
 
+restoreSavedFilters();
 applyFilters();
 `
 
@@ -3789,6 +3977,16 @@ applyFilters();
 		'  <label>State: <select id="filterState"><option value="all">All</option>' + stateOptions + '</select></label>\n' +
 		'  <label>Severity: <select id="filterSeverity"><option value="all">All</option>' + severityOptions + '</select></label>\n' +
 		'  <button type="button" id="clearFilters">Clear</button>\n' +
+		'</div>\n' +
+		'\n<div class="admin-panel">\n' +
+		'  <h2>Facebook Auto Post</h2>\n' +
+		'  <p>Automatically post Tornado Warnings to Facebook and keep updates in the same post/comment thread flow used by manual posting.</p>\n' +
+		'  <label class="toggle-row" for="autoPostTornadoWarnings">\n' +
+		'    <input id="autoPostTornadoWarnings" type="checkbox"' + (tornadoAutoPostEnabled ? ' checked' : '') + ' />\n' +
+		'    <span>Auto-post Tornado Warnings</span>\n' +
+		'  </label>\n' +
+		'  <p class="toggle-help">New, updated, and extended Tornado Warnings will post automatically when this is enabled.</p>\n' +
+		'  <div id="autoPostStatus" class="auto-post-status">' + safeHtml(autoPostStatusText) + '</div>\n' +
 		'</div>\n' +
 		'\n<div class="token-exchange">\n' +
 		'  <h2>Convert short-lived user token to long-lived token</h2>\n' +
@@ -3879,6 +4077,13 @@ async function urlExists(url: string): Promise<boolean> {
 	return false;
 }
 
+function getAlertImageBaseUrl(env: Env, request?: Request | null): string {
+	const configuredBase = String(env.FB_IMAGE_BASE_URL || '').trim().replace(/\/$/, '');
+	if (configuredBase) return configuredBase;
+	if (request) return new URL(request.url).origin;
+	return PRIMARY_APP_ORIGIN;
+}
+
 function getAlertImageCandidates(state: string, event: string): string[] {
 	const stateSlug = slugify(state);
 	const eventSlug = normalizeEventSlug(event);
@@ -3922,8 +4127,12 @@ function getAlertImageCandidates(state: string, event: string): string[] {
 	return candidates;
 }
 
-async function findAlertImageUrl(env: Env, request: Request, feature: any): Promise<string | null> {
-	const base = env.FB_IMAGE_BASE_URL?.trim().replace(/\/$/, '') || new URL(request.url).origin;
+async function findAlertImageUrl(
+	env: Env,
+	feature: any,
+	request?: Request | null,
+): Promise<string | null> {
+	const base = getAlertImageBaseUrl(env, request);
 	const event = String(feature?.properties?.event || '');
 	const stateCode = extractStateCode(feature);
 	const stateName = stateCodeToName(stateCode);
@@ -3995,6 +4204,110 @@ async function commentOnFacebook(env: Env, postId: string, message: string): Pro
 	return data.id ?? '';
 }
 
+async function publishFeatureToFacebook(
+	env: Env,
+	feature: any,
+	options: FacebookPublishOptions = {},
+): Promise<FacebookPublishResult> {
+	const properties = feature?.properties ?? {};
+	const customMessage = String(options.customMessage || '').trim();
+	const threadAction = normalizeFacebookPublishThreadAction(options.threadAction);
+	const event = String(properties.event ?? 'Weather Alert');
+	const ugcCodes: string[] = Array.isArray(properties.geocode?.UGC) && properties.geocode.UGC.length > 0
+		? properties.geocode.UGC
+		: ['UNKNOWN'];
+	const expiresAt = properties.expires
+		? Math.floor(new Date(properties.expires).getTime() / 1000)
+		: 0;
+
+	let existingThread: AlertThread | null = null;
+	if (threadAction !== 'new_post') {
+		existingThread = await readExistingThreadForAlert(env, ugcCodes, event);
+	}
+
+	if (!existingThread || threadAction === 'new_post') {
+		const anchorMessage = customMessage || buildAnchorPostText(properties);
+		const imageUrl = String(options.imageUrl || '').trim()
+			|| await findAlertImageUrl(env, feature, options.request);
+		const postId = await postToFacebook(env, anchorMessage, imageUrl || undefined);
+		const nextThread: AlertThread = {
+			postId,
+			nwsAlertId: String(feature?.id ?? ''),
+			expiresAt,
+			county: String(properties.areaDesc ?? ''),
+			alertType: event,
+			updateCount: 0,
+		};
+		for (const ugcCode of ugcCodes) {
+			await writeThread(env, ugcCode, { ...nextThread });
+		}
+		return {
+			id: String(feature?.id ?? ''),
+			status: 'posted',
+			postId,
+		};
+	}
+
+	const currentCount = existingThread.updateCount ?? 0;
+	const forceComment = threadAction === 'comment';
+
+	if (forceComment || currentCount < 3) {
+		const commentBody = customMessage || buildCommentText(alertToText(properties));
+		const fullComment = customMessage
+			? customMessage
+			: `🔄 UPDATE — ${event} for ${String(properties.areaDesc ?? '')}\n\n${commentBody}`;
+		const commentId = await commentOnFacebook(env, existingThread.postId, fullComment);
+		const updatedThread: AlertThread = {
+			...existingThread,
+			nwsAlertId: String(feature?.id ?? ''),
+			expiresAt,
+			updateCount: currentCount + 1,
+		};
+		for (const ugcCode of ugcCodes) {
+			await writeThread(env, ugcCode, { ...updatedThread });
+		}
+		return {
+			id: String(feature?.id ?? ''),
+			status: 'commented',
+			postId: existingThread.postId,
+			commentId,
+			updateCount: currentCount + 1,
+		};
+	}
+
+	try {
+		await commentOnFacebook(
+			env,
+			existingThread.postId,
+			`🔄 Continuing coverage of this ${event} has moved to a new post.`,
+		);
+	} catch {
+		// Ignore failures here; the new anchor post is the important part.
+	}
+
+	const anchorMessage = customMessage || buildAnchorPostText(properties);
+	const imageUrl = String(options.imageUrl || '').trim()
+		|| await findAlertImageUrl(env, feature, options.request);
+	const postId = await postToFacebook(env, anchorMessage, imageUrl || undefined);
+	const chainedThread: AlertThread = {
+		postId,
+		nwsAlertId: String(feature?.id ?? ''),
+		expiresAt,
+		county: String(properties.areaDesc ?? ''),
+		alertType: event,
+		updateCount: 0,
+	};
+	for (const ugcCode of ugcCodes) {
+		await writeThread(env, ugcCode, { ...chainedThread });
+	}
+	return {
+		id: String(feature?.id ?? ''),
+		status: 'posted',
+		postId,
+		chainBreak: true,
+	};
+}
+
 async function exchangeFacebookToken(appId: string, appSecret: string, userToken: string): Promise<string> {
 	const url = `${FB_GRAPH_API}/oauth/access_token?grant_type=fb_exchange_token` +
 		`&client_id=${encodeURIComponent(appId)}` +
@@ -4055,6 +4368,40 @@ async function handleTokenConfig(request: Request, env: Env): Promise<Response> 
 	}
 	await writeFbAppConfig(env, { appId, appSecret });
 	return new Response(JSON.stringify({ success: true }), {
+		status: 200,
+		headers: { 'Content-Type': 'application/json' },
+	});
+}
+
+async function handleAutoPostConfig(request: Request, env: Env): Promise<Response> {
+	if (!await isAuthenticated(request, env)) {
+		return new Response('Unauthorized', { status: 401 });
+	}
+
+	const form = await parseRequestBody(request);
+	const rawValue = String(form.get('tornadoWarningsEnabled') || '').trim().toLowerCase();
+	if (!['true', 'false', '1', '0', 'on', 'off'].includes(rawValue)) {
+		return new Response(JSON.stringify({ error: 'tornadoWarningsEnabled must be true or false' }), {
+			status: 400,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	}
+
+	const tornadoWarningsEnabled =
+		rawValue === 'true' || rawValue === '1' || rawValue === 'on';
+	const nextConfig: FbAutoPostConfig = {
+		tornadoWarningsEnabled,
+		updatedAt: new Date().toISOString(),
+	};
+	await writeFbAutoPostConfig(env, nextConfig);
+
+	return new Response(JSON.stringify({
+		success: true,
+		config: nextConfig,
+		message: tornadoWarningsEnabled
+			? `Auto-post tornado warnings enabled. Saved ${formatLastSynced(nextConfig.updatedAt || '')}.`
+			: `Auto-post tornado warnings disabled. Saved ${formatLastSynced(nextConfig.updatedAt || '')}.`,
+	}), {
 		status: 200,
 		headers: { 'Content-Type': 'application/json' },
 	});
@@ -6906,8 +7253,15 @@ async function handleAdminPage(request: Request, env: Env): Promise<Response> {
 	// Surface last poll time in the UI
 	const lastPoll = await env.WEATHER_KV.get(KV_LAST_POLL);
 	const appConfig = await readFbAppConfig(env);
+	const autoPostConfig = await readFbAutoPostConfig(env);
 
-	const page = renderAdminPage(alerts, lastPoll ?? undefined, error, appConfig);
+	const page = renderAdminPage(
+		alerts,
+		lastPoll ?? undefined,
+		error,
+		appConfig,
+		autoPostConfig,
+	);
 	const headers = new Headers({
 		'Content-Type': 'text/html; charset=utf-8',
 		'Cache-Control': 'no-store',
@@ -6940,21 +7294,18 @@ async function handleThreadCheck(request: Request, env: Env): Promise<Response> 
 	const ugcCodes: string[] = Array.isArray(p.geocode?.UGC) ? p.geocode.UGC : [];
 	const event: string = String(p.event ?? '');
 
-	// Check each UGC code for an existing thread — return the first match
-	for (const ugc of ugcCodes) {
-		const thread = await readThread(env, ugc, event);
-		if (thread) {
-			return new Response(JSON.stringify({
-				action: 'comment',
+	const thread = await readExistingThreadForAlert(env, ugcCodes, event);
+	if (thread) {
+		return new Response(JSON.stringify({
+			action: 'comment',
+			postId: thread.postId,
+			threadInfo: {
+				county: thread.county,
+				alertType: thread.alertType,
 				postId: thread.postId,
-				threadInfo: {
-					county: thread.county,
-					alertType: thread.alertType,
-					postId: thread.postId,
-					updateCount: thread.updateCount ?? 0,
-				},
-			}), { headers: { 'Content-Type': 'application/json' } });
-		}
+				updateCount: thread.updateCount ?? 0,
+			},
+		}), { headers: { 'Content-Type': 'application/json' } });
 	}
 
 	return new Response(JSON.stringify({ action: 'new_post' }), {
@@ -7016,97 +7367,13 @@ async function handlePost(request: Request, env: Env): Promise<Response> {
 
 	const results = [];
 	for (const feature of toPost.slice(0, 10)) {
-		const p = feature.properties ?? {};
-		const message = customMessage || alertToText(p);
-		const event: string = String(p.event ?? '');
-		const ugcCodes: string[] = Array.isArray(p.geocode?.UGC) ? p.geocode.UGC : ['UNKNOWN'];
-		const primaryUgc = ugcCodes[0];
-		const expiresAt = p.expires ? Math.floor(new Date(p.expires).getTime() / 1000) : 0;
-
 		try {
-			// Determine whether to post new or comment on existing thread
-			let existingThread: AlertThread | null = null;
-			if (threadAction !== 'new_post') {
-				existingThread = await readThread(env, primaryUgc, event);
-			}
-
-			if (!existingThread || threadAction === 'new_post') {
-				// ── NEW ANCHOR POST ────────────────────────────────────────────
-				const anchorMessage = customMessage || buildAnchorPostText(p);
-				const imageUrl = clientImageUrl || await findAlertImageUrl(env, request, feature);
-				const postId = await postToFacebook(env, anchorMessage, imageUrl ?? undefined);
-				const thread: AlertThread = {
-					postId,
-					nwsAlertId: String(feature.id ?? ''),
-					expiresAt,
-					county: String(p.areaDesc ?? ''),
-					alertType: event,
-					updateCount: 0,
-				};
-				for (const ugc of ugcCodes) {
-					await writeThread(env, ugc, { ...thread });
-				}
-				results.push({ id: feature.id, status: 'posted', postId });
-
-			} else {
-				// ── EXISTING THREAD — comment or chain break ───────────────────
-				const currentCount = existingThread.updateCount ?? 0;
-
-				// If user explicitly chose 'comment', always comment regardless of count
-				const forceComment = threadAction === 'comment';
-
-				if (forceComment || currentCount < 3) {
-					// Post update comment on existing anchor
-					const commentBody = customMessage || buildCommentText(alertToText(p));
-					const fullComment = customMessage
-						? customMessage
-						: `🔄 UPDATE — ${event} for ${String(p.areaDesc ?? '')}\n\n${commentBody}`;
-					const commentId = await commentOnFacebook(env, existingThread.postId, fullComment);
-					// Update thread: advance alertId, refresh expiry, increment count
-					const updatedThread: AlertThread = {
-						...existingThread,
-						nwsAlertId: String(feature.id ?? ''),
-						expiresAt,
-						updateCount: currentCount + 1,
-					};
-					await writeThread(env, primaryUgc, updatedThread);
-					results.push({
-						id: feature.id,
-						status: 'commented',
-						postId: existingThread.postId,
-						commentId,
-						updateCount: currentCount + 1,
-					});
-
-				} else {
-					// ── CHAIN LIMIT REACHED (updateCount >= 3) ─────────────────
-					// Post transition comment on old anchor (non-fatal if it fails)
-					try {
-						await commentOnFacebook(
-							env,
-							existingThread.postId,
-							`🔄 Continuing coverage of this ${event} has moved to a new post.`
-						);
-					} catch { /* ignore — still create the new anchor */ }
-
-					// Create new anchor post
-					const anchorMessage = customMessage || buildAnchorPostText(p);
-					const imageUrl = clientImageUrl || await findAlertImageUrl(env, request, feature);
-					const postId = await postToFacebook(env, anchorMessage, imageUrl ?? undefined);
-					const chainThread: AlertThread = {
-						postId,
-						nwsAlertId: String(feature.id ?? ''),
-						expiresAt,
-						county: String(p.areaDesc ?? ''),
-						alertType: event,
-						updateCount: 0,
-					};
-					for (const ugc of ugcCodes) {
-						await writeThread(env, ugc, { ...chainThread });
-					}
-					results.push({ id: feature.id, status: 'posted', postId, chainBreak: true });
-				}
-			}
+			results.push(await publishFeatureToFacebook(env, feature, {
+				request,
+				customMessage,
+				threadAction,
+				imageUrl: clientImageUrl,
+			}));
 		} catch (err) {
 			results.push({ id: feature.id, status: 'error', error: String(err) });
 		}
@@ -7118,6 +7385,47 @@ async function handlePost(request: Request, env: Env): Promise<Response> {
 	});
 }
 
+async function autoPostTornadoWarnings(
+	env: Env,
+	map: Record<string, any>,
+	changes: AlertChangeRecord[],
+): Promise<void> {
+	const config = await readFbAutoPostConfig(env);
+	if (!config.tornadoWarningsEnabled) return;
+	if (!env.FB_PAGE_ID || !env.FB_PAGE_ACCESS_TOKEN) {
+		console.warn('[fb-auto-post] Tornado warning auto-post is enabled but Facebook credentials are missing.');
+		return;
+	}
+
+	const relevantChanges = changes.filter((change) =>
+		isTornadoWarningEvent(change.event)
+		&& (
+			change.changeType === 'new'
+			|| change.changeType === 'updated'
+			|| change.changeType === 'extended'
+		),
+	);
+	if (relevantChanges.length === 0) return;
+
+	for (const change of relevantChanges) {
+		const feature =
+			map[change.alertId]
+			|| Object.values(map).find((candidate: any) => String(candidate?.id ?? '') === change.alertId);
+		if (!feature) continue;
+		if (!isTornadoWarningEvent(String(feature?.properties?.event || change.event))) continue;
+		try {
+			const result = await publishFeatureToFacebook(env, feature);
+			console.log(
+				`[fb-auto-post] ${result.status} tornado warning ${change.alertId} change=${change.changeType} post=${result.postId}`,
+			);
+		} catch (err) {
+			console.error(
+				`[fb-auto-post] failed for tornado warning ${change.alertId}: ${String(err)}`,
+			);
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Cron handler — runs every 2 minutes via wrangler.jsonc trigger
 // ---------------------------------------------------------------------------
@@ -7127,6 +7435,7 @@ async function handleScheduled(env: Env): Promise<void> {
 	const { map } = await syncAlerts(env);
 	const lifecycleDiff = await syncAlertLifecycleState(env, map);
 	await syncAlertHistoryDailySnapshots(env, map, lifecycleDiff.changes);
+	await autoPostTornadoWarnings(env, map, lifecycleDiff.changes);
 	await dispatchStatePushNotifications(env, map, lifecycleDiff.changes);
 }
 
@@ -7328,6 +7637,9 @@ export default {
 		}
 		if (url.pathname === '/admin/token-config' && request.method === 'POST') {
 			return await handleTokenConfig(request, env);
+		}
+		if (url.pathname === '/admin/auto-post-config' && request.method === 'POST') {
+			return await handleAutoPostConfig(request, env);
 		}
 		return new Response('Not found', { status: 404 });
 	},
