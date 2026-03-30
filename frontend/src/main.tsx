@@ -9,9 +9,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   </React.StrictMode>,
 )
 
-// Register service worker for PWA installability (production only)
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
+// Register the service worker in both production and local dev so push works consistently.
+if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => { /* registration failed silently */ })
+    navigator.serviceWorker
+      .register('/sw.js', { updateViaCache: 'none' })
+      .then((registration) => registration.update().catch(() => {}))
+      .catch(() => { /* registration failed silently */ })
   })
 }

@@ -1,4 +1,3 @@
-import { renderPublicAlertsPage } from './public-alerts-page';
 import {
 	buildPushPayload,
 	type PushMessage,
@@ -50,6 +49,7 @@ const KV_ALERT_LIFECYCLE_SNAPSHOT = 'alerts:lifecycle-snapshot:v1'; // JSON: Rec
 const KV_ALERT_CHANGES = 'alerts:changes:v1'; // JSON: AlertChangeRecord[]
 const KV_ALERT_HISTORY_DAILY = 'alerts:history:daily:v1'; // JSON: Record<day, AlertHistoryDayRecord>
 const KV_OPERATIONAL_DIAGNOSTICS = 'ops:diagnostics:v1'; // JSON: OperationalDiagnostics
+const LOCAL_DEV_ALERT_REFRESH_MINUTES = 2;
 const ALERT_HISTORY_RETENTION_DAYS = 14;
 const ALERT_HISTORY_MAX_QUERY_DAYS = 14;
 const MAX_RECENT_PUSH_FAILURES = 20;
@@ -1032,8 +1032,8 @@ const DEFAULT_PUSH_QUIET_HOURS: PushQuietHours = {
 	end: '06:00',
 };
 
-const NOTIFICATION_ICON_PATH = '/notification-icon-192.png';
-const NOTIFICATION_BADGE_PATH = '/notification-badge-72.png';
+const NOTIFICATION_ICON_PATH = '/icon-192.svg';
+const NOTIFICATION_BADGE_PATH = '/icon-192.svg';
 
 function normalizeCountyFips(input: unknown): string | null {
 	const digits = String(input ?? '').replace(/\D/g, '');
@@ -2772,7 +2772,11 @@ function buildStatePushMessageData(stateCode: string, features: any[]): Record<s
 	};
 }
 
-function buildTestPushMessageData(stateCode: string, scopeCount: number): Record<string, any> {
+function buildTestPushMessageData(
+	stateCode: string,
+	scopeCount: number,
+	clientTestId?: string | null,
+): Record<string, any> {
 	return {
 		title: 'Live Weather Alerts test notification',
 		body:
@@ -2786,6 +2790,7 @@ function buildTestPushMessageData(stateCode: string, scopeCount: number): Record
 		icon: NOTIFICATION_ICON_PATH,
 		badge: NOTIFICATION_BADGE_PATH,
 		test: true,
+		...(clientTestId ? { clientTestId } : {}),
 	};
 }
 
@@ -3260,6 +3265,24 @@ function renderAdminPage(
 	const postTextMap: Record<string, string> = {};
 	const states = new Set<string>();
 	const severities = new Set<string>();
+	const severityCounts = alerts.reduce(
+		(acc, feature) => {
+			const severity = String(feature?.properties?.severity ?? '').trim().toLowerCase();
+			if (severity === 'extreme') acc.extreme += 1;
+			else if (severity === 'severe') acc.severe += 1;
+			else if (severity === 'moderate') acc.moderate += 1;
+			else if (severity === 'minor') acc.minor += 1;
+			else acc.unknown += 1;
+			return acc;
+		},
+		{
+			extreme: 0,
+			severe: 0,
+			moderate: 0,
+			minor: 0,
+			unknown: 0,
+		},
+	);
 
 	const cards = alerts.map((feature, idx) => {
 		const p      = feature.properties ?? {};
@@ -3347,12 +3370,29 @@ function renderAdminPage(
 	const severityOptions = Array.from(severities).sort().map((s) =>
 		'<option value="' + safeHtml(s) + '">' + safeHtml(s.toUpperCase()) + '</option>'
 	).join('');
+	const statsMarkup = [
+		{ label: 'Total', count: alerts.length, color: '#1f2937' },
+		{ label: 'Extreme', count: severityCounts.extreme, color: severityBadgeColor('extreme') },
+		{ label: 'Severe', count: severityCounts.severe, color: severityBadgeColor('severe') },
+		{ label: 'Moderate', count: severityCounts.moderate, color: severityBadgeColor('moderate') },
+		{ label: 'Minor', count: severityCounts.minor, color: severityBadgeColor('minor') },
+		{ label: 'Unknown', count: severityCounts.unknown, color: severityBadgeColor('') },
+	].map((item) =>
+		'<div class="stat-card" style="border-left-color:' + safeHtml(item.color) + '">\n' +
+		'  <div class="stat-label">' + safeHtml(item.label) + '</div>\n' +
+		'  <div class="stat-value">' + safeHtml(String(item.count)) + '</div>\n' +
+		'</div>'
+	).join('\n');
 
 	const css = [
 		'*, *::before, *::after { box-sizing: border-box; }',
 		'body { font-family: system-ui, sans-serif; margin: 0; padding: 20px 24px; background: #f4f5f7; color: #1a1a1a; }',
 		'h1 { margin: 0 0 4px; font-size: 1.4rem; }',
 		'.subtitle { color: #555; margin: 0 0 20px; font-size: 0.9rem; }',
+		'.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 18px; }',
+		'.stat-card { background: #fff; border: 1px solid #ddd; border-left: 5px solid #ccc; border-radius: 8px; padding: 12px 14px; }',
+		'.stat-label { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #666; }',
+		'.stat-value { margin-top: 6px; font-size: 1.45rem; font-weight: 700; color: #111827; }',
 		'.filter-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 22px; padding: 14px 16px; background: #fff; border-radius: 8px; border: 1px solid #ddd; }',
 		'.filter-bar label { font-size: 0.9rem; color: #333; }',
 		'.filter-bar input, .filter-bar select { margin-left: 6px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; }',
@@ -3972,6 +4012,7 @@ applyFilters();
     (lastPoll ? 'Last synced: ' + formatLastSynced(lastPoll) + '. ' : '') +
     'Click "Preview &amp; Post" to review and edit before posting.</p>\n' +
     (syncError ? '<p class="sync-error">&#9888; Sync warning: ' + safeHtml(syncError) + '</p>\n' : '') +
+		'\n<div class="stats-grid">\n' + statsMarkup + '\n</div>\n' +
 		'\n<div class="filter-bar">\n' +
 		'  <label>Search: <input id="filterSearch" type="search" placeholder="Search event, area, headline" /></label>\n' +
 		'  <label>State: <select id="filterState"><option value="all">All</option>' + stateOptions + '</select></label>\n' +
@@ -4665,7 +4706,7 @@ function shouldAutoRefreshStaleAlertsInLocalDev(
 	lastPoll: string | null,
 ): boolean {
 	if (!isLocalDevRequest(request)) return false;
-	return staleMinutesFromLastPoll(lastPoll) >= 15;
+	return staleMinutesFromLastPoll(lastPoll) >= LOCAL_DEV_ALERT_REFRESH_MINUTES;
 }
 
 async function countPushSubscriptionRecords(env: Env): Promise<number> {
@@ -4868,30 +4909,41 @@ async function handleAdminLogin(request: Request, env: Env): Promise<Response> {
 // Request handlers (updated to use KV cache instead of live NWS fetch)
 // ---------------------------------------------------------------------------
 
-async function handlePublicAlertsPage(env: Env): Promise<Response> {
-	// Keep this page fresh while still using the same ETag-aware sync path
-	// as admin and cron. If NWS has no changes, this is very cheap.
-	const { map, error } = await syncAlerts(env);
-	const alerts = Object.values(map);
-	const lastPoll = await env.WEATHER_KV.get(KV_LAST_POLL);
-	const page = renderPublicAlertsPage(alerts, lastPoll ?? undefined, error, {
-		classifyAlert,
-		severityBadgeColor,
-		formatDateTime,
-		formatAlertDescription,
-		formatLastSynced,
-		safeHtml,
-		nl2br,
-		extractStateCode,
-		stateCodeToName,
-	});
-	return new Response(page, {
-		status: 200,
-		headers: {
-			'Content-Type': 'text/html; charset=utf-8',
-			'Cache-Control': 'no-store',
+function renderMissingPublicAppResponse(): Response {
+	return new Response(
+		'Public app assets are unavailable. Run the frontend build before starting or deploying the worker.',
+		{
+			status: 503,
+			headers: {
+				'Content-Type': 'text/plain; charset=utf-8',
+				'Cache-Control': 'no-store',
+			},
 		},
-	});
+	);
+}
+
+async function servePublicAppIndex(request: Request, env: Env): Promise<Response> {
+	if (!env.ASSETS) {
+		return renderMissingPublicAppResponse();
+	}
+
+	const assetUrl = new URL(request.url);
+	assetUrl.pathname = '/index.html';
+	assetUrl.search = '';
+	const response = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+	if (response.status === 404) {
+		return renderMissingPublicAppResponse();
+	}
+	return response;
+}
+
+async function serveStaticAsset(request: Request, env: Env): Promise<Response | null> {
+	if (!env.ASSETS) {
+		return null;
+	}
+
+	const response = await env.ASSETS.fetch(request);
+	return response.status === 404 ? null : response;
 }
 
 function corsHeaders() {
@@ -5040,9 +5092,11 @@ async function handlePushTest(request: Request, env: Env): Promise<Response> {
 	const prefs = normalizePushPreferences(body?.prefs, requestedStateCode);
 	const stateCode = firstStateCodeFromPreferences(prefs) || requestedStateCode;
 	const enabledScopeCount = prefs.scopes.filter((scope) => scope.enabled).length;
+	const clientTestId = String(body?.clientTestId || '').trim() || null;
 	const payloadData = buildTestPushMessageData(
 		stateCode,
 		enabledScopeCount > 0 ? enabledScopeCount : prefs.scopes.length,
+		clientTestId,
 	);
 
 	try {
@@ -5542,6 +5596,29 @@ function buildAlertsMeta(input: {
 	};
 }
 
+function normalizeRequestedAlertUgcs(url: URL): string[] {
+	return dedupeStrings(
+		url.searchParams
+			.getAll('ugc')
+			.flatMap((value) => String(value || '').split(','))
+			.map((value) => String(value || '').trim().toUpperCase())
+			.filter(Boolean),
+	);
+}
+
+function featureMatchesRequestedState(feature: any, requestedStateCode: string | null): boolean {
+	if (!requestedStateCode) return true;
+	return extractStateCodes(feature).includes(requestedStateCode);
+}
+
+function featureMatchesRequestedUgcs(feature: any, requestedUgcs: string[]): boolean {
+	if (requestedUgcs.length === 0) return true;
+	const featureUgcs = Array.isArray(feature?.properties?.geocode?.UGC)
+		? feature.properties.geocode.UGC.map((ugc: unknown) => String(ugc || '').trim().toUpperCase()).filter(Boolean)
+		: [];
+	return featureUgcs.some((ugc: string) => requestedUgcs.includes(ugc));
+}
+
 async function handleApiAlerts(request: Request, env: Env): Promise<Response> {
 	let map = await readAlertMap(env);
 	let error: string | undefined;
@@ -5562,6 +5639,27 @@ async function handleApiAlerts(request: Request, env: Env): Promise<Response> {
 	const radiusParam = url.searchParams.get('radius');
 	const latParam = url.searchParams.get('lat');
 	const lonParam = url.searchParams.get('lon');
+	const requestedStateRaw = String(
+		url.searchParams.get('state')
+		|| url.searchParams.get('stateCode')
+		|| '',
+	).trim();
+	const requestedStateCode = requestedStateRaw
+		? normalizeStateCode(requestedStateRaw)
+		: null;
+	if (requestedStateRaw && !requestedStateCode) {
+		return new Response(JSON.stringify({
+			error: 'state must be a valid two-letter US state code.',
+		}), {
+			status: 400,
+			headers: {
+				...corsHeaders(),
+				'Content-Type': 'application/json; charset=utf-8',
+				'Cache-Control': 'no-store',
+			},
+		});
+	}
+	const requestedUgcs = normalizeRequestedAlertUgcs(url);
 	const hasRadiusFilterParams = radiusParam != null || latParam != null || lonParam != null;
 	const radiusMiles = radiusParam == null || radiusParam === '' ? null : Number(radiusParam);
 	const centerLat = latParam == null || latParam === '' ? null : Number(latParam);
@@ -5586,8 +5684,21 @@ async function handleApiAlerts(request: Request, env: Env): Promise<Response> {
 		});
 	}
 	const filteredFeatures = Object.values(map).filter((feature: any) => {
-		if (!(radiusMiles && centerLat != null && centerLon != null)) return true;
-		return alertIntersectsRadius(feature, centerLat, centerLon, radiusMiles);
+		if (
+			radiusMiles
+			&& centerLat != null
+			&& centerLon != null
+			&& !alertIntersectsRadius(feature, centerLat, centerLon, radiusMiles)
+		) {
+			return false;
+		}
+		if (!featureMatchesRequestedState(feature, requestedStateCode)) {
+			return false;
+		}
+		if (!featureMatchesRequestedUgcs(feature, requestedUgcs)) {
+			return false;
+		}
+		return true;
 	});
 	const alerts = filteredFeatures.map((feature: any) =>
 		normalizeAlertFeature(feature, lifecycleByAlertId),
@@ -5599,12 +5710,21 @@ async function handleApiAlerts(request: Request, env: Env): Promise<Response> {
 		syncError: error ?? null,
 		count: alerts.length,
 		}),
-		filterMode: radiusMiles && centerLat != null && centerLon != null ? 'radius' : 'all',
+		filterMode:
+			radiusMiles && centerLat != null && centerLon != null
+				? 'radius'
+				: requestedUgcs.length > 0
+					? 'ugc'
+					: requestedStateCode
+						? 'state'
+						: 'all',
 		radiusMiles: radiusMiles && centerLat != null && centerLon != null ? radiusMiles : null,
 		center:
 			radiusMiles && centerLat != null && centerLon != null
 				? { lat: centerLat, lon: centerLon }
 				: null,
+		stateCode: requestedStateCode,
+		ugcCount: requestedUgcs.length,
 	};
 	await recordStaleDataCondition(env, meta.staleMinutes, 'api_alerts_response');
 	const headers = {
@@ -6725,6 +6845,7 @@ function normalizeDailyPeriods(periods: any[], mapClickOverrides: MapClickPeriod
 			normalized.push({
 				name: String(period?.name || ""),
 				startTime: String(period?.startTime || ""),
+				endTime: String(period?.endTime || ""),
 				isDaytime: true,
 				highF: roundTo(highF, 0),
 				lowF: lowF !== null ? roundTo(lowF, 0) : null,
@@ -6744,6 +6865,8 @@ function normalizeDailyPeriods(periods: any[], mapClickOverrides: MapClickPeriod
 				),
 				nightPrecipitationChance: roundTo(nightPrecipitationChance, 0),
 				nightIcon: String(nightOverride?.icon || nightPeriod?.icon || ''),
+				sunrise: null,
+				sunset: null,
 				severity: severityFromForecastText(forecastText),
 			});
 		}
@@ -6803,6 +6926,109 @@ function buildSunTimesFromDailyPeriods(dailyPeriods: any[], nowMs = Date.now()) 
 	}
 
 	return { sunrise, sunset, isNight };
+}
+
+async function fetchSunriseSunsetTimes(
+	lat: number,
+	lon: number,
+	timeZone?: string | null,
+	date?: string | null,
+): Promise<{
+	sunrise: string | null;
+	sunset: string | null;
+	tzid: string | null;
+} | null> {
+	try {
+		const endpoint = new URL('https://api.sunrise-sunset.org/json');
+		endpoint.searchParams.set('lat', lat.toFixed(4));
+		endpoint.searchParams.set('lng', lon.toFixed(4));
+		endpoint.searchParams.set('formatted', '0');
+		if (timeZone) {
+			endpoint.searchParams.set('tzid', String(timeZone));
+		}
+		if (date) {
+			endpoint.searchParams.set('date', String(date));
+		}
+
+		const response = await fetch(endpoint.toString(), {
+			headers: {
+				Accept: 'application/json',
+			},
+		});
+		if (!response.ok) return null;
+
+		const payload = await response.json() as any;
+		const status = String(payload?.status || '').trim().toUpperCase();
+		if (status !== 'OK' && status !== 'INVALID_TZID') return null;
+
+		return {
+			sunrise: normalizeIsoOrNull(payload?.results?.sunrise),
+			sunset: normalizeIsoOrNull(payload?.results?.sunset),
+			tzid: String(payload?.tzid || '').trim() || null,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function calendarDateKey(
+	value: string | number | Date,
+	timeZone?: string | null,
+): string | null {
+	const date = value instanceof Date ? value : new Date(value);
+	if (Number.isNaN(date.getTime())) return null;
+
+	try {
+		const parts = new Intl.DateTimeFormat('en-CA', {
+			timeZone: timeZone || 'UTC',
+			year: 'numeric',
+			month: '2-digit',
+			day: '2-digit',
+		}).formatToParts(date);
+		const year = parts.find((part) => part.type === 'year')?.value;
+		const month = parts.find((part) => part.type === 'month')?.value;
+		const day = parts.find((part) => part.type === 'day')?.value;
+		if (year && month && day) {
+			return `${year}-${month}-${day}`;
+		}
+	} catch {
+		// Fall back to the UTC calendar date below.
+	}
+
+	return date.toISOString().slice(0, 10);
+}
+
+async function fetchSunriseSunsetSchedule(
+	lat: number,
+	lon: number,
+	timeZone: string | null,
+	dates: string[],
+): Promise<Record<string, { sunrise: string | null; sunset: string | null }>> {
+	const uniqueDates = dedupeStrings(
+		dates
+			.map((value) => String(value || '').trim())
+			.filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)),
+	).slice(0, 8);
+	if (uniqueDates.length === 0) return {};
+
+	const results = await Promise.all(
+		uniqueDates.map(async (date) => ({
+			date,
+			data: await fetchSunriseSunsetTimes(lat, lon, timeZone, date),
+		})),
+	);
+
+	return results.reduce<Record<string, { sunrise: string | null; sunset: string | null }>>(
+		(acc, entry) => {
+			if (!entry.data) return acc;
+			acc[entry.date] = {
+				sunrise: entry.data.sunrise,
+				sunset: entry.data.sunset,
+			};
+			return acc;
+		},
+		{},
+	);
 }
 
 function calculateFeelsLike(tempF: number, humidity: number, windMph: number): number {
@@ -7045,14 +7271,43 @@ async function handleApiWeather(request: Request): Promise<Response> {
 
 		const hourly = normalizeHourlyPeriods(hourlyPeriodsRaw);
 		const mapClickOverrides = buildMapClickPeriodOverrides(mapClickPayload);
-		const daily = normalizeDailyPeriods(dailyPeriodsRaw, mapClickOverrides);
+		let daily = normalizeDailyPeriods(dailyPeriodsRaw, mapClickOverrides);
+		const currentLocalDateKey = calendarDateKey(Date.now(), point.timeZone || null);
+		const sunriseSunsetSchedule = await fetchSunriseSunsetSchedule(
+			point.lat,
+			point.lon,
+			point.timeZone || null,
+			[
+				...(currentLocalDateKey ? [currentLocalDateKey] : []),
+				...daily
+					.slice(0, 7)
+					.map((day: any) => calendarDateKey(String(day?.startTime || ''), point.timeZone || null))
+					.filter(Boolean) as string[],
+			],
+		);
 		const sun = buildSunTimesFromDailyPeriods(dailyPeriodsRaw);
+		const currentDaySun = currentLocalDateKey ? sunriseSunsetSchedule[currentLocalDateKey] : null;
+		if (currentDaySun?.sunrise) {
+			sun.sunrise = currentDaySun.sunrise;
+		}
+		if (currentDaySun?.sunset) {
+			sun.sunset = currentDaySun.sunset;
+		}
 		if (!sun.sunrise && observation?.properties?.sunrise) {
 			sun.sunrise = String(observation.properties.sunrise);
 		}
 		if (!sun.sunset && observation?.properties?.sunset) {
 			sun.sunset = String(observation.properties.sunset);
 		}
+		daily = daily.map((day: any) => {
+			const dateKey = calendarDateKey(String(day?.startTime || ''), point.timeZone || null);
+			const daySun = dateKey ? sunriseSunsetSchedule[dateKey] : null;
+			return {
+				...day,
+				sunrise: daySun?.sunrise || normalizeIsoOrNull(day?.startTime) || null,
+				sunset: daySun?.sunset || normalizeIsoOrNull(day?.endTime) || null,
+			};
+		});
 		let current = buildCurrentConditions(
 			observation?.properties ?? {},
 			hourlyPeriodsRaw[0] ?? {},
@@ -7561,6 +7816,12 @@ export default {
 				return redirectToCanonicalAppUrl(request, canonicalSettingsUrl());
 			}
 		}
+		if ((url.pathname === '/' || url.pathname === '/index.html') && request.method === 'GET') {
+			return await servePublicAppIndex(request, env);
+		}
+		if ((url.pathname === '/live-weather-alerts') && request.method === 'GET') {
+			return await servePublicAppIndex(request, env);
+		}
 		if (url.pathname === '/api/alerts' && request.method === 'GET') {
 			return await handleApiAlerts(request, env);
 		}
@@ -7617,9 +7878,6 @@ export default {
 		if (url.pathname === '/api/push/unsubscribe' && request.method === 'POST') {
 			return await handlePushUnsubscribe(request, env);
 		}
-		if ((url.pathname === '/' || url.pathname === '/index.html' || url.pathname === '/live-weather-alerts') && request.method === 'GET') {
-			return await handlePublicAlertsPage(env);
-		}
 		if (url.pathname === '/admin' && request.method === 'GET') {
 			return await handleAdminPage(request, env);
 		}
@@ -7640,6 +7898,12 @@ export default {
 		}
 		if (url.pathname === '/admin/auto-post-config' && request.method === 'POST') {
 			return await handleAutoPostConfig(request, env);
+		}
+		if (request.method === 'GET') {
+			const assetResponse = await serveStaticAsset(request, env);
+			if (assetResponse) {
+				return assetResponse;
+			}
 		}
 		return new Response('Not found', { status: 404 });
 	},

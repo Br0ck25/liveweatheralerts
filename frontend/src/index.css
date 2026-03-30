@@ -222,6 +222,22 @@ body {
   border-left-color: #ef4444 !important;
 }
 
+.alert-border-default {
+  border-color: #4373af;
+}
+
+.alert-label-default {
+  color: #678ab1;
+}
+
+.theme-white .alert-border-default {
+  border-color: #4373af !important;
+}
+
+.theme-white .border-l-4.alert-border-default {
+  border-left-color: #4373af !important;
+}
+
 .text-yellow-200 { color: #facc15 !important; }
 .text-yellow-300 { color: #eab308 !important; }
 .text-yellow-400 { color: #ca8a04 !important; }

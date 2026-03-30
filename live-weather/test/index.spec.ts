@@ -180,22 +180,22 @@ describe('Live Weather Admin worker', () => {
 		expect(response.status).toBe(401);
 	});
 
-	it('serves a public weather alerts page at /live-weather-alerts', async () => {
-		const request = new IncomingRequest('https://live-weather.example/live-weather-alerts');
-		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
-		await waitOnExecutionContext(ctx);
-		const body = await response.text();
-		expect(response.status).toBe(200);
-		expect(body).toContain('Live Weather Alerts');
-		expect(body).toContain('What this means');
-		expect(body).toContain('Tornado Warning');
-		expect(body).toContain('id="stateFilter"');
-		expect(body).toContain('liveWeather:selectedState');
-		expect(body).toContain('>Alabama<');
-		expect(body).toContain('>Kentucky<');
-		expect(body).toContain('>Wyoming<');
-		expect(body).not.toContain('<span class="eyebrow">Live Weather Alerts</span>');
+	it('serves the built React app shell at the public routes', async () => {
+		for (const pathname of ['/', '/live-weather-alerts']) {
+			const request = new IncomingRequest(`https://live-weather.example${pathname}`);
+			const ctx = createExecutionContext();
+			const response = await worker.fetch(request, env, ctx);
+			await waitOnExecutionContext(ctx);
+			const body = await response.text();
+			expect(response.status).toBe(200);
+			expect(response.headers.get('content-type')).toContain('text/html');
+			expect(body).toContain('<title>Live Weather Alerts</title>');
+			expect(body).toContain('<div id="root"></div>');
+			expect(body).toContain('<link rel="manifest" href="/manifest.json" />');
+			expect(body).toContain('<script type="module" crossorigin src="/assets/');
+			expect(body).not.toContain('What this means');
+			expect(body).not.toContain('id="stateFilter"');
+		}
 	});
 
 	it('uses liveweatheralerts.com in generated post text and strips the footer link from comment text', () => {
@@ -320,6 +320,88 @@ describe('Live Weather Admin worker', () => {
 		expect(farResponse.status).toBe(200);
 		const farJson = await farResponse.json() as any;
 		expect(farJson.alerts).toHaveLength(0);
+	});
+
+	it('filters alerts by state and UGC for local-area alert requests', async () => {
+		await env.WEATHER_KV.put(
+			'alerts:map',
+			JSON.stringify({
+				'ky-alert': {
+					id: 'ky-alert',
+					geometry: {
+						type: 'Polygon',
+						coordinates: [[
+							[-83.35, 37.12],
+							[-83.2, 37.12],
+							[-83.2, 37.22],
+							[-83.35, 37.22],
+							[-83.35, 37.12],
+						]],
+					},
+					properties: {
+						event: 'Tornado Warning',
+						severity: 'Severe',
+						areaDesc: 'Test County',
+						geocode: { UGC: ['KYC001', 'KYZ010'] },
+						status: 'Actual',
+						headline: 'Test tornado warning',
+						description: 'Tornado expected',
+						effective: 'Now',
+						expires: 'Soon',
+						url: 'https://example.com/ky-alert',
+					},
+				},
+				'oh-alert': {
+					id: 'oh-alert',
+					geometry: {
+						type: 'Polygon',
+						coordinates: [[
+							[-82.1, 39.8],
+							[-81.9, 39.8],
+							[-81.9, 39.95],
+							[-82.1, 39.95],
+							[-82.1, 39.8],
+						]],
+					},
+					properties: {
+						event: 'Flood Advisory',
+						severity: 'Moderate',
+						areaDesc: 'Ohio County',
+						geocode: { UGC: ['OHC001'] },
+						status: 'Actual',
+						headline: 'Test flood advisory',
+						description: 'Flooding expected',
+						effective: 'Now',
+						expires: 'Later',
+						url: 'https://example.com/oh-alert',
+					},
+				},
+			}),
+		);
+		await env.WEATHER_KV.put('alerts:last-poll', new Date().toISOString());
+
+		const stateRequest = new IncomingRequest('https://live-weather.example/api/alerts?state=KY');
+		const stateCtx = createExecutionContext();
+		const stateResponse = await worker.fetch(stateRequest, env, stateCtx);
+		await waitOnExecutionContext(stateCtx);
+		expect(stateResponse.status).toBe(200);
+		const stateJson = await stateResponse.json() as any;
+		expect(stateJson.meta.filterMode).toBe('state');
+		expect(stateJson.meta.stateCode).toBe('KY');
+		expect(stateJson.alerts.map((alert: any) => alert.id)).toEqual(['ky-alert']);
+
+		const ugcRequest = new IncomingRequest(
+			'https://live-weather.example/api/alerts?state=KY&ugc=KYC001&ugc=KYZ010,OHC001',
+		);
+		const ugcCtx = createExecutionContext();
+		const ugcResponse = await worker.fetch(ugcRequest, env, ugcCtx);
+		await waitOnExecutionContext(ugcCtx);
+		expect(ugcResponse.status).toBe(200);
+		const ugcJson = await ugcResponse.json() as any;
+		expect(ugcJson.meta.filterMode).toBe('ugc');
+		expect(ugcJson.meta.stateCode).toBe('KY');
+		expect(ugcJson.meta.ugcCount).toBe(3);
+		expect(ugcJson.alerts.map((alert: any) => alert.id)).toEqual(['ky-alert']);
 	});
 
 	it('auto-refreshes stale alert cache for localhost /api/alerts requests in local dev', async () => {

@@ -93,12 +93,23 @@ type PushMutationResponse = {
   prefs?: PushPreferences
 }
 
+type WorkerRadarResponse = {
+  station?: string | null
+  loopImageUrl?: string | null
+  stillImageUrl?: string | null
+  updated?: string
+  summary?: string
+  frames?: Array<Record<string, unknown>>
+  tileTemplate?: string | null
+  hasLiveTiles?: boolean
+}
+
 type WorkerWeatherResponse = {
   location?: Record<string, unknown>
   current?: Record<string, unknown>
   hourly?: Array<Record<string, unknown>>
   daily?: Array<Record<string, unknown>>
-  radar?: Record<string, unknown>
+  radar?: WorkerRadarResponse
   updated?: string
 }
 
@@ -109,8 +120,99 @@ type WorkerAlertsResponse = {
 
 type WorkerAlert = Record<string, unknown>
 
-const API_BASE =
-  import.meta.env.VITE_API_BASE || 'https://live-weather.jamesbrock25.workers.dev'
+type ResourceErrors = {
+  weather: string | null
+  localAlerts: string | null
+  allAlerts: string | null
+}
+
+class FetchError extends Error {
+  status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
+type PushTestDeliveryStatus = 'displayed' | 'failed' | 'timeout'
+
+type PushTestStatusMessage = {
+  type?: string
+  clientTestId?: string
+  status?: 'displayed' | 'failed'
+  error?: string
+}
+
+const PUSH_TEST_STATUS_MESSAGE_TYPE = 'lwa:push-test-status'
+const PUSH_TEST_TIMEOUT_MS = 8000
+const DATA_POLL_INTERVAL_MS = 2 * 60 * 1000
+
+function isPushVapidMismatchError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return /vapid credentials.*do not correspond|create the subscriptions/i.test(error.message)
+}
+
+function resolveApiBase(): string {
+  const configuredBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/+$/, '')
+  if (configuredBase) return configuredBase
+
+  if (typeof window === 'undefined') return ''
+
+  const { hostname, port } = window.location
+  const isLocalFrontend =
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '0.0.0.0'
+
+  if (isLocalFrontend && port !== '8787') {
+    return 'http://127.0.0.1:8787'
+  }
+
+  return ''
+}
+
+const API_BASE = resolveApiBase()
+
+function apiUrl(path: string): string {
+  return API_BASE ? `${API_BASE}${path}` : path
+}
+
+function isLocalAppHost(): boolean {
+  if (typeof window === 'undefined') return false
+  return ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname)
+}
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(apiUrl(path), init)
+  const text = await response.text()
+  const payload = text
+    ? (() => {
+        try {
+          return JSON.parse(text) as T & { error?: string }
+        } catch {
+          return null
+        }
+      })()
+    : null
+
+  if (!response.ok) {
+    const message =
+      payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+        ? payload.error
+        : response.statusText || 'Request failed.'
+    throw new FetchError(response.status, message)
+  }
+
+  return (payload ?? ({} as T)) as T
+}
+
+function resourceErrorMessage(label: string, error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return `${label} unavailable: ${error.message.trim()}`
+  }
+  return `${label} unavailable right now.`
+}
 
 function formatTemp(value: unknown): string {
   const num = Number(value)
@@ -182,7 +284,7 @@ function alertBorderClass(event: string, severity: string) {
   ) {
     return { border: 'border-yellow-400', label: 'text-yellow-300' }
   }
-  return { border: 'border-blue-400', label: 'text-blue-300' }
+  return { border: 'alert-border-default', label: 'alert-label-default' }
 }
 
 function getCurrentCondition(current: Record<string, unknown>) {
@@ -564,20 +666,80 @@ async function ensureServiceWorkerRegistration(): Promise<ServiceWorkerRegistrat
     throw new Error('Service workers are not supported on this device.')
   }
 
-  const existing = await navigator.serviceWorker.getRegistration()
-  if (existing) return existing
-
-  const registration = await navigator.serviceWorker.register('/sw.js')
+  const registration = await navigator.serviceWorker.register('/sw.js', {
+    updateViaCache: 'none',
+  })
   try {
-    await navigator.serviceWorker.ready
+    await registration.update()
+  } catch {
+    // Keep going with the existing active registration.
+  }
+  try {
+    return await navigator.serviceWorker.ready
   } catch {
     // Fall back to the registration we just created.
+    return registration
   }
-  return registration
 }
 
 function serializePushSubscription(subscription: PushSubscription): Record<string, unknown> {
   return subscription.toJSON() as Record<string, unknown>
+}
+
+function createPushTestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `push-test-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function waitForPushTestStatus(clientTestId: string): Promise<{
+  status: PushTestDeliveryStatus
+  error?: string
+}> {
+  if (!('serviceWorker' in navigator)) {
+    return Promise.resolve({ status: 'timeout' })
+  }
+
+  return new Promise((resolve) => {
+    let settled = false
+
+    const finish = (result: { status: PushTestDeliveryStatus; error?: string }) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeoutId)
+      navigator.serviceWorker.removeEventListener('message', handleMessage)
+      resolve(result)
+    }
+
+    const handleMessage = (event: MessageEvent<PushTestStatusMessage>) => {
+      const data = event.data
+      if (!data || data.type !== PUSH_TEST_STATUS_MESSAGE_TYPE || data.clientTestId !== clientTestId) {
+        return
+      }
+
+      if (data.status === 'displayed') {
+        finish({ status: 'displayed' })
+        return
+      }
+
+      if (data.status === 'failed') {
+        finish({
+          status: 'failed',
+          error:
+            typeof data.error === 'string' && data.error.trim()
+              ? data.error.trim()
+              : 'The browser received the push event but could not display the notification.',
+        })
+      }
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      finish({ status: 'timeout' })
+    }, PUSH_TEST_TIMEOUT_MS)
+
+    navigator.serviceWorker.addEventListener('message', handleMessage)
+  })
 }
 
 // ─── Standalone Alert Detail Page ────────────────────────────────────────────
@@ -610,8 +772,9 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/alerts/${encodeURIComponent(alertId)}`)
-      .then((r) => r.json())
+    fetchJson<{ alert?: Record<string, unknown>; error?: string }>(
+      `/api/alerts/${encodeURIComponent(alertId)}`,
+    )
       .then((json: { alert?: Record<string, unknown>; error?: string }) => {
         if (json?.alert) setAlert(json.alert)
         else setError(json?.error || 'Alert not found.')
@@ -786,16 +949,6 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
-function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 3958.8 // Earth radius in miles
-  const dLat = ((lat2 - lat1) * Math.PI) / 180
-  const dLon = ((lon2 - lon1) * Math.PI) / 180
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2
-  return R * 2 * Math.asin(Math.sqrt(a))
-}
-
 function isDisplayableAlert(alert: WorkerAlert): boolean {
   const text = `${String(alert?.event || '')} ${String(alert?.headline || alert?.summary || '')} ${String(alert?.description || '')}`.toLowerCase()
   return !text.includes('test')
@@ -813,34 +966,60 @@ function buildUserUgcSet(location: SavedLocation | null): Set<string> {
   ])
 }
 
-function alertMatchesUserUgc(alert: WorkerAlert, userUgcs: Set<string>): boolean {
-  if (userUgcs.size === 0) return false
-  const ugcs = Array.isArray(alert?.ugc) ? (alert.ugc as string[]) : []
-  return ugcs.some((ugc) => userUgcs.has(String(ugc).toUpperCase()))
+function buildLocalAlertsApiPath(
+  location: SavedLocation | null,
+  alertRadius: 0 | 25 | 50 | 100,
+): string {
+  const params = new URLSearchParams()
+  const stateCode = normalizeStateCode(location?.state)
+  if (stateCode) {
+    params.set('state', stateCode)
+  }
+
+  if (
+    location &&
+    alertRadius > 0 &&
+    Number.isFinite(location.lat) &&
+    Number.isFinite(location.lon)
+  ) {
+    params.set('lat', String(location.lat))
+    params.set('lon', String(location.lon))
+    params.set('radius', String(alertRadius))
+  } else {
+    for (const ugc of buildUserUgcSet(location)) {
+      params.append('ugc', ugc)
+    }
+  }
+
+  const query = params.toString()
+  return `/api/alerts${query ? `?${query}` : ''}`
 }
 
-function filterAlertsByRadius(
-  alerts: WorkerAlert[],
-  location: SavedLocation | null,
-  radiusMiles: number,
-): WorkerAlert[] {
-  if (
-    !location ||
-    !(radiusMiles > 0) ||
-    !Number.isFinite(location?.lat) ||
-    !Number.isFinite(location?.lon)
-  ) return []
-  const centerLat = Number(location.lat)
-  const centerLon = Number(location.lon)
-  const userUgcs = buildUserUgcSet(location)
-  return alerts.filter((alert) => {
-    const lat = Number(alert?.lat)
-    const lon = Number(alert?.lon)
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      return haversineDistance(centerLat, centerLon, lat, lon) <= radiusMiles
-    }
-    return alertMatchesUserUgc(alert, userUgcs)
-  })
+function DataUnavailableCard({
+  title,
+  message,
+  actionLabel,
+  onAction,
+}: {
+  title: string
+  message: string
+  actionLabel?: string
+  onAction?: () => void
+}) {
+  return (
+    <div className="rounded-2xl border border-amber-400/30 bg-amber-950/40 p-5 text-sm text-amber-100">
+      <div className="text-xs font-semibold tracking-wide text-amber-300">{title}</div>
+      <div className="mt-2 leading-relaxed">{message}</div>
+      {actionLabel && onAction ? (
+        <button
+          onClick={onAction}
+          className="mt-4 rounded-lg bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950"
+        >
+          {actionLabel}
+        </button>
+      ) : null}
+    </div>
+  )
 }
 
 const THEMES: Record<string, { t300: string; t400: string; bg500: string; borderAccent: string; bgMuted: string; borderMuted: string; ring: string; iconBg: string; iconBorder: string; hoverBorder: string; extraBorderMuted: string; cardBg: string }> = {
@@ -891,10 +1070,18 @@ function AppInner() {
   const [locationInput, setLocationInput] = useState('')
   const [location, setLocation] = useState<SavedLocation | null>(null)
   const [weather, setWeather] = useState<WorkerWeatherResponse | null>(null)
-  const [alertsData, setAlertsData] = useState<WorkerAlertsResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [localAlertsData, setLocalAlertsData] = useState<WorkerAlertsResponse | null>(null)
+  const [allAlertsData, setAllAlertsData] = useState<WorkerAlertsResponse | null>(null)
+  const [weatherLoading, setWeatherLoading] = useState(true)
+  const [localAlertsLoading, setLocalAlertsLoading] = useState(true)
+  const [allAlertsLoading, setAllAlertsLoading] = useState(false)
   const [locationLoading, setLocationLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [resourceErrors, setResourceErrors] = useState<ResourceErrors>({
+    weather: null,
+    localAlerts: null,
+    allAlerts: null,
+  })
   const [expandedDayIndex, setExpandedDayIndex] = useState<number | null>(null)
   const [alertsFilter, setAlertsFilter] = useState<'all'|'warning'|'watch'|'advisory'|'statement'>('all')
   const [expandedAlertId, setExpandedAlertId] = useState<string | null>(null)
@@ -921,10 +1108,10 @@ function AppInner() {
   const [showInstallBanner, setShowInstallBanner] = useState(false)
   const [pushEnabled, setPushEnabled] = useState(false)
   const [pushBusy, setPushBusy] = useState(false)
+  const [pushServerConfigured, setPushServerConfigured] = useState<boolean | null>(null)
   const [pushPermission, setPushPermission] = useState<NotificationPermission | 'unsupported'>(
     () => ('Notification' in window ? Notification.permission : 'unsupported')
   )
-  const [radiusAlerts, setRadiusAlerts] = useState<WorkerAlert[] | null>(null)
   const pushSupported =
     'Notification' in window &&
     'serviceWorker' in navigator &&
@@ -937,6 +1124,10 @@ function AppInner() {
     () => describePushScope(pushPreferences, location),
     [pushPreferences, location],
   )
+  const localAppHost = isLocalAppHost()
+  const pushConfigurationHelp = localAppHost
+    ? 'Push notifications are unavailable in local dev until VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, and VAPID_SUBJECT are set in live-weather/.dev.vars.'
+    : 'Push notifications are not configured on the server.'
 
   useEffect(() => {
     const saved = window.localStorage.getItem('lwa_saved_location_v1')
@@ -968,44 +1159,96 @@ function AppInner() {
     const lat = location.lat
     const lon = location.lon
     let cancelled = false
+    let intervalId: number | null = null
 
-    async function load() {
-      setLoading(true)
-      setError(null)
+    async function loadWeather(background = false) {
+      if (!background) {
+        setWeatherLoading(true)
+        setWeather(null)
+      }
+      setResourceErrors((current) => ({ ...current, weather: null }))
       try {
-        const weatherUrl = `${API_BASE}/api/weather?lat=${lat}&lon=${lon}`
-        const alertsUrl = `${API_BASE}/api/alerts`
-        const radarUrl = `${API_BASE}/api/radar?lat=${lat}&lon=${lon}`
-
-        const [weatherRes, alertsRes, radarRes] = await Promise.all([
-          fetch(weatherUrl),
-          fetch(alertsUrl),
-          fetch(radarUrl),
-        ])
-
-        const weatherJson = (await weatherRes.json()) as WorkerWeatherResponse
-        const alertsJson = (await alertsRes.json()) as WorkerAlertsResponse
-        const radarJson = (await radarRes.json()) as Record<string, unknown>
-
+        const weatherJson = await fetchJson<WorkerWeatherResponse>(`/api/weather?lat=${lat}&lon=${lon}`)
         if (cancelled) return
-
-        setWeather({ ...weatherJson, radar: weatherJson?.radar || radarJson })
-        setAlertsData(alertsJson)
+        setWeather(weatherJson)
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Unable to load weather data.')
+        if (cancelled) return
+        if (!background) {
+          setWeather(null)
         }
+        setResourceErrors((current) => ({
+          ...current,
+          weather: resourceErrorMessage('Live weather', err),
+        }))
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!cancelled && !background) setWeatherLoading(false)
       }
     }
 
-    load()
+    void loadWeather(false)
+    intervalId = window.setInterval(() => {
+      void loadWeather(true)
+    }, DATA_POLL_INTERVAL_MS)
 
     return () => {
       cancelled = true
+      if (intervalId !== null) {
+        window.clearInterval(intervalId)
+      }
     }
   }, [location?.lat, location?.lon])
+
+  useEffect(() => {
+    if (!location) return
+
+    let cancelled = false
+    let intervalId: number | null = null
+
+    async function loadLocalAlerts(background = false) {
+      if (!background) {
+        setLocalAlertsLoading(true)
+        setLocalAlertsData(null)
+      }
+      setResourceErrors((current) => ({ ...current, localAlerts: null }))
+      try {
+        const alertsJson = await fetchJson<WorkerAlertsResponse>(
+          buildLocalAlertsApiPath(location, alertRadius),
+        )
+        if (cancelled) return
+        setLocalAlertsData(alertsJson)
+      } catch (err) {
+        if (cancelled) return
+        if (!background) {
+          setLocalAlertsData(null)
+        }
+        setResourceErrors((current) => ({
+          ...current,
+          localAlerts: resourceErrorMessage('Local alerts', err),
+        }))
+      } finally {
+        if (!cancelled && !background) setLocalAlertsLoading(false)
+      }
+    }
+
+    void loadLocalAlerts(false)
+    intervalId = window.setInterval(() => {
+      void loadLocalAlerts(true)
+    }, DATA_POLL_INTERVAL_MS)
+
+    return () => {
+      cancelled = true
+      if (intervalId !== null) {
+        window.clearInterval(intervalId)
+      }
+    }
+  }, [
+    alertRadius,
+    location?.lat,
+    location?.lon,
+    location?.state,
+    location?.countyCode,
+    location?.zoneCode,
+  ])
 
   async function useSearchLocation() {
     const input = locationInput.trim()
@@ -1014,12 +1257,11 @@ function AppInner() {
     setError(null)
     try {
       const isZip = /^\d{5}$/.test(input)
-      const url = isZip
-        ? `${API_BASE}/api/geocode?zip=${encodeURIComponent(input)}`
-        : `${API_BASE}/api/geocode?query=${encodeURIComponent(input)}`
-      const res = await fetch(url)
-      const json = (await res.json()) as SavedLocation & { error?: string }
-      if (!res.ok) throw new Error(json?.error || 'Could not find that location.')
+      const json = await fetchJson<SavedLocation>(
+        isZip
+          ? `/api/geocode?zip=${encodeURIComponent(input)}`
+          : `/api/geocode?query=${encodeURIComponent(input)}`,
+      )
       setLocation(json)
       window.localStorage.setItem('lwa_saved_location_v1', JSON.stringify(json))
       window.localStorage.setItem('lwa_setup_done_v1', '1')
@@ -1047,9 +1289,7 @@ function AppInner() {
         try {
           const lat = position.coords.latitude
           const lon = position.coords.longitude
-          const res = await fetch(`${API_BASE}/api/geocode?lat=${lat}&lon=${lon}`)
-          const json = (await res.json()) as SavedLocation & { error?: string }
-          if (!res.ok) throw new Error(json?.error || 'Could not resolve your location.')
+          const json = await fetchJson<SavedLocation>(`/api/geocode?lat=${lat}&lon=${lon}`)
           setLocation(json)
           window.localStorage.setItem('lwa_saved_location_v1', JSON.stringify(json))
           window.localStorage.setItem('lwa_setup_done_v1', '1')
@@ -1095,16 +1335,17 @@ function AppInner() {
   }
 
   async function fetchPushPublicKey(): Promise<string> {
-    const response = await fetch(`${API_BASE}/api/push/public-key`)
-    const json = (await response.json()) as PushPublicKeyResponse
-    if (!response.ok || !json?.publicKey) {
-      throw new Error(json?.error || 'Push notifications are not configured on the server.')
+    const json = await fetchJson<PushPublicKeyResponse>('/api/push/public-key')
+    if (!json?.publicKey) {
+      setPushServerConfigured(false)
+      throw new Error(json?.error || pushConfigurationHelp)
     }
+    setPushServerConfigured(true)
     return json.publicKey
   }
 
   async function savePushSubscription(subscription: PushSubscription, prefs: PushPreferences) {
-    const response = await fetch(`${API_BASE}/api/push/subscribe`, {
+    const json = await fetchJson<PushMutationResponse>('/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1113,26 +1354,76 @@ function AppInner() {
       }),
     })
 
-    const json = (await response.json()) as PushMutationResponse
-    if (!response.ok || !json?.ok) {
+    if (!json?.ok) {
       throw new Error(json?.error || 'Could not save your push subscription.')
     }
   }
 
-  async function requestServerTestPush(subscription: PushSubscription, prefs: PushPreferences) {
-    const response = await fetch(`${API_BASE}/api/push/test`, {
+  async function showLocalTestNotificationFallback() {
+    const registration = await ensureServiceWorkerRegistration()
+    await registration.showNotification('Live Weather Alerts test notification', {
+      body: 'The server accepted the test push, but this browser did not confirm receipt in time. This local fallback verifies notifications can still display here.',
+      tag: `local-test-fallback-${Date.now()}`,
+      requireInteraction: true,
+      data: {
+        targetUrl: `${window.location.origin}/?tab=more`,
+      },
+    })
+  }
+
+  async function requestServerTestPush(
+    subscription: PushSubscription,
+    prefs: PushPreferences,
+  ): Promise<{ status: PushTestDeliveryStatus; usedFallback: boolean }> {
+    const clientTestId = createPushTestId()
+    const deliveryResult = waitForPushTestStatus(clientTestId)
+    const json = await fetchJson<PushMutationResponse>('/api/push/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         subscription: serializePushSubscription(subscription),
         prefs,
+        clientTestId,
       }),
     })
 
-    const json = (await response.json()) as PushMutationResponse
-    if (!response.ok || !json?.ok) {
+    if (!json?.ok) {
       throw new Error(json?.error || 'Could not send a test push notification.')
     }
+
+    const status = await deliveryResult
+    if (status.status === 'failed') {
+      throw new Error(status.error || 'The browser could not display the test notification.')
+    }
+
+    if (status.status === 'timeout') {
+      await showLocalTestNotificationFallback()
+      return { status: 'timeout', usedFallback: true }
+    }
+
+    return { status: 'displayed', usedFallback: false }
+  }
+
+  async function resubscribePushSubscription(prefs: PushPreferences): Promise<PushSubscription> {
+    const registration = await ensureServiceWorkerRegistration()
+    const existing = await registration.pushManager.getSubscription()
+    if (existing) {
+      await fetchJson<PushMutationResponse>('/api/push/unsubscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: existing.endpoint }),
+      }).catch(() => {})
+      await existing.unsubscribe().catch(() => {})
+    }
+
+    const publicKey = await fetchPushPublicKey()
+    const refreshed = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToArrayBuffer(publicKey),
+    })
+    await savePushSubscription(refreshed, prefs)
+    setPushEnabled(true)
+    return refreshed
   }
 
   async function ensurePushSubscription(): Promise<PushSubscription> {
@@ -1174,9 +1465,24 @@ function AppInner() {
     setPushBusy(true)
     setError(null)
     try {
-      const subscription = await ensurePushSubscription()
+      let subscription = await ensurePushSubscription()
       if (sendTest && pushPreferences) {
-        await requestServerTestPush(subscription, pushPreferences)
+        let result: { status: PushTestDeliveryStatus; usedFallback: boolean }
+        try {
+          result = await requestServerTestPush(subscription, pushPreferences)
+        } catch (err) {
+          if (!isPushVapidMismatchError(err)) {
+            throw err
+          }
+          subscription = await resubscribePushSubscription(pushPreferences)
+          result = await requestServerTestPush(subscription, pushPreferences)
+        }
+
+        if (result.status === 'timeout' && result.usedFallback) {
+          setError(
+            'The server accepted the test push, but this browser did not confirm receipt in time. A local fallback notification was shown while the service worker refreshes.',
+          )
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not enable notifications.')
@@ -1196,7 +1502,7 @@ function AppInner() {
     try {
       const subscription = await getExistingPushSubscription()
       if (subscription) {
-        await fetch(`${API_BASE}/api/push/unsubscribe`, {
+        await fetchJson<PushMutationResponse>('/api/push/unsubscribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ endpoint: subscription.endpoint }),
@@ -1253,6 +1559,36 @@ function AppInner() {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadPushConfigurationStatus() {
+      if (!pushSupported) {
+        if (!cancelled) setPushServerConfigured(null)
+        return
+      }
+
+      try {
+        const json = await fetchJson<PushPublicKeyResponse>('/api/push/public-key')
+        if (!cancelled) {
+          setPushServerConfigured(Boolean(json?.publicKey))
+        }
+      } catch (err) {
+        if (cancelled) return
+        if (err instanceof FetchError && err.status === 503) {
+          setPushServerConfigured(false)
+          return
+        }
+        setPushServerConfigured(null)
+      }
+    }
+
+    void loadPushConfigurationStatus()
+    return () => {
+      cancelled = true
+    }
+  }, [pushSupported])
 
   useEffect(() => {
     let cancelled = false
@@ -1334,8 +1670,7 @@ function AppInner() {
   useEffect(() => {
     if (!location?.lat || !location?.lon || (location?.countyCode && location?.zoneCode)) return
     const lat = location.lat, lon = location.lon
-    fetch(`${API_BASE}/api/geocode?lat=${lat}&lon=${lon}`)
-      .then((r) => r.json())
+    fetchJson<SavedLocation>(`/api/geocode?lat=${lat}&lon=${lon}`)
       .then((json: SavedLocation) => {
         if (json?.countyCode || json?.zoneCode) {
           setLocation((prev) => {
@@ -1349,6 +1684,49 @@ function AppInner() {
       .catch(() => {})
   }, [location?.lat, location?.lon, location?.countyCode, location?.zoneCode])
 
+  useEffect(() => {
+    if (activeTab !== 'alerts') return
+
+    let cancelled = false
+    let intervalId: number | null = null
+
+    async function loadAllAlerts(background = false) {
+      if (!background) {
+        setAllAlertsLoading(true)
+      }
+      setResourceErrors((current) => ({ ...current, allAlerts: null }))
+      try {
+        const alertsJson = await fetchJson<WorkerAlertsResponse>('/api/alerts')
+        if (cancelled) return
+        setAllAlertsData(alertsJson)
+      } catch (err) {
+        if (cancelled) return
+        if (!background) {
+          setAllAlertsData(null)
+        }
+        setResourceErrors((current) => ({
+          ...current,
+          allAlerts: resourceErrorMessage('Nationwide alerts', err),
+        }))
+      } finally {
+        if (!cancelled && !background) setAllAlertsLoading(false)
+      }
+    }
+
+    void loadAllAlerts(false)
+    intervalId = window.setInterval(() => {
+      void loadAllAlerts(true)
+    }, DATA_POLL_INTERVAL_MS)
+
+    return () => {
+      cancelled = true
+      setAllAlertsLoading(false)
+      if (intervalId !== null) {
+        window.clearInterval(intervalId)
+      }
+    }
+  }, [activeTab])
+
   const tc = THEMES[themeKey] ?? THEMES.blue
   const isWhiteTheme = themeKey === 'white'
   const isBlackTheme = themeKey === 'black'
@@ -1356,108 +1734,38 @@ function AppInner() {
   const radarHighlight = isWhiteTheme ? 'text-sky-500' : tc.t300
   const cardBase = `card rounded-2xl border p-5 ${tc.cardBg} ${isWhiteTheme ? 'border-slate-300 shadow-md' : 'border-white/10 shadow-2xl'}`
 
+  const loading = (weatherLoading && !weather) || (localAlertsLoading && !localAlertsData)
   const current = weather?.current || {}
   const hourly = useMemo(() => (weather?.hourly || []).slice(0, 6), [weather?.hourly])
   const daily = useMemo(() => (weather?.daily || []).slice(0, 7), [weather?.daily])
-
-  // Use all alerts from the active feed (NWS /alerts/active already returns only active alerts)
-  // Filter out test alerts and messages that include 'test'.
-  const alerts = useMemo(() => {
-    const raw = alertsData?.alerts ?? []
-    return raw.filter(isDisplayableAlert)
-  }, [alertsData?.alerts])
-
-  useEffect(() => {
-    if (
-      !location ||
-      alertRadius === 0 ||
-      !Number.isFinite(location?.lat) ||
-      !Number.isFinite(location?.lon)
-    ) {
-      setRadiusAlerts(null)
-      return
-    }
-
-    const lat = Number(location.lat)
-    const lon = Number(location.lon)
-    let cancelled = false
-
-    async function loadRadiusAlerts() {
-      setRadiusAlerts(null)
-      try {
-        const url = `${API_BASE}/api/alerts?lat=${lat}&lon=${lon}&radius=${alertRadius}`
-        const res = await fetch(url)
-        const json = (await res.json()) as WorkerAlertsResponse & { error?: string }
-        if (!res.ok) {
-          throw new Error(json?.error || 'Could not load nearby alerts.')
-        }
-        if (!cancelled) {
-          setRadiusAlerts((json.alerts ?? []).filter(isDisplayableAlert))
-        }
-      } catch (err) {
-        console.error('Radius alert filtering failed:', err)
-        if (!cancelled) setRadiusAlerts(null)
-      }
-    }
-
-    void loadRadiusAlerts()
-
-    return () => {
-      cancelled = true
-    }
-  }, [alertRadius, location?.lat, location?.lon])
-
+  const radar = weather?.radar ?? null
+  const radarImageUrl =
+    typeof radar?.stillImageUrl === 'string' && radar.stillImageUrl.trim()
+      ? radar.stillImageUrl
+      : null
   const localAlerts = useMemo(() => {
-    if (!location?.state) return []
-    const stateCode = String(location.state).toUpperCase()
-    return alerts.filter((alert) => {
-      // Check primary stateCode first
-      if (String(alert?.stateCode || '').toUpperCase() === stateCode) return true
-      // Also check stateCodes array for multi-state alerts (e.g. IL+IN+KY+MO)
-      const codes = Array.isArray(alert?.stateCodes) ? (alert.stateCodes as string[]) : []
-      return codes.some((c) => String(c).toUpperCase() === stateCode)
-    })
-  }, [alerts, location])
-
-  const radiusFallbackAlerts = useMemo(() => {
-    if (alertRadius === 0) return []
-    return filterAlertsByRadius(alerts, location, alertRadius)
-  }, [alerts, location, alertRadius])
-
-  // County/radius-filtered alerts for the home screen
-  // alertRadius=0 → UGC county+zone matching (precise)
-  // alertRadius>0 → alerts whose geometry intersects the selected radius
-  const countyAlerts = useMemo(() => {
-    if (alertRadius > 0) {
-      return radiusAlerts ?? radiusFallbackAlerts
-    }
-
-    const userUgcs = buildUserUgcSet(location)
-
-    if (userUgcs.size > 0) {
-      const byUgc = localAlerts.filter((alert) => alertMatchesUserUgc(alert, userUgcs))
-      if (byUgc.length > 0) return byUgc
-    }
-
-    // No county code available yet (still geocoding) — fall back to state-level
-    return localAlerts
-  }, [localAlerts, location, alertRadius, radiusAlerts, radiusFallbackAlerts])
-
+    const raw = localAlertsData?.alerts ?? []
+    return raw.filter(isDisplayableAlert)
+  }, [localAlertsData?.alerts])
+  const allAlerts = useMemo(() => {
+    const raw = allAlertsData?.alerts ?? []
+    return raw.filter(isDisplayableAlert)
+  }, [allAlertsData?.alerts])
   const scopedAlerts = useMemo(() => {
-    return alertsScope === 'local' ? countyAlerts : alerts
-  }, [alertsScope, countyAlerts, alerts])
+    return alertsScope === 'local' ? localAlerts : allAlerts
+  }, [alertsScope, localAlerts, allAlerts])
 
   // Per-day alert matching for the forecast page
   const dayAlerts = useMemo(() => {
     return daily.map((day) => {
       const dayStart = new Date(String(day?.startTime || '')).getTime()
       if (!Number.isFinite(dayStart)) return []
-      return countyAlerts.filter((alert) => {
+      return localAlerts.filter((alert) => {
         const expires = Date.parse(String(alert?.expires || '0'))
         return Number.isFinite(expires) && expires > dayStart
       })
     })
-  }, [daily, countyAlerts])
+  }, [daily, localAlerts])
 
   const filteredAlerts = useMemo(() => {
     return scopedAlerts
@@ -1475,7 +1783,20 @@ function AppInner() {
 
   const counts = normalizeAlertCount(scopedAlerts)
   const currentLocationLabel = getLocationLabel(location, weather?.location)
-  const activeAlertHero = countyAlerts[0] || null
+  const activeAlertHero = localAlerts[0] || null
+  const weatherUnavailable = !weatherLoading && !weather
+  const localAlertsUnavailable = !localAlertsLoading && !localAlertsData
+  const allAlertsUnavailable = alertsScope === 'all' && !allAlertsLoading && !allAlertsData
+  const alertsLoading = alertsScope === 'local' ? localAlertsLoading : allAlertsLoading
+  const alertsUnavailable = alertsScope === 'local' ? localAlertsUnavailable : allAlertsUnavailable
+  const alertsError =
+    alertsScope === 'local' ? resourceErrors.localAlerts : resourceErrors.allAlerts
+  const alertsMeta = alertsScope === 'local' ? localAlertsData?.meta : allAlertsData?.meta
+  const alertsUpdatedAt =
+    typeof alertsMeta?.generatedAt === 'string' && alertsMeta.generatedAt.trim()
+      ? alertsMeta.generatedAt
+      : weather?.updated || ''
+  const alertsSummaryUnavailable = alertsUnavailable || (alertsLoading && scopedAlerts.length === 0)
 
   return (
     <div className={`min-h-screen ${rootText} ${isWhiteTheme ? 'theme-white' : isBlackTheme ? 'theme-black' : ''}`} style={{ backgroundColor: THEME_BG[themeKey] || '#091320' }}>
@@ -1546,7 +1867,16 @@ function AppInner() {
           <>
             {activeTab === 'home' && (
               <>
-                {activeAlertHero ? (
+                {localAlertsUnavailable ? (
+                  <div className="px-4 pt-4">
+                    <DataUnavailableCard
+                      title="LOCAL ALERTS UNAVAILABLE"
+                      message={resourceErrors.localAlerts || 'We could not load alerts for your area.'}
+                      actionLabel="View Forecast"
+                      onAction={() => setActiveTab('forecast')}
+                    />
+                  </div>
+                ) : activeAlertHero ? (
                   <div className="px-4 pt-4">
                     <div className="rounded-2xl border border-red-500/30 bg-gradient-to-b from-red-700 to-red-900 p-5">
                       <div className="mb-2 text-xs font-semibold tracking-wide text-white force-white">
@@ -1625,7 +1955,7 @@ function AppInner() {
                 )}
 
                 <div className="mt-4 space-y-3 px-4">
-                  {countyAlerts.slice(1, 5).map((alert, idx) => {
+                  {localAlerts.slice(1, 5).map((alert, idx) => {
                     const styles = alertBorderClass(
                       String(alert?.event || ''),
                       String(alert?.severity || ''),
@@ -1703,55 +2033,64 @@ function AppInner() {
                       </div>
                     )
                   })}
-                  {countyAlerts.length > 5 && (
+                  {localAlerts.length > 5 && (
                     <button
                       onClick={() => setActiveTab('alerts')}
                       className={`w-full rounded-xl border border-white/10 ${tc.cardBg} py-3 text-sm font-medium ${tc.t400}`}
                     >
-                      {countyAlerts.length - 5} more alerts — tap to view all
+                      {localAlerts.length - 5} more alerts — tap to view all
                     </button>
                   )}
 
                   <div className={cardBase}>
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <div className={`mb-2 text-xs tracking-wide ${tc.t300}`}>CURRENT</div>
-                        <div className="text-4xl font-bold leading-none">
-                          {formatTemp(getCurrentTemp(current))}
+                    {weatherUnavailable ? (
+                      <DataUnavailableCard
+                        title="CURRENT WEATHER UNAVAILABLE"
+                        message={resourceErrors.weather || 'Current conditions could not be loaded.'}
+                      />
+                    ) : (
+                      <>
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className={`mb-2 text-xs tracking-wide ${tc.t300}`}>CURRENT</div>
+                            <div className="text-4xl font-bold leading-none">
+                              {formatTemp(getCurrentTemp(current))}
+                            </div>
+                            <div className="mt-2 text-lg font-medium">{getCurrentCondition(current)}</div>
+                            <div className="mt-1 text-sm text-white/60">
+                              Feels like {formatTemp(getFeelsLike(current))}
+                            </div>
+                          </div>
+                          <div className={`rounded-2xl border ${tc.iconBorder} ${tc.iconBg} p-4`}>
+                            {React.createElement(weatherIconFromText(getCurrentCondition(current), !!(current?.isNight)), {
+                              className: `h-12 w-12 ${tc.t300}`,
+                            })}
+                          </div>
                         </div>
-                        <div className="mt-2 text-lg font-medium">{getCurrentCondition(current)}</div>
-                        <div className="mt-1 text-sm text-white/60">
-                          Feels like {formatTemp(getFeelsLike(current))}
+                        <div className="mt-5 grid grid-cols-4 gap-3 text-center">
+                          <div className="rounded-xl bg-white/5 p-3">
+                            <Wind className="mx-auto mb-2 h-4 w-4 text-white/70" />
+                            <div className="text-[11px] uppercase tracking-wide text-white/50">Wind</div>
+                            <div className="mt-1 text-sm font-semibold">{String(getWind(current))}</div>
+                          </div>
+                          <div className="rounded-xl bg-white/5 p-3">
+                            <Droplets className="mx-auto mb-2 h-4 w-4 text-white/70" />
+                            <div className="text-[11px] uppercase tracking-wide text-white/50">Humidity</div>
+                            <div className="mt-1 text-sm font-semibold">{formatPercent(getHumidity(current))}</div>
+                          </div>
+                          <div className="rounded-xl bg-white/5 p-3">
+                            <Eye className="mx-auto mb-2 h-4 w-4 text-white/70" />
+                            <div className="text-[11px] uppercase tracking-wide text-white/50">Visibility</div>
+                            <div className="mt-1 text-sm font-semibold">{String(getVisibility(current))}</div>
+                          </div>
+                          <div className="rounded-xl bg-white/5 p-3">
+                            <Gauge className="mx-auto mb-2 h-4 w-4 text-white/70" />
+                            <div className="text-[11px] uppercase tracking-wide text-white/50">Pressure</div>
+                            <div className="mt-1 text-sm font-semibold">{formatPressure(getPressure(current))}</div>
+                          </div>
                         </div>
-                      </div>
-                      <div className={`rounded-2xl border ${tc.iconBorder} ${tc.iconBg} p-4`}>
-                        {React.createElement(weatherIconFromText(getCurrentCondition(current), !!(current?.isNight)), {
-                          className: `h-12 w-12 ${tc.t300}`,
-                        })}
-                      </div>
-                    </div>
-                    <div className="mt-5 grid grid-cols-4 gap-3 text-center">
-                      <div className="rounded-xl bg-white/5 p-3">
-                        <Wind className="mx-auto mb-2 h-4 w-4 text-white/70" />
-                        <div className="text-[11px] uppercase tracking-wide text-white/50">Wind</div>
-                        <div className="mt-1 text-sm font-semibold">{String(getWind(current))}</div>
-                      </div>
-                      <div className="rounded-xl bg-white/5 p-3">
-                        <Droplets className="mx-auto mb-2 h-4 w-4 text-white/70" />
-                        <div className="text-[11px] uppercase tracking-wide text-white/50">Humidity</div>
-                        <div className="mt-1 text-sm font-semibold">{formatPercent(getHumidity(current))}</div>
-                      </div>
-                      <div className="rounded-xl bg-white/5 p-3">
-                        <Eye className="mx-auto mb-2 h-4 w-4 text-white/70" />
-                        <div className="text-[11px] uppercase tracking-wide text-white/50">Visibility</div>
-                        <div className="mt-1 text-sm font-semibold">{String(getVisibility(current))}</div>
-                      </div>
-                      <div className="rounded-xl bg-white/5 p-3">
-                        <Gauge className="mx-auto mb-2 h-4 w-4 text-white/70" />
-                        <div className="text-[11px] uppercase tracking-wide text-white/50">Pressure</div>
-                        <div className="mt-1 text-sm font-semibold">{formatPressure(getPressure(current))}</div>
-                      </div>
-                    </div>
+                      </>
+                    )}
                   </div>
                 </div>
               </>
@@ -1759,211 +2098,219 @@ function AppInner() {
 
             {activeTab === 'forecast' && (
               <>
-                <div className="px-4 pt-4">
-                  <div className={cardBase}>
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <div className={`mb-2 text-xs tracking-wide ${tc.t300}`}>FORECAST</div>
-                        <div className="text-4xl font-bold leading-none">
-                          {formatTemp(getCurrentTemp(current))}
+                {weatherUnavailable ? (
+                  <div className="px-4 pt-4">
+                    <DataUnavailableCard
+                      title="FORECAST UNAVAILABLE"
+                      message={resourceErrors.weather || 'Forecast data could not be loaded.'}
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div className="px-4 pt-4">
+                      <div className={cardBase}>
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className={`mb-2 text-xs tracking-wide ${tc.t300}`}>FORECAST</div>
+                            <div className="text-4xl font-bold leading-none">
+                              {formatTemp(getCurrentTemp(current))}
+                            </div>
+                            <div className="mt-2 text-lg font-medium">{getCurrentCondition(current)}</div>
+                            <div className={`mt-1 text-sm ${tc.t300}`}>
+                              Tonight low {formatTemp(getDailyLow(daily[0] || {}))} • Tomorrow high{' '}
+                              {formatTemp(getDailyHigh(daily[1] || daily[0] || {}))}
+                            </div>
+                          </div>
+                          <div className={`rounded-2xl border ${tc.iconBorder} ${tc.iconBg} p-4`}>
+                            {React.createElement(weatherIconFromText(getCurrentCondition(current), !!(current?.isNight)), {
+                              className: `h-12 w-12 ${tc.t300}`,
+                            })}
+                          </div>
                         </div>
-                        <div className="mt-2 text-lg font-medium">{getCurrentCondition(current)}</div>
-                        <div className={`mt-1 text-sm ${tc.t300}`}>
-                          Tonight low {formatTemp(getDailyLow(daily[0] || {}))} • Tomorrow high{' '}
-                          {formatTemp(getDailyHigh(daily[1] || daily[0] || {}))}
+
+                        <div className="mt-5 grid grid-cols-4 gap-3 text-center">
+                          <div className="rounded-xl bg-white/5 p-3">
+                            <Wind className="mx-auto mb-2 h-4 w-4 text-white/70" />
+                            <div className="text-[11px] uppercase tracking-wide text-white/50">
+                              Wind
+                            </div>
+                            <div className="mt-1 text-sm font-semibold">{String(getWind(current))}</div>
+                          </div>
+                          <div className="rounded-xl bg-white/5 p-3">
+                            <Droplets className="mx-auto mb-2 h-4 w-4 text-white/70" />
+                            <div className="text-[11px] uppercase tracking-wide text-white/50">
+                              Humidity
+                            </div>
+                            <div className="mt-1 text-sm font-semibold">
+                              {formatPercent(getHumidity(current))}
+                            </div>
+                          </div>
+                          <div className="rounded-xl bg-white/5 p-3">
+                            <Eye className="mx-auto mb-2 h-4 w-4 text-white/70" />
+                            <div className="text-[11px] uppercase tracking-wide text-white/50">
+                              Visibility
+                            </div>
+                            <div className="mt-1 text-sm font-semibold">
+                              {String(getVisibility(current))}
+                            </div>
+                          </div>
+                          <div className="rounded-xl bg-white/5 p-3">
+                            <Gauge className="mx-auto mb-2 h-4 w-4 text-white/70" />
+                            <div className="text-[11px] uppercase tracking-wide text-white/50">
+                              Pressure
+                            </div>
+                            <div className="mt-1 text-sm font-semibold">
+                              {formatPressure(getPressure(current))}
+                            </div>
+                          </div>
                         </div>
                       </div>
-                      <div className={`rounded-2xl border ${tc.iconBorder} ${tc.iconBg} p-4`}>
-                        {React.createElement(weatherIconFromText(getCurrentCondition(current), !!(current?.isNight)), {
-                          className: `h-12 w-12 ${tc.t300}`,
+                    </div>
+
+                    <div className="mt-4 px-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <div className="text-sm font-semibold tracking-wide text-white/70">
+                          HOURLY FORECAST
+                        </div>
+                        <button
+                          onClick={() => setActiveTab('radar')}
+                          className={`text-sm font-medium ${tc.t400}`}
+                        >
+                          Radar <ChevronRight className="inline h-4 w-4" />
+                        </button>
+                      </div>
+                      <div className="flex gap-3 overflow-x-auto pb-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+                        {hourly.map((item, index) => {
+                          const Icon = weatherIconFromText(
+                            String(item?.shortForecast || item?.condition || item?.summary || ''),
+                            isNightFromHourlyItem(item),
+                          )
+                          return (
+                            <div
+                              key={index}
+                              className={`min-w-[84px] rounded-2xl border border-white/10 ${tc.cardBg} p-3 text-center`}
+                            >
+                              <div className={`text-[11px] ${tc.t300}`}>{getHourlyTime(item)}</div>
+                              <Icon className={`mx-auto my-3 h-5 w-5 ${tc.t300}`} />
+                              <div className={`text-xl font-semibold ${tc.t400}`}>{formatTemp(getHourlyTemp(item))}</div>
+                              <div className={`mt-1 text-xs ${tc.t400}`}>
+                                {formatPercent(getHourlyRain(item))}
+                              </div>
+                            </div>
+                          )
                         })}
                       </div>
                     </div>
 
-                    <div className="mt-5 grid grid-cols-4 gap-3 text-center">
-                      <div className="rounded-xl bg-white/5 p-3">
-                        <Wind className="mx-auto mb-2 h-4 w-4 text-white/70" />
-                        <div className="text-[11px] uppercase tracking-wide text-white/50">
-                          Wind
+                    <div className="mt-5 px-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <div className="text-sm font-semibold tracking-wide text-white/70">
+                          7-DAY FORECAST
                         </div>
-                        <div className="mt-1 text-sm font-semibold">{String(getWind(current))}</div>
+                        <div className="text-xs text-white/40">Updated {formatDateTime(weather?.updated)}</div>
                       </div>
-                      <div className="rounded-xl bg-white/5 p-3">
-                        <Droplets className="mx-auto mb-2 h-4 w-4 text-white/70" />
-                        <div className="text-[11px] uppercase tracking-wide text-white/50">
-                          Humidity
-                        </div>
-                        <div className="mt-1 text-sm font-semibold">
-                          {formatPercent(getHumidity(current))}
-                        </div>
-                      </div>
-                      <div className="rounded-xl bg-white/5 p-3">
-                        <Eye className="mx-auto mb-2 h-4 w-4 text-white/70" />
-                        <div className="text-[11px] uppercase tracking-wide text-white/50">
-                          Visibility
-                        </div>
-                        <div className="mt-1 text-sm font-semibold">
-                          {String(getVisibility(current))}
-                        </div>
-                      </div>
-                      <div className="rounded-xl bg-white/5 p-3">
-                        <Gauge className="mx-auto mb-2 h-4 w-4 text-white/70" />
-                        <div className="text-[11px] uppercase tracking-wide text-white/50">
-                          Pressure
-                        </div>
-                        <div className="mt-1 text-sm font-semibold">
-                          {formatPressure(getPressure(current))}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-4 px-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div className="text-sm font-semibold tracking-wide text-white/70">
-                      HOURLY FORECAST
-                    </div>
-                    <button
-                      onClick={() => setActiveTab('radar')}
-                      className={`text-sm font-medium ${tc.t400}`}
-                    >
-                      Radar <ChevronRight className="inline h-4 w-4" />
-                    </button>
-                  </div>
-                  <div className="flex gap-3 overflow-x-auto pb-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
-                    {hourly.map((item, index) => {
-                      const Icon = weatherIconFromText(
-                        String(item?.shortForecast || item?.condition || item?.summary || ''),
-                        isNightFromHourlyItem(item),
-                      )
-                      return (
-                        <div
-                          key={index}
-                          className={`min-w-[84px] rounded-2xl border border-white/10 ${tc.cardBg} p-3 text-center`}
-                        >
-                          <div className={`text-[11px] ${tc.t300}`}>{getHourlyTime(item)}</div>
-                          <Icon className={`mx-auto my-3 h-5 w-5 ${tc.t300}`} />
-                          <div className={`text-xl font-semibold ${tc.t400}`}>{formatTemp(getHourlyTemp(item))}</div>
-                          <div className={`mt-1 text-xs ${tc.t400}`}>
-                            {formatPercent(getHourlyRain(item))}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-
-                <div className="mt-5 px-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div className="text-sm font-semibold tracking-wide text-white/70">
-                      7-DAY FORECAST
-                    </div>
-                    <div className="text-xs text-white/40">Updated {formatDateTime(weather?.updated)}</div>
-                  </div>
-                  <div className="space-y-3">
-                    {daily.map((day, idx) => {
-                      const Icon = weatherIconFromText(getDailySummary(day))
-                      const expanded = expandedDayIndex === idx
-                      const thisDayAlerts = dayAlerts[idx] ?? []
-                      return (
-                        <div
-                          key={idx}
-                          onClick={() => setExpandedDayIndex(expanded ? null : idx)}
-                          className={`cursor-pointer rounded-2xl border p-4 ${tc.borderMuted} ${tc.cardBg} ${expanded ? `ring-2 ${tc.ring}` : ''}`}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="min-w-0 flex items-center gap-3">
-                              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/5">
-                              <Icon className={`h-5 w-5 ${tc.t300}`} />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <div className="text-base font-semibold">{getDailyLabel(day)}</div>
-                                  {thisDayAlerts.length > 0 && (
-                                    <span className="shrink-0 rounded-full bg-yellow-500/20 px-2 py-0.5 text-xs font-medium text-yellow-400">
-                                      Alert
+                      <div className="space-y-3">
+                        {daily.map((day, idx) => {
+                          const Icon = weatherIconFromText(getDailySummary(day))
+                          const expanded = expandedDayIndex === idx
+                          const thisDayAlerts = dayAlerts[idx] ?? []
+                          return (
+                            <div
+                              key={idx}
+                              onClick={() => setExpandedDayIndex(expanded ? null : idx)}
+                              className={`cursor-pointer rounded-2xl border p-4 ${tc.borderMuted} ${tc.cardBg} ${expanded ? `ring-2 ${tc.ring}` : ''}`}
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0 flex items-center gap-3">
+                                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/5">
+                                  <Icon className={`h-5 w-5 ${tc.t300}`} />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <div className="text-base font-semibold">{getDailyLabel(day)}</div>
+                                      {thisDayAlerts.length > 0 && (
+                                        <span className="shrink-0 rounded-full bg-yellow-500/20 px-2 py-0.5 text-xs font-medium text-yellow-400">
+                                          Alert
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="truncate text-sm text-white/55">
+                                      {getDailySummary(day)}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="shrink-0 text-right">
+                                  <div className={`mb-1 text-sm ${tc.t400}`}>
+                                    {formatPercent(getDailyPrecip(day))} rain
+                                  </div>
+                                  <div className="text-base font-semibold">
+                                    {formatTemp(getDailyHigh(day))}{' '}
+                                    <span className={`font-normal ${tc.t300}`}>
+                                      / {formatTemp(getDailyLow(day))}
                                     </span>
-                                  )}
-                                </div>
-                                <div className="truncate text-sm text-white/55">
-                                  {getDailySummary(day)}
-                                </div>
-                              </div>
-                            </div>
-                            <div className="shrink-0 text-right">
-                              <div className={`mb-1 text-sm ${tc.t400}`}>
-                                {formatPercent(getDailyPrecip(day))} rain
-                              </div>
-                              <div className="text-base font-semibold">
-                                {formatTemp(getDailyHigh(day))}{' '}
-                                <span className={`font-normal ${tc.t300}`}>
-                                  / {formatTemp(getDailyLow(day))}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                          {expanded ? (
-                            <div className={`mt-3 space-y-2 rounded-xl border ${tc.extraBorderMuted} ${tc.bgMuted} p-3 text-sm ${tc.t400}`}>
-                              {/* Daytime */}
-                              <div className={`text-[11px] font-semibold uppercase tracking-wide ${tc.t400}`}>Day</div>
-                              <div>{getDailySummary(day)}</div>
-                              {String(day?.detailedForecast || '') && String(day?.detailedForecast) !== getDailySummary(day) && (
-                                <div className={tc.t300}>{String(day?.detailedForecast)}</div>
-                              )}
-                              <div className={tc.t300}>Wind: {String(day?.windDirection || '')} {String(day?.windSpeed || '')}</div>
-                              <div className={tc.t300}>Rain: {formatPercent(getDailyPrecip(day))}</div>
-
-                              {/* Nighttime */}
-                              {getDailyNightSummary(day) && (
-                                <>
-                                  <div className={`border-t border-white/10 pt-2 text-[11px] font-semibold uppercase tracking-wide ${tc.t400}`}>Tonight</div>
-                                  <div>{getDailyNightSummary(day)}</div>
-                                  {getDailyNightDetailedForecast(day) && getDailyNightDetailedForecast(day) !== getDailyNightSummary(day) && (
-                                    <div className="text-white/60">{getDailyNightDetailedForecast(day)}</div>
-                                  )}
-                                  {getDailyNightPrecip(day) !== null && (
-                                    <div className="text-white/70">Rain: {formatPercent(getDailyNightPrecip(day))}</div>
-                                  )}
-                                </>
-                              )}
-
-                              {/* Sunrise / Sunset (today only) */}
-                              {idx === 0 && (
-                                <div className="flex gap-4 border-t border-white/10 pt-2">
-                                  <div className="flex items-center gap-1.5">
-                                    <Sunrise className="h-4 w-4 text-yellow-400" />
-                                    <span>{formatDateTime(current.sunrise as string) || 'N/A'}</span>
-                                  </div>
-                                  <div className="flex items-center gap-1.5">
-                                    <Sunset className="h-4 w-4 text-orange-400" />
-                                    <span>{formatDateTime(current.sunset as string) || 'N/A'}</span>
                                   </div>
                                 </div>
-                              )}
+                              </div>
+                              {expanded ? (
+                                <div className={`mt-3 space-y-2 rounded-xl border ${tc.extraBorderMuted} ${tc.bgMuted} p-3 text-sm ${tc.t400}`}>
+                                  {/* Daytime */}
+                                  <div className={`text-[11px] font-semibold uppercase tracking-wide ${tc.t400}`}>Day</div>
+                                  <div>{getDailySummary(day)}</div>
+                                  {String(day?.detailedForecast || '') && String(day?.detailedForecast) !== getDailySummary(day) && (
+                                    <div className={tc.t300}>{String(day?.detailedForecast)}</div>
+                                  )}
+                                  <div className={tc.t300}>Wind: {String(day?.windDirection || '')} {String(day?.windSpeed || '')}</div>
+                                  <div className={tc.t300}>Rain: {formatPercent(getDailyPrecip(day))}</div>
 
-                              {/* Alert links */}
-                              {thisDayAlerts.length > 0 && (
-                                <div className="border-t border-white/10 pt-2">
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); setActiveTab('alerts') }}
-                                    className="flex items-center gap-1.5 text-xs font-medium text-yellow-400"
-                                  >
-                                    <TriangleAlert className="h-3.5 w-3.5" />
-                                    {thisDayAlerts.length} active alert{thisDayAlerts.length !== 1 ? 's' : ''} affecting this area
-                                    <ChevronRight className="h-3.5 w-3.5" />
-                                  </button>
+                                  {/* Nighttime */}
+                                  {getDailyNightSummary(day) && (
+                                    <>
+                                      <div className={`border-t border-white/10 pt-2 text-[11px] font-semibold uppercase tracking-wide ${tc.t400}`}>Tonight</div>
+                                      <div>{getDailyNightSummary(day)}</div>
+                                      {getDailyNightDetailedForecast(day) && getDailyNightDetailedForecast(day) !== getDailyNightSummary(day) && (
+                                        <div className="text-white/60">{getDailyNightDetailedForecast(day)}</div>
+                                      )}
+                                      {getDailyNightPrecip(day) !== null && (
+                                        <div className="text-white/70">Rain: {formatPercent(getDailyNightPrecip(day))}</div>
+                                      )}
+                                    </>
+                                  )}
+
+                                  <div className="flex gap-4 border-t border-white/10 pt-2">
+                                    <div className="flex items-center gap-1.5">
+                                      <Sunrise className="h-4 w-4 text-yellow-400" />
+                                      <span>{formatDateTime((day?.sunrise as string) || null) || 'N/A'}</span>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                      <Sunset className="h-4 w-4 text-orange-400" />
+                                      <span>{formatDateTime((day?.sunset as string) || null) || 'N/A'}</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Alert links */}
+                                  {thisDayAlerts.length > 0 && (
+                                    <div className="border-t border-white/10 pt-2">
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); setActiveTab('alerts') }}
+                                        className="flex items-center gap-1.5 text-xs font-medium text-yellow-400"
+                                      >
+                                        <TriangleAlert className="h-3.5 w-3.5" />
+                                        {thisDayAlerts.length} active alert{thisDayAlerts.length !== 1 ? 's' : ''} affecting this area
+                                        <ChevronRight className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                  )}
+
+                                  <div className="pt-1 text-xs text-white/40">Tap to collapse</div>
                                 </div>
-                              )}
-
-                              <div className="pt-1 text-xs text-white/40">Tap to collapse</div>
+                              ) : null}
                             </div>
-                          ) : null}
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </>
+                )}
               </>
             )}
 
@@ -1985,14 +2332,29 @@ function AppInner() {
                       Full Map
                     </a>
                   </div>
-                  <div className={`relative flex-1 overflow-hidden rounded-2xl border ${tc.borderMuted}`}>
-                    <iframe
-                      src="https://radar.weather.gov/"
-                      className="h-full w-full border-0"
-                      title="NWS Weather Radar"
-                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+                  {weatherUnavailable ? (
+                    <DataUnavailableCard
+                      title="RADAR UNAVAILABLE"
+                      message={resourceErrors.weather || 'Radar data could not be loaded.'}
                     />
-                  </div>
+                  ) : (
+                    <div className={`flex flex-1 flex-col overflow-hidden rounded-2xl border ${tc.borderMuted}`}>
+                      <iframe
+                        src="https://radar.weather.gov/"
+                        className="h-full w-full border-0"
+                        title={`NOAA radar for ${currentLocationLabel}`}
+                        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+                      />
+                      <div className={`border-t border-white/10 ${tc.cardBg} px-4 py-3`}>
+                        <div className="text-sm font-medium">
+                          {String(radar?.summary || 'Live NOAA radar')}
+                        </div>
+                        <div className="mt-1 text-xs text-white/50">
+                          Updated {formatDateTime(String(radar?.updated || weather?.updated || ''))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </>
             )}
@@ -2003,7 +2365,9 @@ function AppInner() {
                   <div className={`flex items-center justify-between rounded-2xl border ${tc.borderMuted} bg-white/5 px-5 py-4`}>
                     <div>
                       <div className={`text-xs font-semibold tracking-wide ${tc.t300}`}>ACTIVE ALERTS</div>
-                      <div className="mt-0.5 text-2xl font-bold">{scopedAlerts.length}</div>
+                      <div className="mt-0.5 text-2xl font-bold">
+                        {alertsSummaryUnavailable ? '--' : scopedAlerts.length}
+                      </div>
                       <div className="mt-1 text-sm text-white/60">
                         {alertsScope === 'local'
                           ? `In ${currentLocationLabel}`
@@ -2065,122 +2429,153 @@ function AppInner() {
                 <div className="mt-2 grid grid-cols-3 gap-3 px-4">
                   <div className={`rounded-2xl border border-white/10 ${tc.cardBg} p-4 text-center`}>
                     <div className="text-xs uppercase tracking-wide text-white/45">Warnings</div>
-                    <div className="mt-1 text-2xl font-bold text-red-400">{counts.warnings}</div>
+                    <div className="mt-1 text-2xl font-bold text-red-400">
+                      {alertsSummaryUnavailable ? '--' : counts.warnings}
+                    </div>
                   </div>
                   <div className={`rounded-2xl border border-white/10 ${tc.cardBg} p-4 text-center`}>
                     <div className="text-xs uppercase tracking-wide text-white/45">Advisories</div>
                     <div className="mt-1 text-2xl font-bold text-yellow-300">
-                      {counts.advisories}
+                      {alertsSummaryUnavailable ? '--' : counts.advisories}
                     </div>
                   </div>
                   <div className={`rounded-2xl border border-white/10 ${tc.cardBg} p-4 text-center`}>
                     <div className="text-xs uppercase tracking-wide text-white/45">Updated</div>
                     <div className="mt-2 text-sm font-semibold">
-                      {formatDateTime(
-                        (alertsData?.meta?.generatedAt as string) || weather?.updated,
-                      )}
+                      {alertsSummaryUnavailable ? '--' : formatDateTime(alertsUpdatedAt)}
                     </div>
                   </div>
                 </div>
 
                 <div className="mt-4 space-y-3 px-4">
-                  {(showAllAlerts ? filteredAlerts : filteredAlerts.slice(0, 6)).map((alert, idx) => {
-                    const styles = alertBorderClass(
-                      String(alert?.event || ''),
-                      String(alert?.severity || ''),
-                    )
-                    const alertId = String(alert.id || idx)
-                    const isExpanded = expandedAlertId === alertId
-                    return (
-                      <div
-                        key={alertId}
-                        id={`alert-card-${alertId}`}
-                        onClick={() => setExpandedAlertId(isExpanded ? null : alertId)}
-                        className={`cursor-pointer rounded-xl border-l-4 ${tc.cardBg} p-4 ${styles.border}`}
-                      >
-                        <div className={`mb-1 text-xs ${styles.label}`}>
-                          {String(alert.event || 'ALERT').toUpperCase()}
-                        </div>
-                        <div className="text-lg font-semibold">
-                          {(alert.event as string) || 'Weather Alert'}
-                        </div>
-                        <div className="mt-1 text-sm text-white/70">
-                          {(alert.summary as string) ||
-                            (alert.headline as string) ||
-                            'Tap for details.'}
-                        </div>
-                        {isExpanded && (
-                          <div className="mt-3 space-y-3 border-t border-white/10 pt-3">
-                            {(alert.areaDesc as string) ? (
-                              <div>
-                                <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Area</div>
-                                <div className="text-sm text-white/70">{alert.areaDesc as string}</div>
-                              </div>
-                            ) : null}
-                            {(alert.description as string) ? (
-                              <div>
-                                <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Description</div>
-                                <div className="whitespace-pre-wrap text-sm leading-relaxed text-white/80">{formatAlertDescription(alert.description as string)}</div>
-                              </div>
-                            ) : null}
-                            {(alert.instruction as string) ? (
-                              <div>
-                                <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Instructions</div>
-                                <div className="whitespace-pre-wrap text-sm leading-relaxed text-yellow-200/80">{formatAlertDescription(alert.instruction as string)}</div>
-                              </div>
-                            ) : null}
-                            {(alert.expires as string) ? (
-                              <div className="text-xs text-white/40">
-                                Expires {formatDateTime(alert.expires as string)}
-                              </div>
-                            ) : null}
-                          </div>
-                        )}
-                        <div className="mt-3 flex items-center justify-between">
-                          <div className="text-xs text-white/40">
-                            Issued {formatDateTime((alert.sent as string) || (alert.updated as string))}
-                          </div>
-                          <div className="flex items-center gap-3">
-                            {(alert.nwsUrl as string) ? (
-                              <a
-                                href={alert.nwsUrl as string}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="text-white/40 hover:text-white/70 transition-colors"
-                                aria-label="View on NWS"
-                              >
-                                <ExternalLink className="h-4 w-4" />
-                              </a>
-                            ) : null}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); void shareAlert(alert) }}
-                              className="text-white/40 hover:text-white/70 transition-colors"
-                              aria-label="Share alert"
-                            >
-                              <Share2 className="inline h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setExpandedAlertId(isExpanded ? null : alertId) }}
-                              className={`text-sm font-medium ${tc.t400}`}
-                            >
-                              {isExpanded ? 'Less' : 'Details'}{' '}
-                              <ChevronRight
-                                className={`inline h-4 w-4 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
-                              />
-                            </button>
-                          </div>
-                        </div>
+                  {alertsLoading && scopedAlerts.length === 0 ? (
+                    <div className={`rounded-2xl border border-white/10 ${tc.cardBg} p-5 text-sm text-white/70`}>
+                      <div className="flex items-center gap-3">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Loading {alertsScope === 'local' ? 'local' : 'nationwide'} alerts...
                       </div>
-                    )
-                  })}
-                  {filteredAlerts.length > 6 && (
-                    <button
-                      onClick={() => setShowAllAlerts((v) => !v)}
-                      className={`w-full rounded-xl border border-white/10 ${tc.cardBg} py-3 text-sm font-medium ${tc.t400}`}
-                    >
-                      {showAllAlerts ? 'Show Less' : `Show All ${filteredAlerts.length} Alerts`}
-                    </button>
+                    </div>
+                  ) : alertsUnavailable ? (
+                    <DataUnavailableCard
+                      title={alertsScope === 'local' ? 'LOCAL ALERTS UNAVAILABLE' : 'NATIONWIDE ALERTS UNAVAILABLE'}
+                      message={alertsError || 'Alert data could not be loaded right now.'}
+                      actionLabel={alertsScope === 'local' ? 'View Forecast' : 'View My Area'}
+                      onAction={() => {
+                        if (alertsScope === 'local') {
+                          setActiveTab('forecast')
+                          return
+                        }
+                        setAlertsScope('local')
+                        setShowAllAlerts(false)
+                      }}
+                    />
+                  ) : filteredAlerts.length === 0 ? (
+                    <div className={`rounded-2xl border border-emerald-400/25 bg-emerald-950/30 p-5 text-sm text-emerald-100`}>
+                      {alertsScope === 'local'
+                        ? `No active alerts are in effect for ${currentLocationLabel} right now.`
+                        : 'No active nationwide alerts match this filter right now.'}
+                    </div>
+                  ) : (
+                    <>
+                      {(showAllAlerts ? filteredAlerts : filteredAlerts.slice(0, 6)).map((alert, idx) => {
+                        const styles = alertBorderClass(
+                          String(alert?.event || ''),
+                          String(alert?.severity || ''),
+                        )
+                        const alertId = String(alert.id || idx)
+                        const isExpanded = expandedAlertId === alertId
+                        return (
+                          <div
+                            key={alertId}
+                            id={`alert-card-${alertId}`}
+                            onClick={() => setExpandedAlertId(isExpanded ? null : alertId)}
+                            className={`cursor-pointer rounded-xl border-l-4 ${tc.cardBg} p-4 ${styles.border}`}
+                          >
+                            <div className={`mb-1 text-xs ${styles.label}`}>
+                              {String(alert.event || 'ALERT').toUpperCase()}
+                            </div>
+                            <div className="text-lg font-semibold">
+                              {(alert.event as string) || 'Weather Alert'}
+                            </div>
+                            <div className="mt-1 text-sm text-white/70">
+                              {(alert.summary as string) ||
+                                (alert.headline as string) ||
+                                'Tap for details.'}
+                            </div>
+                            {isExpanded && (
+                              <div className="mt-3 space-y-3 border-t border-white/10 pt-3">
+                                {(alert.areaDesc as string) ? (
+                                  <div>
+                                    <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Area</div>
+                                    <div className="text-sm text-white/70">{alert.areaDesc as string}</div>
+                                  </div>
+                                ) : null}
+                                {(alert.description as string) ? (
+                                  <div>
+                                    <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Description</div>
+                                    <div className="whitespace-pre-wrap text-sm leading-relaxed text-white/80">{formatAlertDescription(alert.description as string)}</div>
+                                  </div>
+                                ) : null}
+                                {(alert.instruction as string) ? (
+                                  <div>
+                                    <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Instructions</div>
+                                    <div className="whitespace-pre-wrap text-sm leading-relaxed text-yellow-200/80">{formatAlertDescription(alert.instruction as string)}</div>
+                                  </div>
+                                ) : null}
+                                {(alert.expires as string) ? (
+                                  <div className="text-xs text-white/40">
+                                    Expires {formatDateTime(alert.expires as string)}
+                                  </div>
+                                ) : null}
+                              </div>
+                            )}
+                            <div className="mt-3 flex items-center justify-between">
+                              <div className="text-xs text-white/40">
+                                Issued {formatDateTime((alert.sent as string) || (alert.updated as string))}
+                              </div>
+                              <div className="flex items-center gap-3">
+                                {(alert.nwsUrl as string) ? (
+                                  <a
+                                    href={alert.nwsUrl as string}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="text-white/40 hover:text-white/70 transition-colors"
+                                    aria-label="View on NWS"
+                                  >
+                                    <ExternalLink className="h-4 w-4" />
+                                  </a>
+                                ) : null}
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); void shareAlert(alert) }}
+                                  className="text-white/40 hover:text-white/70 transition-colors"
+                                  aria-label="Share alert"
+                                >
+                                  <Share2 className="inline h-4 w-4" />
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setExpandedAlertId(isExpanded ? null : alertId) }}
+                                  className={`text-sm font-medium ${tc.t400}`}
+                                >
+                                  {isExpanded ? 'Less' : 'Details'}{' '}
+                                  <ChevronRight
+                                    className={`inline h-4 w-4 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                                  />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                      {filteredAlerts.length > 6 && (
+                        <button
+                          onClick={() => setShowAllAlerts((v) => !v)}
+                          className={`w-full rounded-xl border border-white/10 ${tc.cardBg} py-3 text-sm font-medium ${tc.t400}`}
+                        >
+                          {showAllAlerts ? 'Show Less' : `Show All ${filteredAlerts.length} Alerts`}
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </>
@@ -2343,6 +2738,8 @@ function AppInner() {
                         <div className="mt-1 text-xs text-white/45">
                           {!pushSupported
                             ? 'This browser does not support push notifications.'
+                            : pushServerConfigured === false
+                              ? pushConfigurationHelp
                             : pushPermission === 'denied'
                               ? 'Notifications are blocked in browser settings.'
                               : pushEnabled
@@ -2355,10 +2752,10 @@ function AppInner() {
                     <div className="mt-3 grid grid-cols-2 gap-2">
                       <button
                         onClick={() => void sendTestNotification()}
-                        disabled={pushBusy || !pushSupported}
+                        disabled={pushBusy || !pushSupported || pushServerConfigured === false}
                         className={`rounded-lg ${tc.bg500} px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50`}
                       >
-                        {pushBusy ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : pushEnabled ? 'Send Test Push' : 'Enable Alerts'}
+                        {pushBusy ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : pushServerConfigured === false ? 'Push Setup Needed' : pushEnabled ? 'Send Test Push' : 'Enable Alerts'}
                       </button>
                       <button
                         onClick={() => void disablePushNotifications()}
@@ -2388,6 +2785,21 @@ function AppInner() {
                     </button>
                   </div>
                 )}
+
+                <div className="mt-4 px-4 pb-2">
+                  <div className="text-center text-[11px] text-white/45">
+                    Forecast and alerts from NWS/NOAA. Sun times from{' '}
+                    <a
+                      href="https://sunrise-sunset.org/api"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline underline-offset-2"
+                    >
+                      Sunrise-Sunset.org
+                    </a>
+                    .
+                  </div>
+                </div>
               </>
             )}
           </>
@@ -2478,7 +2890,9 @@ function AppInner() {
             <div className={`mb-1 text-center text-xs tracking-wide ${tc.t300}`}>STAY SAFE</div>
             <div className="mb-2 text-center text-2xl font-bold">Enable Notifications</div>
             <div className="mb-6 text-center text-sm text-white/60">
-              Receive instant alerts for severe weather in your area.
+              {pushServerConfigured === false
+                ? pushConfigurationHelp
+                : 'Receive instant alerts for severe weather in your area.'}
             </div>
             <button
               onClick={async () => {
@@ -2486,10 +2900,10 @@ function AppInner() {
                 setShowSetupModal(null)
                 await enablePushNotifications(true)
               }}
-              disabled={pushBusy}
+              disabled={pushBusy || !pushSupported || pushServerConfigured === false}
               className={`w-full rounded-lg ${tc.bg500} py-3 text-sm font-semibold text-white disabled:opacity-50`}
             >
-              {pushBusy ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : 'Enable Notifications'}
+              {pushBusy ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : pushServerConfigured === false ? 'Push Setup Needed' : 'Enable Notifications'}
             </button>
             <button
               onClick={() => { window.localStorage.setItem('lwa_notif_asked_v1', '1'); setShowSetupModal(null) }}

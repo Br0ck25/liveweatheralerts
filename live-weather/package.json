@@ -3,10 +3,11 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
-		"deploy": "wrangler deploy",
-		"dev": "wrangler dev",
-		"start": "wrangler dev",
-		"test": "vitest",
+		"build:public": "npm --prefix ../frontend run build && node ./scripts/prepare-public-assets.mjs",
+		"deploy": "npm run build:public && wrangler deploy",
+		"dev": "npm run build:public && wrangler dev",
+		"start": "npm run build:public && wrangler dev",
+		"test": "npm run build:public && vitest run",
 		"cf-typegen": "wrangler types"
 	},
 	"devDependencies": {

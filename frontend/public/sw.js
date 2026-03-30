@@ -2,7 +2,8 @@
 // Push handler + pass-through fetch; no caching to keep alerts always fresh.
 
 const CACHE_VERSION = 'lwa-v1'
-const DEFAULT_NOTIFICATION_ICON = '/icon-192.svg'
+const DEFAULT_NOTIFICATION_ICON = null
+const PUSH_TEST_STATUS_MESSAGE_TYPE = 'lwa:push-test-status'
 
 self.addEventListener('install', (event) => {
   event.waitUntil(self.skipWaiting())
@@ -39,7 +40,10 @@ function normalizeNotificationAsset(value) {
   if (!text || text.startsWith('/notification-')) {
     return DEFAULT_NOTIFICATION_ICON
   }
-  return text
+  if (text.endsWith('.png') || text.startsWith('data:image/png')) {
+    return text
+  }
+  return DEFAULT_NOTIFICATION_ICON
 }
 
 function buildNotificationTarget(data) {
@@ -79,6 +83,42 @@ function buildNotificationTarget(data) {
   return url.toString()
 }
 
+async function broadcastPushTestStatus(payload) {
+  const clientTestId = typeof payload?.clientTestId === 'string' ? payload.clientTestId.trim() : ''
+  if (!clientTestId) return
+
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+  await Promise.all(
+    clients.map(async (client) => {
+      try {
+        client.postMessage({
+          type: PUSH_TEST_STATUS_MESSAGE_TYPE,
+          clientTestId,
+          status: payload.status,
+          ...(payload.error ? { error: payload.error } : {}),
+        })
+      } catch {
+        // Ignore messaging failures for closed or inaccessible clients.
+      }
+    }),
+  )
+}
+
+async function showWeatherNotification(title, options) {
+  try {
+    await self.registration.showNotification(title, options)
+    return
+  } catch {
+    await self.registration.showNotification(title, {
+      body: options.body,
+      tag: options.tag,
+      data: options.data,
+      renotify: true,
+      requireInteraction: true,
+    })
+  }
+}
+
 self.addEventListener('push', (event) => {
   const payload = safePayload(event)
   const title =
@@ -86,13 +126,13 @@ self.addEventListener('push', (event) => {
       ? payload.title.trim()
       : 'Live Weather Alerts'
 
+  const icon = normalizeNotificationAsset(payload.icon)
+  const badge = normalizeNotificationAsset(payload.badge)
   const options = {
     body:
       typeof payload.body === 'string' && payload.body.trim()
         ? payload.body.trim()
         : 'Tap to open Live Weather Alerts.',
-    icon: normalizeNotificationAsset(payload.icon),
-    badge: normalizeNotificationAsset(payload.badge),
     tag:
       typeof payload.tag === 'string' && payload.tag.trim()
         ? payload.tag.trim()
@@ -102,9 +142,32 @@ self.addEventListener('push', (event) => {
       targetUrl: buildNotificationTarget(payload),
     },
     renotify: true,
+    requireInteraction: true,
+    ...(icon ? { icon } : {}),
+    ...(badge ? { badge } : {}),
   }
+  const clientTestId =
+    typeof payload.clientTestId === 'string' && payload.clientTestId.trim()
+      ? payload.clientTestId.trim()
+      : ''
 
-  event.waitUntil(self.registration.showNotification(title, options))
+  event.waitUntil(
+    showWeatherNotification(title, options)
+      .then(() =>
+        broadcastPushTestStatus({
+          clientTestId,
+          status: 'displayed',
+        }),
+      )
+      .catch(async (error) => {
+        await broadcastPushTestStatus({
+          clientTestId,
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error || 'Notification display failed.'),
+        })
+        throw error
+      }),
+  )
 })
 
 self.addEventListener('notificationclick', (event) => {
