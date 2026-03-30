@@ -136,6 +136,26 @@ describe('Live Weather Admin worker', () => {
 		expect(body).not.toContain('<span class="eyebrow">Live Weather Alerts</span>');
 	});
 
+	it('normalizes marine forecast heading tokens from NWS dot format', () => {
+		const raw = '.TONIGHT...SE wind 10 to 20 kt. Seas 4 to 9 ft. Rain and snow. .MON...E wind 15 to 30 kt. Seas 6 to 10 ft. Rain and snow. .MON NIGHT...NE wind 20 to 35 kt. Seas 10 to 13 ft. .TUE...N wind 20 to 35 kt. Seas 10 to 14 ft. .TUE NIGHT...N wind 15 to 30 kt. Seas 9 to 14 ft. .WED THROUGH FRI...W wind up to 20 kt. Seas 6 to 11 ft.';
+		const formatted = __testing.formatAlertDescription(raw);
+		expect(formatted).toBe(
+			'TONIGHT: SE wind 10 to 20 kt. Seas 4 to 9 ft. Rain and snow.\nMON: E wind 15 to 30 kt. Seas 6 to 10 ft. Rain and snow.\nMON NIGHT: NE wind 20 to 35 kt. Seas 10 to 13 ft.\nTUE: N wind 20 to 35 kt. Seas 10 to 14 ft.\nTUE NIGHT: N wind 15 to 30 kt. Seas 9 to 14 ft.\nWED THROUGH FRI: W wind up to 20 kt. Seas 6 to 11 ft.'
+		);
+	});
+
+	it('removes leading ellipsis in descriptive NWS text lines', () => {
+		const raw = '...RED FLAG WARNINGS ARE IN EFFECT THROUGH MONDAY EVENING FOR MOST OF...\n\nAFFECTED AREA: ...';
+		const formatted = __testing.formatAlertDescription(raw);
+		expect(formatted).toBe('RED FLAG WARNINGS ARE IN EFFECT THROUGH MONDAY EVENING FOR MOST OF\n\nAFFECTED AREA:');
+	});
+
+	it('splits additional details bullets onto separate lines', () => {
+		const raw = 'ADDITIONAL DETAILS: - At 2:00 PM EDT Sunday the stage was 15.5 feet. - Forecast...The river is expected to fall below flood stage tonight. - Flood stage is 15.0 feet. - Please visit www.weather.gov/safety/flood for flood safety and preparedness information.';
+		const formatted = __testing.formatAlertDescription(raw);
+		expect(formatted).toBe('ADDITIONAL DETAILS: - At 2:00 PM EDT Sunday the stage was 15.5 feet.\n- Forecast...The river is expected to fall below flood stage tonight.\n- Flood stage is 15.0 feet.\n- Please visit www.weather.gov/safety/flood for flood safety and preparedness information.');
+	});
+
 	it('serves alert data as JSON at /api/alerts', async () => {
 		const request = new IncomingRequest('https://live-weather.example/api/alerts');
 		const ctx = createExecutionContext();

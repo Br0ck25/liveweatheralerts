@@ -328,14 +328,17 @@ function formatAlertDescription(text: string): string {
 const ALERT_PAGE_BG: Record<string, string> = {
   blue: '#091320', purple: '#0d091e', emerald: '#071510',
   amber: '#150e04', rose: '#17080b', teal: '#071514',
+  white: '#f8fafc', black: '#020611',
 }
 const ALERT_PAGE_CARD: Record<string, string> = {
   blue: 'bg-sky-950/60', purple: 'bg-purple-950/60', emerald: 'bg-emerald-950/60',
   amber: 'bg-amber-950/60', rose: 'bg-rose-950/60', teal: 'bg-teal-950/60',
+  white: 'bg-white/80', black: 'bg-slate-950/80',
 }
 const ALERT_PAGE_ACCENT: Record<string, string> = {
   blue: 'text-sky-400', purple: 'text-purple-400', emerald: 'text-emerald-400',
   amber: 'text-amber-400', rose: 'text-rose-400', teal: 'text-teal-400',
+  white: 'text-slate-700', black: 'text-slate-300',
 }
 
 function AlertDetailPage({ alertId }: { alertId: string }) {
@@ -375,18 +378,27 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
     window.location.reload()
   }
 
+  const textColorCls = theme === 'white' ? 'text-slate-900' : 'text-white'
+  const cardTextCls = theme === 'white' ? 'text-slate-900' : 'text-white'
+  const subtleText = theme === 'white' ? 'text-slate-700' : 'text-white/70'
+  const subtleSecondary = theme === 'white' ? 'text-slate-700/70' : 'text-white/40'
+  const subtleHover = theme === 'white' ? 'hover:text-slate-900' : 'hover:text-white/70'
+  const panelButton = theme === 'white'
+    ? 'border-slate-300 bg-white/10 text-slate-800 hover:bg-white/20'
+    : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10'
+
   return (
-    <div className="min-h-screen text-white" style={{ backgroundColor: pageBg }}>
+    <div className={`min-h-screen ${textColorCls}`} style={{ backgroundColor: pageBg }}>
       <div className="mx-auto min-h-screen w-full max-w-md px-4 pb-28 pt-6">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
           <div>
             <div className={`text-xs tracking-wide ${accentCls} opacity-70`}>LIVE WEATHER ALERTS</div>
-            <div className="text-xs text-white/40 mt-0.5">Alert Detail</div>
+            <div className={`text-xs ${subtleSecondary} mt-0.5`}>Alert Detail</div>
           </div>
           <button
             onClick={() => navTo('alerts')}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/70 hover:bg-white/10 transition-colors"
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs transition-colors ${panelButton}`}
           >
             Open App <ChevronRight className="h-3 w-3" />
           </button>
@@ -394,7 +406,7 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
 
         {loading && (
           <div className="flex items-center justify-center py-24">
-            <Loader2 className="h-8 w-8 animate-spin text-white/40" />
+            <Loader2 className={`h-8 w-8 animate-spin ${subtleSecondary}`} />
           </div>
         )}
 
@@ -405,49 +417,49 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
         )}
 
         {alert && (
-          <div className={`rounded-xl border-l-4 ${cardCls} p-5 ${styles.border}`}>
+          <div className={`rounded-xl border-l-4 ${cardCls} p-5 ${styles.border} ${cardTextCls}`}>
             <div className={`mb-1 text-xs font-semibold uppercase tracking-wide ${styles.label}`}>
               {String(alert.event || 'WEATHER ALERT')}
             </div>
             <div className="text-xl font-bold leading-snug">
               {(alert.event as string) || 'Weather Alert'}
             </div>
-            <div className="mt-1 text-sm text-white/70">
+            <div className={`mt-1 text-sm ${subtleText}`}>
               {(alert.summary as string) || (alert.headline as string) || ''}
             </div>
 
             <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
               {(alert.areaDesc as string) ? (
                 <div>
-                  <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Area</div>
-                  <div className="text-sm text-white/70">{alert.areaDesc as string}</div>
+                  <div className={`mb-1 text-xs font-medium uppercase tracking-wide ${subtleSecondary}`}>Area</div>
+                  <div className={`text-sm ${subtleText}`}>{alert.areaDesc as string}</div>
                 </div>
               ) : null}
               {(alert.description as string) ? (
                 <div>
-                  <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Description</div>
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed text-white/80">
+                  <div className={`mb-1 text-xs font-medium uppercase tracking-wide ${subtleSecondary}`}>Description</div>
+                  <div className={`whitespace-pre-wrap text-sm leading-relaxed ${theme === 'white' ? 'text-slate-600/90' : 'text-white/80'}`}>
                     {formatAlertDescription(alert.description as string)}
                   </div>
                 </div>
               ) : null}
               {(alert.instruction as string) ? (
                 <div>
-                  <div className="mb-1 text-xs font-medium uppercase tracking-wide text-white/40">Instructions</div>
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed text-yellow-200/80">
+                  <div className={`mb-1 text-xs font-medium uppercase tracking-wide ${subtleSecondary}`}>Instructions</div>
+                  <div className={`whitespace-pre-wrap text-sm leading-relaxed ${theme === 'white' ? 'text-yellow-700/80' : 'text-yellow-200/80'}`}>
                     {formatAlertDescription(alert.instruction as string)}
                   </div>
                 </div>
               ) : null}
               {(alert.expires as string) ? (
-                <div className="text-xs text-white/40">
+                <div className={subtleSecondary}>
                   Expires {formatDateTime(alert.expires as string)}
                 </div>
               ) : null}
             </div>
 
             <div className="mt-4 flex items-center justify-between border-t border-white/10 pt-3">
-              <div className="text-xs text-white/40">
+              <div className={subtleSecondary}>
                 Issued {formatDateTime((alert.sent as string) || (alert.updated as string))}
               </div>
               <div className="flex items-center gap-3">
@@ -456,7 +468,7 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
                     href={alert.nwsUrl as string}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-white/40 hover:text-white/70 transition-colors"
+                    className={`${subtleSecondary} ${subtleHover} transition-colors`}
                     aria-label="View on NWS"
                   >
                     <ExternalLink className="h-4 w-4" />
@@ -471,7 +483,7 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
                       await navigator.clipboard.writeText(url).catch(() => {})
                     }
                   }}
-                  className="text-white/40 hover:text-white/70 transition-colors"
+                  className={`${subtleSecondary} ${subtleHover} transition-colors`}
                   aria-label="Share"
                 >
                   <Share2 className="h-4 w-4" />
@@ -494,11 +506,14 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
               { id: 'more',     label: 'More',     icon: MoreHorizontal },
             ] as { id: string; label: string; icon: React.ElementType }[]).map((tab) => {
               const Icon = tab.icon
+              const navButtonClass = theme === 'white'
+                ? 'flex flex-col items-center gap-1 rounded-xl px-2 py-2.5 text-slate-700/80 transition hover:bg-slate-100/30 hover:text-slate-900'
+                : 'flex flex-col items-center gap-1 rounded-xl px-2 py-2.5 text-white/45 transition hover:bg-white/5 hover:text-white/80'
               return (
                 <button
                   key={tab.id}
                   onClick={() => navTo(tab.id)}
-                  className="flex flex-col items-center gap-1 rounded-xl px-2 py-2.5 text-white/45 transition hover:bg-white/5 hover:text-white/80"
+                  className={navButtonClass}
                 >
                   <Icon className="h-4 w-4" />
                   <span className="text-[11px] font-medium">{tab.label}</span>

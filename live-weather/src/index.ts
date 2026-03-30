@@ -542,6 +542,14 @@ function formatAlertDescription(raw: string): string {
 	// Remove NWS bullet asterisks
 	text = text.replace(/^\* /gm, '');
 
+	// Remove leading ellipsis markers from lines (e.g. "...RED FLAG WARNING")
+	text = text.replace(/(^|\n)\s*\.\.\.+\s*/g, '$1');
+
+	// Format ADDITIONAL DETAILS bullet list tokens into distinct lines
+	while (/ADDITIONAL DETAILS:[^\n]*\s+-\s+/i.test(text)) {
+		text = text.replace(/(ADDITIONAL DETAILS:[^\n]*)\s+-\s+/, '$1\n- ');
+	}
+
 	// --- Section header normalization ---
 	// Must happen BEFORE ellipsis stripping so "HAZARD...text" and "WHAT...text" match.
 	//
@@ -564,6 +572,12 @@ function formatAlertDescription(raw: string): string {
 
 	// Normalize "Locations impacted include..." bullet
 	text = text.replace(/\bLocations impacted include\.\.\./gi, 'Locations impacted include:');
+
+	// Extract and normalize marine forecast period headings like ".TONIGHT..." and ".MON..."
+	text = text.replace(/(^|\s)\.([A-Z][A-Z0-9 ]{0,30}?)\.\.\./g, (_match, sep, label) => {
+		const normalized = `${label.trim()}: `;
+		return sep ? `\n${normalized}` : normalized;
+	});
 
 	// Clean up remaining NWS ellipsis punctuation
 	text = text.replace(/\.\.\./g, '');
@@ -6582,6 +6596,7 @@ async function handleScheduled(env: Env): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export const __testing = {
+	formatAlertDescription,
 	normalizeAlertFeature,
 	buildStatePushMessageData,
 	buildLifecyclePushMessageData,
