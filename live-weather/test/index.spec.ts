@@ -33,6 +33,16 @@ describe('Live Weather Admin worker', () => {
 		features: [
 			{
 				id: 'alert-1',
+				geometry: {
+					type: 'Polygon',
+					coordinates: [[
+						[-83.35, 37.12],
+						[-83.2, 37.12],
+						[-83.2, 37.22],
+						[-83.35, 37.22],
+						[-83.35, 37.12],
+					]],
+				},
 				properties: {
 					event: 'Tornado Warning',
 					severity: 'Severe',
@@ -93,6 +103,7 @@ describe('Live Weather Admin worker', () => {
 		let body = await response.text();
 		expect(response.status).toBe(200);
 		expect(body).toContain('Admin Login');
+		expect(body).toContain('ADMIN_PASSWORD');
 
 		const loginBody = new URLSearchParams({ password: 'testpassword' }).toString();
 		const loginRequest = new IncomingRequest('https://live-weather.example/admin/login', {
@@ -106,6 +117,14 @@ describe('Live Weather Admin worker', () => {
 		expect(response.status).toBe(303);
 		const cookie = response.headers.get('set-cookie');
 		expect(cookie).toContain('admin_session=');
+		expect(cookie).toContain('HttpOnly');
+		expect(cookie).toContain('SameSite=Lax');
+		expect(cookie).toContain('Secure');
+		expect(cookie).not.toContain('testpassword');
+
+		const sessionToken = cookie?.match(/admin_session=([^;]+)/)?.[1];
+		expect(sessionToken).toBeTruthy();
+		expect(await goodEnv.WEATHER_KV.get(`admin:session:${decodeURIComponent(sessionToken || '')}`)).not.toBeNull();
 
 		const authRequest = new IncomingRequest('https://live-weather.example/admin', {
 			headers: { Cookie: cookie || '' },
@@ -116,6 +135,37 @@ describe('Live Weather Admin worker', () => {
 		expect(response.status).toBe(200);
 		expect(body).toContain('Live Weather Alerts Admin');
 		expect(body).toContain('Tornado Warning');
+	});
+
+	it('fails closed when ADMIN_PASSWORD is missing', async () => {
+		const loginRequest = new IncomingRequest('https://live-weather.example/admin/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ password: 'liveweather' }).toString(),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(loginRequest, env, ctx);
+		await waitOnExecutionContext(ctx);
+		const body = await response.text();
+		expect(response.status).toBe(503);
+		expect(body).toContain('ADMIN_PASSWORD');
+		expect(response.headers.get('set-cookie')).toBeNull();
+	});
+
+	it('rejects forged admin cookies that mirror the password', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
+		const request = new IncomingRequest('https://live-weather.example/admin/post', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded',
+				Cookie: 'admin_session=LWAUTH%3Atestpassword',
+			},
+			body: new URLSearchParams({ action: 'post_alert', alertId: 'alert-1' }).toString(),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, goodEnv as any, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(401);
 	});
 
 	it('serves a public weather alerts page at /live-weather-alerts', async () => {
@@ -134,6 +184,17 @@ describe('Live Weather Admin worker', () => {
 		expect(body).toContain('>Kentucky<');
 		expect(body).toContain('>Wyoming<');
 		expect(body).not.toContain('<span class="eyebrow">Live Weather Alerts</span>');
+	});
+
+	it('uses liveweatheralerts.com in generated post text and strips the footer link from comment text', () => {
+		const postText = __testing.alertToText(sampleAlerts.features[0].properties);
+		expect(postText).toContain('https://liveweatheralerts.com/live-weather-alerts');
+		expect(postText).not.toContain('localkynews.com');
+
+		const commentText = __testing.buildCommentText(`${postText}\nhttps://example.com/live-weather-alerts`);
+		expect(commentText).not.toContain('https://liveweatheralerts.com/live-weather-alerts');
+		expect(commentText).not.toContain('https://example.com/live-weather-alerts');
+		expect(commentText).not.toContain('#weatheralert');
 	});
 
 	it('normalizes marine forecast heading tokens from NWS dot format', () => {
@@ -171,13 +232,42 @@ describe('Live Weather Admin worker', () => {
 		expect(Array.isArray(json.alerts[0].impactCategories)).toBe(true);
 		expect(json.alerts[0].impactCategories).toEqual(expect.arrayContaining(['tornado', 'wind']));
 		expect(json.alerts[0].isMajor).toBe(true);
-		expect(json.alerts[0].detailUrl).toBe('/alerts/alert-1');
+		expect(json.alerts[0].detailUrl).toBe('/?alert=alert-1');
 		expect(typeof json.alerts[0].summary).toBe('string');
 		expect(typeof json.alerts[0].instructionsSummary).toBe('string');
 		expect(json.meta).toBeTruthy();
 		expect(typeof json.meta.generatedAt).toBe('string');
 		expect(typeof json.meta.stale).toBe('boolean');
 		expect(json.meta.count).toBe(json.alerts.length);
+		expect(
+			(globalThis.fetch as any).mock.calls.some(([, init]: [RequestInfo, RequestInit | undefined]) =>
+				(init as any)?.headers?.['User-Agent'] === 'LiveWeatherAlerts/1.0 (liveweatheralerts.com; alerts@liveweatheralerts.com)',
+			),
+		).toBe(true);
+	});
+
+	it('filters alerts by geospatial radius when lat/lon/radius are provided', async () => {
+		const nearbyRequest = new IncomingRequest(
+			'https://live-weather.example/api/alerts?lat=37.1671&lon=-83.2913&radius=25',
+		);
+		const nearbyCtx = createExecutionContext();
+		const nearbyResponse = await worker.fetch(nearbyRequest, env, nearbyCtx);
+		await waitOnExecutionContext(nearbyCtx);
+		expect(nearbyResponse.status).toBe(200);
+		const nearbyJson = await nearbyResponse.json() as any;
+		expect(nearbyJson.meta.filterMode).toBe('radius');
+		expect(nearbyJson.meta.radiusMiles).toBe(25);
+		expect(nearbyJson.alerts).toHaveLength(1);
+
+		const farRequest = new IncomingRequest(
+			'https://live-weather.example/api/alerts?lat=34.0522&lon=-118.2437&radius=25',
+		);
+		const farCtx = createExecutionContext();
+		const farResponse = await worker.fetch(farRequest, env, farCtx);
+		await waitOnExecutionContext(farCtx);
+		expect(farResponse.status).toBe(200);
+		const farJson = await farResponse.json() as any;
+		expect(farJson.alerts).toHaveLength(0);
 	});
 
 	it('auto-refreshes stale alert cache for localhost /api/alerts requests in local dev', async () => {
@@ -322,7 +412,7 @@ describe('Live Weather Admin worker', () => {
 		expect(foundJson.alert.category).toBe('warning');
 		expect(foundJson.alert.impactCategories).toEqual(expect.arrayContaining(['tornado']));
 		expect(foundJson.alert.isMajor).toBe(true);
-		expect(foundJson.alert.detailUrl).toBe('/alerts/alert-1');
+		expect(foundJson.alert.detailUrl).toBe('/?alert=alert-1');
 		expect(typeof foundJson.alert.summary).toBe('string');
 		expect(typeof foundJson.alert.instructionsSummary).toBe('string');
 		expect(foundJson.meta).toBeTruthy();
@@ -383,10 +473,23 @@ describe('Live Weather Admin worker', () => {
 			},
 		]) as any;
 
-		expect(payload.url).toBe('/alerts/abc%20123');
-		expect(payload.detailUrl).toBe('/alerts/abc%20123');
-		expect(payload.fallbackUrl).toBe('/alerts?state=KY');
+		expect(payload.url).toBe('/?alert=abc%20123');
+		expect(payload.detailUrl).toBe('/?alert=abc%20123');
+		expect(payload.fallbackUrl).toBe('/?tab=alerts&state=KY');
 		expect(payload.alertId).toBe('abc 123');
+	});
+
+	it('redirects legacy app alert paths to the canonical alert detail URL', async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/alerts/abc%20123'),
+			env,
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(302);
+		expect(response.headers.get('location')).toBe('https://live-weather.example/?alert=abc%20123');
 	});
 
 	it('returns filtered lifecycle changes from GET /api/alerts/changes', async () => {
@@ -872,6 +975,69 @@ describe('Live Weather Admin worker', () => {
 		expect(digestBatches[0].length).toBe(2);
 	});
 
+	it('matches radius push scopes against nearby alert geometry even across state delivery buckets', () => {
+		const prefs = __testing.normalizePushPreferences({
+			scopes: [
+				{
+					id: 'ky-radius',
+					label: 'Within 25 mi of Wooton, KY',
+					stateCode: 'KY',
+					deliveryScope: 'radius',
+					centerLat: 37.1671,
+					centerLon: -83.2913,
+					radiusMiles: 25,
+					enabled: true,
+					alertTypes: {
+						warnings: true,
+						watches: true,
+						advisories: false,
+						statements: true,
+					},
+					severeOnly: false,
+				},
+			],
+			quietHours: { enabled: false, start: '22:00', end: '06:00' },
+			deliveryMode: 'immediate',
+		}, 'KY');
+		const radiusScope = prefs.scopes[0];
+		const nearbyFeature = {
+			id: 'tn-alert',
+			geometry: {
+				type: 'Polygon',
+				coordinates: [[
+					[-83.31, 37.11],
+					[-83.19, 37.11],
+					[-83.19, 37.23],
+					[-83.31, 37.23],
+					[-83.31, 37.11],
+				]],
+			},
+			properties: {
+				event: 'Severe Thunderstorm Warning',
+				severity: 'Severe',
+				areaDesc: 'Border County',
+				geocode: { UGC: ['TNC025'] },
+			},
+		};
+		expect(__testing.featureMatchesScope(nearbyFeature, 'TN', radiusScope)).toBe(true);
+		expect(__testing.changeMatchesScope({
+			alertId: 'expired-border-alert',
+			stateCodes: ['TN'],
+			countyCodes: ['025'],
+			event: 'Severe Thunderstorm Warning',
+			areaDesc: 'Border County',
+			lat: 37.17,
+			lon: -83.24,
+			changedAt: '2026-03-29T12:00:00.000Z',
+			changeType: 'expired',
+			severity: 'Severe',
+			category: 'warning',
+			isMajor: true,
+			previousExpires: '2026-03-29T13:00:00.000Z',
+			nextExpires: null,
+		}, radiusScope)).toBe(true);
+	});
+
 	it('uses county FIPS and UGC matching with text fallback for county targeting', () => {
 		const sameOnlyFeature = {
 			properties: {
@@ -1304,6 +1470,68 @@ describe('Live Weather Admin worker', () => {
 		const stateOhIndex = await pushEnv.WEATHER_KV.get('push:index:state:OH');
 		expect(JSON.parse(stateKyIndex || '[]')).toContain(payload.subscriptionId);
 		expect(JSON.parse(stateOhIndex || '[]')).toContain(payload.subscriptionId);
+	});
+
+	it('subscribes with a radius scope and writes the radius index', async () => {
+		const pushEnv = {
+			...env,
+			VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC_KEY,
+			VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY,
+			VAPID_SUBJECT: 'mailto:test@example.com',
+		};
+
+		const request = new IncomingRequest('https://live-weather.example/api/push/subscribe', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				subscription: {
+					...TEST_PUSH_SUBSCRIPTION,
+					endpoint: 'https://push.example/subscription-radius',
+				},
+				prefs: {
+					scopes: [
+						{
+							id: 'scope-ky-radius',
+							label: 'Within 50 mi of Wooton, KY',
+							stateCode: 'KY',
+							deliveryScope: 'radius',
+							centerLat: 37.1671,
+							centerLon: -83.2913,
+							radiusMiles: 50,
+							enabled: true,
+							alertTypes: {
+								warnings: true,
+								watches: true,
+								advisories: false,
+								statements: true,
+							},
+							severeOnly: false,
+						},
+					],
+					quietHours: {
+						enabled: false,
+						start: '22:00',
+						end: '06:00',
+					},
+					deliveryMode: 'immediate',
+				},
+			}),
+		});
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, pushEnv as any, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+
+		const payload = await response.json() as any;
+		expect(payload.ok).toBe(true);
+		expect(payload.prefs.scopes[0].deliveryScope).toBe('radius');
+		expect(payload.prefs.scopes[0].radiusMiles).toBe(50);
+		expect(payload.prefs.scopes[0].centerLat).toBe(37.1671);
+		expect(payload.prefs.scopes[0].centerLon).toBe(-83.2913);
+
+		const radiusIndexRaw = await pushEnv.WEATHER_KV.get('push:index:radius');
+		expect(JSON.parse(radiusIndexRaw || '[]')).toContain(payload.subscriptionId);
 	});
 
 	it('migrates legacy push records on subscribe update and keeps unsubscribe compatible', async () => {

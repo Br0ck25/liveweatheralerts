@@ -48,6 +48,51 @@ type SavedLocation = {
   label: string
 }
 
+type PushAlertTypeKey = 'warnings' | 'watches' | 'advisories' | 'statements'
+
+type PushAlertToggleState = Record<PushAlertTypeKey, boolean>
+
+type PushDeliveryScope = 'state' | 'county' | 'radius'
+
+type PushScopePreference = {
+  id: string
+  placeId?: string | null
+  label: string
+  stateCode: string
+  deliveryScope: PushDeliveryScope
+  countyName?: string | null
+  countyFips?: string | null
+  centerLat?: number | null
+  centerLon?: number | null
+  radiusMiles?: number | null
+  enabled: boolean
+  alertTypes: PushAlertToggleState
+  severeOnly: boolean
+}
+
+type PushPreferences = {
+  scopes: PushScopePreference[]
+  quietHours: {
+    enabled: boolean
+    start: string
+    end: string
+  }
+  deliveryMode: 'immediate' | 'digest'
+  pausedUntil?: string | null
+}
+
+type PushPublicKeyResponse = {
+  publicKey?: string
+  error?: string
+}
+
+type PushMutationResponse = {
+  ok?: boolean
+  error?: string
+  subscriptionId?: string
+  prefs?: PushPreferences
+}
+
 type WorkerWeatherResponse = {
   location?: Record<string, unknown>
   current?: Record<string, unknown>
@@ -58,9 +103,11 @@ type WorkerWeatherResponse = {
 }
 
 type WorkerAlertsResponse = {
-  alerts?: Array<Record<string, unknown>>
+  alerts?: WorkerAlert[]
   meta?: Record<string, unknown>
 }
+
+type WorkerAlert = Record<string, unknown>
 
 const API_BASE =
   import.meta.env.VITE_API_BASE || 'https://live-weather.jamesbrock25.workers.dev'
@@ -322,8 +369,219 @@ function formatAlertDescription(text: string): string {
     .join('\n\n')
 }
 
+function isAppTab(value: string | null): value is AppTab {
+  return !!value && ['home', 'forecast', 'radar', 'alerts', 'more'].includes(value)
+}
+
+function decodeUrlValue(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+function getAlertIdFromLocation(): string | null {
+  try {
+    const url = new URL(window.location.href)
+    const alertFromQuery = url.searchParams.get('alert')
+    if (alertFromQuery) return alertFromQuery
+
+    const pathMatch = url.pathname.match(/^\/alerts\/(.+?)\/?$/)
+    if (pathMatch?.[1]) return decodeUrlValue(pathMatch[1])
+  } catch {
+    // ignore malformed URL
+  }
+
+  return null
+}
+
+function buildAppUrl(options: {
+  alertId?: string | null
+  tab?: AppTab | null
+  state?: string | null
+} = {}): string {
+  const url = new URL(window.location.href)
+  url.pathname = '/'
+  url.search = ''
+
+  const alertId = String(options.alertId || '').trim()
+  if (alertId) {
+    url.searchParams.set('alert', alertId)
+    return url.toString()
+  }
+
+  if (options.tab) {
+    url.searchParams.set('tab', options.tab)
+  }
+
+  const state = String(options.state || '').trim().toUpperCase()
+  if (state) {
+    url.searchParams.set('state', state)
+  }
+
+  return url.toString()
+}
+
+function getInitialActiveTab(): AppTab {
+  try {
+    const url = new URL(window.location.href)
+    const tab = url.searchParams.get('tab')
+    if (isAppTab(tab)) return tab
+    if (url.pathname === '/alerts' || url.pathname === '/alerts/') return 'alerts'
+    if (url.pathname === '/settings' || url.pathname === '/settings/') return 'more'
+  } catch {
+    // ignore malformed URL
+  }
+
+  const stored = window.localStorage.getItem('lwa_active_tab_v1')
+  return isAppTab(stored) ? stored : 'forecast'
+}
+
+function normalizeStoredAlertToggles(input: unknown): PushAlertToggleState {
+  const value = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  const severe = typeof value.severe === 'boolean' ? value.severe : undefined
+  const rain = typeof value.rain === 'boolean' ? value.rain : undefined
+  const lightning = typeof value.lightning === 'boolean' ? value.lightning : undefined
+  const daily = typeof value.daily === 'boolean' ? value.daily : undefined
+
+  return {
+    warnings:
+      typeof value.warnings === 'boolean'
+        ? value.warnings
+        : severe ?? lightning ?? true,
+    watches:
+      typeof value.watches === 'boolean'
+        ? value.watches
+        : severe ?? true,
+    advisories:
+      typeof value.advisories === 'boolean'
+        ? value.advisories
+        : rain ?? severe ?? true,
+    statements:
+      typeof value.statements === 'boolean'
+        ? value.statements
+        : daily ?? true,
+  }
+}
+
+function normalizeStateCode(state: unknown): string | null {
+  const value = String(state || '').trim().toUpperCase()
+  return /^[A-Z]{2}$/.test(value) ? value : null
+}
+
+function normalizeCountyFips(countyCode: unknown): string | null {
+  const digits = String(countyCode ?? '').replace(/\D/g, '')
+  return digits ? digits.padStart(3, '0').slice(-3) : null
+}
+
+function buildPushPreferences(
+  location: SavedLocation | null,
+  alertRadius: 0 | 25 | 50 | 100,
+  alertToggles: PushAlertToggleState,
+): PushPreferences | null {
+  const stateCode = normalizeStateCode(location?.state)
+  if (!stateCode) return null
+
+  const countyFips = normalizeCountyFips(location?.countyCode)
+  const countyName = String(location?.county || '').trim() || null
+  const hasEnabledAlertTypes = Object.values(alertToggles).some(Boolean)
+  const hasRadiusCenter = Number.isFinite(location?.lat) && Number.isFinite(location?.lon)
+  const useRadiusScope = alertRadius > 0 && hasRadiusCenter
+  const useCountyScope = !useRadiusScope && alertRadius === 0 && (!!countyFips || !!countyName)
+  const locationLabel = location?.label || countyName || `${stateCode} local area`
+  const scopeLabel = useRadiusScope
+    ? `Within ${alertRadius} mi of ${locationLabel}`
+    : useCountyScope
+    ? countyName || location?.label || `${stateCode} Local Alerts`
+    : `${stateCode} Alerts`
+
+  return {
+    scopes: [
+      {
+        id: useRadiusScope
+          ? `${stateCode}-radius-${alertRadius}-${Number(location?.lat).toFixed(2)}-${Number(location?.lon).toFixed(2)}`
+          : useCountyScope
+          ? `${stateCode}-county-${countyFips || 'named'}`
+          : `${stateCode}-state-default`,
+        placeId: null,
+        label: scopeLabel,
+        stateCode,
+        deliveryScope: useRadiusScope ? 'radius' : useCountyScope ? 'county' : 'state',
+        countyName: useCountyScope ? countyName : null,
+        countyFips: useCountyScope ? countyFips : null,
+        centerLat: useRadiusScope ? Number(location?.lat?.toFixed(4)) : null,
+        centerLon: useRadiusScope ? Number(location?.lon?.toFixed(4)) : null,
+        radiusMiles: useRadiusScope ? alertRadius : null,
+        enabled: hasEnabledAlertTypes,
+        alertTypes: { ...alertToggles },
+        severeOnly: false,
+      },
+    ],
+    quietHours: {
+      enabled: false,
+      start: '22:00',
+      end: '06:00',
+    },
+    deliveryMode: 'immediate',
+    pausedUntil: null,
+  }
+}
+
+function describePushScope(
+  prefs: PushPreferences | null,
+  location: SavedLocation | null,
+): string {
+  const scope = prefs?.scopes.find((item) => item.enabled) || prefs?.scopes[0]
+  if (!scope) return 'your current area'
+  if (scope.deliveryScope === 'radius') {
+    const miles = Number(scope.radiusMiles)
+    const targetLabel = scope.label || location?.label || `${scope.stateCode} nearby alerts`
+    const cleanTarget = targetLabel.replace(/^Within \d+\s+mi of\s+/i, '')
+    return Number.isFinite(miles) && miles > 0
+      ? `the ${Math.round(miles)}-mile area around ${cleanTarget}`
+      : cleanTarget
+  }
+  if (scope.deliveryScope === 'county') {
+    return scope.countyName || location?.county || location?.label || `${scope.stateCode} local alerts`
+  }
+  return `${scope.stateCode} statewide alerts`
+}
+
+function urlBase64ToArrayBuffer(value: string): ArrayBuffer {
+  const padding = '='.repeat((4 - (value.length % 4)) % 4)
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/')
+  const binary = window.atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes.buffer
+}
+
+async function ensureServiceWorkerRegistration(): Promise<ServiceWorkerRegistration> {
+  if (!('serviceWorker' in navigator)) {
+    throw new Error('Service workers are not supported on this device.')
+  }
+
+  const existing = await navigator.serviceWorker.getRegistration()
+  if (existing) return existing
+
+  const registration = await navigator.serviceWorker.register('/sw.js')
+  try {
+    await navigator.serviceWorker.ready
+  } catch {
+    // Fall back to the registration we just created.
+  }
+  return registration
+}
+
+function serializePushSubscription(subscription: PushSubscription): Record<string, unknown> {
+  return subscription.toJSON() as Record<string, unknown>
+}
+
 // ─── Standalone Alert Detail Page ────────────────────────────────────────────
-// Rendered instead of the main App when ?alert=<id> is in the URL.
+// Rendered instead of the main App when an alert detail route is in the URL.
 // Completely independent of the user's saved location.
 const ALERT_PAGE_BG: Record<string, string> = {
   blue: '#091320', purple: '#0d091e', emerald: '#071510',
@@ -369,13 +627,13 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
   const navBg = NAV_BG[theme] || '#0c1b30'
 
   const navTo = (tab: string) => {
-    try {
-      const u = new URL(window.location.href)
-      u.searchParams.delete('alert')
-      window.history.replaceState(null, '', u.pathname + (u.search || ''))
-    } catch { /* ignore */ }
-    window.localStorage.setItem('lwa_active_tab_v1', tab)
-    window.location.reload()
+    if (isAppTab(tab)) {
+      window.localStorage.setItem('lwa_active_tab_v1', tab)
+      window.location.assign(buildAppUrl({ tab }))
+      return
+    }
+
+    window.location.assign(buildAppUrl())
   }
 
   const textColorCls = theme === 'white' ? 'text-slate-900' : 'text-white'
@@ -476,7 +734,7 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
                 ) : null}
                 <button
                   onClick={async () => {
-                    const url = window.location.href
+                    const url = buildAppUrl({ alertId })
                     if (navigator.share) {
                       try { await navigator.share({ title: String(alert.event || 'Weather Alert'), url }) } catch { /* cancelled */ }
                     } else {
@@ -538,6 +796,53 @@ function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * 2 * Math.asin(Math.sqrt(a))
 }
 
+function isDisplayableAlert(alert: WorkerAlert): boolean {
+  const text = `${String(alert?.event || '')} ${String(alert?.headline || alert?.summary || '')} ${String(alert?.description || '')}`.toLowerCase()
+  return !text.includes('test')
+}
+
+function buildUserUgcSet(location: SavedLocation | null): Set<string> {
+  const countyUgc =
+    location?.countyCode && location?.state
+      ? `${String(location.state).toUpperCase()}C${String(location.countyCode).padStart(3, '0')}`
+      : null
+  const zoneUgc = location?.zoneCode ? String(location.zoneCode).toUpperCase() : null
+  return new Set<string>([
+    ...(countyUgc ? [countyUgc] : []),
+    ...(zoneUgc ? [zoneUgc] : []),
+  ])
+}
+
+function alertMatchesUserUgc(alert: WorkerAlert, userUgcs: Set<string>): boolean {
+  if (userUgcs.size === 0) return false
+  const ugcs = Array.isArray(alert?.ugc) ? (alert.ugc as string[]) : []
+  return ugcs.some((ugc) => userUgcs.has(String(ugc).toUpperCase()))
+}
+
+function filterAlertsByRadius(
+  alerts: WorkerAlert[],
+  location: SavedLocation | null,
+  radiusMiles: number,
+): WorkerAlert[] {
+  if (
+    !location ||
+    !(radiusMiles > 0) ||
+    !Number.isFinite(location?.lat) ||
+    !Number.isFinite(location?.lon)
+  ) return []
+  const centerLat = Number(location.lat)
+  const centerLon = Number(location.lon)
+  const userUgcs = buildUserUgcSet(location)
+  return alerts.filter((alert) => {
+    const lat = Number(alert?.lat)
+    const lon = Number(alert?.lon)
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      return haversineDistance(centerLat, centerLon, lat, lon) <= radiusMiles
+    }
+    return alertMatchesUserUgc(alert, userUgcs)
+  })
+}
+
 const THEMES: Record<string, { t300: string; t400: string; bg500: string; borderAccent: string; bgMuted: string; borderMuted: string; ring: string; iconBg: string; iconBorder: string; hoverBorder: string; extraBorderMuted: string; cardBg: string }> = {
   blue:    { t300: 'text-sky-300',     t400: 'text-sky-400',     bg500: 'bg-sky-500',     borderAccent: 'border-sky-400',     bgMuted: 'bg-sky-500/20',     borderMuted: 'border-sky-400/20',     ring: 'ring-sky-400/70',     iconBg: 'bg-sky-400/10',     iconBorder: 'border-sky-300/10',     hoverBorder: 'hover:border-sky-500/40',     extraBorderMuted: 'border-sky-500/20',     cardBg: 'bg-sky-950/60' },
   purple:  { t300: 'text-purple-300',  t400: 'text-purple-400',  bg500: 'bg-purple-500',  borderAccent: 'border-purple-400',  bgMuted: 'bg-purple-500/20',  borderMuted: 'border-purple-400/20',  ring: 'ring-purple-400/70',  iconBg: 'bg-purple-400/10',  iconBorder: 'border-purple-300/10',  hoverBorder: 'hover:border-purple-500/40',  extraBorderMuted: 'border-purple-500/20',  cardBg: 'bg-purple-950/60' },
@@ -579,10 +884,7 @@ function normalizeAlertCount(alerts: Array<Record<string, unknown>>) {
 }
 
 function AppInner() {
-  const [activeTab, setActiveTab] = useState<AppTab>(() => {
-    const s = window.localStorage.getItem('lwa_active_tab_v1') as AppTab | null
-    return s && ['home','forecast','radar','alerts','more'].includes(s) ? s : 'forecast'
-  })
+  const [activeTab, setActiveTab] = useState<AppTab>(() => getInitialActiveTab())
   const [themeKey, setThemeKey] = useState<string>(
     () => window.localStorage.getItem('lwa_theme_v1') || 'blue'
   )
@@ -596,9 +898,15 @@ function AppInner() {
   const [expandedDayIndex, setExpandedDayIndex] = useState<number | null>(null)
   const [alertsFilter, setAlertsFilter] = useState<'all'|'warning'|'watch'|'advisory'|'statement'>('all')
   const [expandedAlertId, setExpandedAlertId] = useState<string | null>(null)
-  const [alertToggles, setAlertToggles] = useState(() => {
-    try { const s = window.localStorage.getItem('lwa_alert_toggles_v1'); if (s) return JSON.parse(s) as Record<string,boolean> } catch {}
-    return { severe: true, rain: true, lightning: false, daily: true }
+  const [alertToggles, setAlertToggles] = useState<PushAlertToggleState>(() => {
+    try {
+      const stored = window.localStorage.getItem('lwa_alert_toggles_v1')
+      if (stored) return normalizeStoredAlertToggles(JSON.parse(stored))
+    } catch {
+      // ignore malformed local settings
+    }
+
+    return normalizeStoredAlertToggles(null)
   })
   const [showAllAlerts, setShowAllAlerts] = useState(false)
   const [alertsScope, setAlertsScope] = useState<'local' | 'all'>('local')
@@ -611,6 +919,24 @@ function AppInner() {
   )
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const [showInstallBanner, setShowInstallBanner] = useState(false)
+  const [pushEnabled, setPushEnabled] = useState(false)
+  const [pushBusy, setPushBusy] = useState(false)
+  const [pushPermission, setPushPermission] = useState<NotificationPermission | 'unsupported'>(
+    () => ('Notification' in window ? Notification.permission : 'unsupported')
+  )
+  const [radiusAlerts, setRadiusAlerts] = useState<WorkerAlert[] | null>(null)
+  const pushSupported =
+    'Notification' in window &&
+    'serviceWorker' in navigator &&
+    'PushManager' in window
+  const pushPreferences = useMemo(
+    () => buildPushPreferences(location, alertRadius, alertToggles),
+    [location, alertRadius, alertToggles],
+  )
+  const pushScopeLabel = useMemo(
+    () => describePushScope(pushPreferences, location),
+    [pushPreferences, location],
+  )
 
   useEffect(() => {
     const saved = window.localStorage.getItem('lwa_saved_location_v1')
@@ -748,7 +1074,7 @@ function AppInner() {
     const headline = String(alert.headline || alert.summary || '')
     const alertId = String(alert.id || '')
     const siteUrl = alertId
-      ? `${window.location.href.split('?')[0]}?alert=${encodeURIComponent(alertId)}`
+      ? buildAppUrl({ alertId })
       : ''
     const url = siteUrl || String(alert.nwsUrl || '')
     if (navigator.share) {
@@ -762,44 +1088,132 @@ function AppInner() {
     }
   }
 
-  async function sendTestNotification() {
-    if (!('Notification' in window)) {
-      setError('Notifications are not supported on this device.')
+  async function getExistingPushSubscription(): Promise<PushSubscription | null> {
+    if (!pushSupported) return null
+    const registration = await ensureServiceWorkerRegistration()
+    return await registration.pushManager.getSubscription()
+  }
+
+  async function fetchPushPublicKey(): Promise<string> {
+    const response = await fetch(`${API_BASE}/api/push/public-key`)
+    const json = (await response.json()) as PushPublicKeyResponse
+    if (!response.ok || !json?.publicKey) {
+      throw new Error(json?.error || 'Push notifications are not configured on the server.')
+    }
+    return json.publicKey
+  }
+
+  async function savePushSubscription(subscription: PushSubscription, prefs: PushPreferences) {
+    const response = await fetch(`${API_BASE}/api/push/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subscription: serializePushSubscription(subscription),
+        prefs,
+      }),
+    })
+
+    const json = (await response.json()) as PushMutationResponse
+    if (!response.ok || !json?.ok) {
+      throw new Error(json?.error || 'Could not save your push subscription.')
+    }
+  }
+
+  async function requestServerTestPush(subscription: PushSubscription, prefs: PushPreferences) {
+    const response = await fetch(`${API_BASE}/api/push/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subscription: serializePushSubscription(subscription),
+        prefs,
+      }),
+    })
+
+    const json = (await response.json()) as PushMutationResponse
+    if (!response.ok || !json?.ok) {
+      throw new Error(json?.error || 'Could not send a test push notification.')
+    }
+  }
+
+  async function ensurePushSubscription(): Promise<PushSubscription> {
+    if (!pushSupported) {
+      throw new Error('Push notifications are not supported on this device.')
+    }
+    if (!pushPreferences) {
+      throw new Error('Set your location before enabling notifications.')
+    }
+
+    const permission = Notification.permission === 'granted'
+      ? 'granted'
+      : await Notification.requestPermission()
+    setPushPermission(permission)
+
+    if (permission !== 'granted') {
+      if (permission === 'denied') {
+        throw new Error('Notifications are blocked. Enable them in your browser or device settings.')
+      }
+      throw new Error('Notification permission was not granted.')
+    }
+
+    const registration = await ensureServiceWorkerRegistration()
+    let subscription = await registration.pushManager.getSubscription()
+    if (!subscription) {
+      const publicKey = await fetchPushPublicKey()
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToArrayBuffer(publicKey),
+      })
+    }
+
+    await savePushSubscription(subscription, pushPreferences)
+    setPushEnabled(true)
+    return subscription
+  }
+
+  async function enablePushNotifications(sendTest = false) {
+    setPushBusy(true)
+    setError(null)
+    try {
+      const subscription = await ensurePushSubscription()
+      if (sendTest && pushPreferences) {
+        await requestServerTestPush(subscription, pushPreferences)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not enable notifications.')
+    } finally {
+      setPushBusy(false)
+    }
+  }
+
+  async function disablePushNotifications() {
+    if (!pushSupported) {
+      setError('Push notifications are not supported on this device.')
       return
     }
+
+    setPushBusy(true)
+    setError(null)
     try {
-      const perm = await Notification.requestPermission()
-      if (perm === 'granted') {
-        const notifOptions = {
-          body: '\u2705 Test alert \u2014 your notifications are working!',
-          icon: '/icon-192.svg',
-        }
-        let shown = false
-        // Mobile Chrome/Brave require SW-based notifications; new Notification() throws on Android.
-        // Race against a 500 ms timeout so dev (no SW registered) falls back to the constructor.
-        if ('serviceWorker' in navigator) {
-          try {
-            const reg = await Promise.race([
-              navigator.serviceWorker.ready,
-              new Promise<ServiceWorkerRegistration>((_, reject) =>
-                setTimeout(() => reject(new Error('sw-timeout')), 500)
-              ),
-            ])
-            await reg.showNotification('Live Weather Alerts', notifOptions)
-            shown = true
-          } catch {
-            // SW not available — fall through
-          }
-        }
-        if (!shown) {
-          new Notification('Live Weather Alerts', notifOptions)
-        }
-      } else if (perm === 'denied') {
-        setError('Notifications are blocked. Enable them in your browser or device settings.')
+      const subscription = await getExistingPushSubscription()
+      if (subscription) {
+        await fetch(`${API_BASE}/api/push/unsubscribe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: subscription.endpoint }),
+        }).catch(() => {})
+        await subscription.unsubscribe().catch(() => {})
       }
-    } catch {
-      setError('Could not send test notification.')
+      setPushEnabled(false)
+      setPushPermission(Notification.permission)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not disable notifications.')
+    } finally {
+      setPushBusy(false)
     }
+  }
+
+  async function sendTestNotification() {
+    await enablePushNotifications(true)
   }
 
   // Persist settings to localStorage
@@ -807,6 +1221,66 @@ function AppInner() {
   useEffect(() => { window.localStorage.setItem('lwa_theme_v1', themeKey) }, [themeKey])
   useEffect(() => { window.localStorage.setItem('lwa_alert_radius_v1', String(alertRadius)) }, [alertRadius])
   useEffect(() => { window.localStorage.setItem('lwa_alert_toggles_v1', JSON.stringify(alertToggles)) }, [alertToggles])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadPushStatus() {
+      if (!pushSupported) {
+        if (!cancelled) {
+          setPushPermission('unsupported')
+          setPushEnabled(false)
+        }
+        return
+      }
+
+      setPushPermission(Notification.permission)
+
+      try {
+        const subscription = await getExistingPushSubscription()
+        if (!cancelled) {
+          setPushEnabled(Boolean(subscription) && Notification.permission === 'granted')
+        }
+      } catch {
+        if (!cancelled) {
+          setPushEnabled(false)
+        }
+      }
+    }
+
+    void loadPushStatus()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function syncPushPreferences() {
+      if (!pushSupported || !pushEnabled || pushPermission !== 'granted' || !pushPreferences) {
+        return
+      }
+
+      try {
+        const subscription = await getExistingPushSubscription()
+        if (!subscription) {
+          if (!cancelled) setPushEnabled(false)
+          return
+        }
+        await savePushSubscription(subscription, pushPreferences)
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Could not sync your notification settings.')
+        }
+      }
+    }
+
+    void syncPushPreferences()
+    return () => {
+      cancelled = true
+    }
+  }, [pushEnabled, pushPermission, pushPreferences, pushSupported])
 
   // PWA install banner
   useEffect(() => {
@@ -890,11 +1364,48 @@ function AppInner() {
   // Filter out test alerts and messages that include 'test'.
   const alerts = useMemo(() => {
     const raw = alertsData?.alerts ?? []
-    return raw.filter((alert) => {
-      const text = `${String(alert?.event || '')} ${String(alert?.headline || alert?.summary || '')} ${String(alert?.description || '')}`.toLowerCase()
-      return !text.includes('test')
-    })
+    return raw.filter(isDisplayableAlert)
   }, [alertsData?.alerts])
+
+  useEffect(() => {
+    if (
+      !location ||
+      alertRadius === 0 ||
+      !Number.isFinite(location?.lat) ||
+      !Number.isFinite(location?.lon)
+    ) {
+      setRadiusAlerts(null)
+      return
+    }
+
+    const lat = Number(location.lat)
+    const lon = Number(location.lon)
+    let cancelled = false
+
+    async function loadRadiusAlerts() {
+      setRadiusAlerts(null)
+      try {
+        const url = `${API_BASE}/api/alerts?lat=${lat}&lon=${lon}&radius=${alertRadius}`
+        const res = await fetch(url)
+        const json = (await res.json()) as WorkerAlertsResponse & { error?: string }
+        if (!res.ok) {
+          throw new Error(json?.error || 'Could not load nearby alerts.')
+        }
+        if (!cancelled) {
+          setRadiusAlerts((json.alerts ?? []).filter(isDisplayableAlert))
+        }
+      } catch (err) {
+        console.error('Radius alert filtering failed:', err)
+        if (!cancelled) setRadiusAlerts(null)
+      }
+    }
+
+    void loadRadiusAlerts()
+
+    return () => {
+      cancelled = true
+    }
+  }, [alertRadius, location?.lat, location?.lon])
 
   const localAlerts = useMemo(() => {
     if (!location?.state) return []
@@ -908,36 +1419,29 @@ function AppInner() {
     })
   }, [alerts, location])
 
+  const radiusFallbackAlerts = useMemo(() => {
+    if (alertRadius === 0) return []
+    return filterAlertsByRadius(alerts, location, alertRadius)
+  }, [alerts, location, alertRadius])
+
   // County/radius-filtered alerts for the home screen
   // alertRadius=0 → UGC county+zone matching (precise)
-  // alertRadius>0 → show all state-level alerts (user opted into wider view)
+  // alertRadius>0 → alerts whose geometry intersects the selected radius
   const countyAlerts = useMemo(() => {
-    // Radius mode: return all state-level alerts unfiltered
-    if (alertRadius > 0) return localAlerts
+    if (alertRadius > 0) {
+      return radiusAlerts ?? radiusFallbackAlerts
+    }
 
-    const countyUgc =
-      location?.countyCode && location?.state
-        ? `${String(location.state).toUpperCase()}C${String(location.countyCode).padStart(3, '0')}`
-        : null
-    const zoneUgc = location?.zoneCode ? String(location.zoneCode).toUpperCase() : null
-
-    // Build set of UGC codes that apply to this user
-    const userUgcs = new Set<string>([
-      ...(countyUgc ? [countyUgc] : []),
-      ...(zoneUgc ? [zoneUgc] : []),
-    ])
+    const userUgcs = buildUserUgcSet(location)
 
     if (userUgcs.size > 0) {
-      const byUgc = localAlerts.filter((alert) => {
-        const ugcs = Array.isArray(alert?.ugc) ? (alert.ugc as string[]) : []
-        return ugcs.some((u) => userUgcs.has(String(u).toUpperCase()))
-      })
+      const byUgc = localAlerts.filter((alert) => alertMatchesUserUgc(alert, userUgcs))
       if (byUgc.length > 0) return byUgc
     }
 
     // No county code available yet (still geocoding) — fall back to state-level
     return localAlerts
-  }, [localAlerts, location, alertRadius])
+  }, [localAlerts, location, alertRadius, radiusAlerts, radiusFallbackAlerts])
 
   const scopedAlerts = useMemo(() => {
     return alertsScope === 'local' ? countyAlerts : alerts
@@ -948,12 +1452,12 @@ function AppInner() {
     return daily.map((day) => {
       const dayStart = new Date(String(day?.startTime || '')).getTime()
       if (!Number.isFinite(dayStart)) return []
-      return localAlerts.filter((alert) => {
+      return countyAlerts.filter((alert) => {
         const expires = Date.parse(String(alert?.expires || '0'))
         return Number.isFinite(expires) && expires > dayStart
       })
     })
-  }, [daily, localAlerts])
+  }, [daily, countyAlerts])
 
   const filteredAlerts = useMemo(() => {
     return scopedAlerts
@@ -1793,13 +2297,16 @@ function AppInner() {
                   <div className="mb-3 text-sm font-semibold tracking-wide text-white/70">
                     ALERT SETTINGS
                   </div>
+                  <div className="mb-2 text-xs text-white/45">
+                    These categories sync to your live push subscription.
+                  </div>
                   <div className="space-y-2">
                     {(
                       [
-                        { key: 'severe' as const, label: 'Severe Weather Alerts', desc: 'Warnings, watches & advisories for your area' },
-                        { key: 'rain' as const, label: 'Rain Alerts', desc: 'Heavy precipitation notifications' },
-                        { key: 'lightning' as const, label: 'Lightning Alerts', desc: 'Thunderstorm & lightning warnings' },
-                        { key: 'daily' as const, label: 'Daily Forecast', desc: 'Morning forecast summary' },
+                        { key: 'warnings' as const, label: 'Warnings', desc: 'Highest-priority weather alerts' },
+                        { key: 'watches' as const, label: 'Watches', desc: 'Potentially dangerous weather developing' },
+                        { key: 'advisories' as const, label: 'Advisories', desc: 'Lower-severity but actionable alerts' },
+                        { key: 'statements' as const, label: 'Statements', desc: 'Status updates and supporting alert messages' },
                       ]
                     ).map((item) => (
                       <button
@@ -1827,16 +2334,41 @@ function AppInner() {
                   <div className="mb-3 text-sm font-semibold tracking-wide text-white/70">
                     NOTIFICATIONS
                   </div>
-                  <button
-                    onClick={sendTestNotification}
-                    className={`flex w-full items-center justify-between rounded-xl border border-white/10 ${tc.cardBg} p-4 text-left ${tc.hoverBorder} transition-colors`}
-                  >
-                    <div>
-                      <div className="text-sm font-medium">Send Test Notification</div>
-                      <div className="mt-1 text-xs text-white/45">Make sure alerts will come through</div>
+                  <div className={`rounded-xl border border-white/10 ${tc.cardBg} p-4`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium">
+                          {pushEnabled ? 'Push Alerts Enabled' : 'Push Alerts Disabled'}
+                        </div>
+                        <div className="mt-1 text-xs text-white/45">
+                          {!pushSupported
+                            ? 'This browser does not support push notifications.'
+                            : pushPermission === 'denied'
+                              ? 'Notifications are blocked in browser settings.'
+                              : pushEnabled
+                                ? `Live alerts are active for ${pushScopeLabel}.`
+                                : 'Enable push notifications to receive live weather alerts on this device.'}
+                        </div>
+                      </div>
+                      <Bell className={`h-5 w-5 shrink-0 ${tc.t400}`} />
                     </div>
-                    <Bell className={`h-5 w-5 ${tc.t400}`} />
-                  </button>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => void sendTestNotification()}
+                        disabled={pushBusy || !pushSupported}
+                        className={`rounded-lg ${tc.bg500} px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50`}
+                      >
+                        {pushBusy ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : pushEnabled ? 'Send Test Push' : 'Enable Alerts'}
+                      </button>
+                      <button
+                        onClick={() => void disablePushNotifications()}
+                        disabled={pushBusy || !pushEnabled}
+                        className={`rounded-lg border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-medium text-white/80 disabled:opacity-50`}
+                      >
+                        Disable Alerts
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 {installPrompt && (
@@ -1952,11 +2484,12 @@ function AppInner() {
               onClick={async () => {
                 window.localStorage.setItem('lwa_notif_asked_v1', '1')
                 setShowSetupModal(null)
-                await sendTestNotification()
+                await enablePushNotifications(true)
               }}
-              className={`w-full rounded-lg ${tc.bg500} py-3 text-sm font-semibold text-white`}
+              disabled={pushBusy}
+              className={`w-full rounded-lg ${tc.bg500} py-3 text-sm font-semibold text-white disabled:opacity-50`}
             >
-              Enable Notifications
+              {pushBusy ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : 'Enable Notifications'}
             </button>
             <button
               onClick={() => { window.localStorage.setItem('lwa_notif_asked_v1', '1'); setShowSetupModal(null) }}
@@ -1972,9 +2505,7 @@ function AppInner() {
 }
 
 export default function App() {
-  const alertIdParam = (() => {
-    try { return new URLSearchParams(window.location.search).get('alert') || null } catch { return null }
-  })()
+  const alertIdParam = getAlertIdFromLocation()
   if (alertIdParam) return <AlertDetailPage alertId={alertIdParam} />
   return <AppInner />
 }

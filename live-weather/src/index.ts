@@ -25,21 +25,25 @@ interface Env {
 // ETags mean a 304 (nothing changed) costs almost nothing.
 // Contact info in User-Agent is per NWS guidelines — they email you instead of silently blocking.
 const WEATHER_API    = 'https://api.weather.gov/alerts/active';
-const NWS_USER_AGENT = 'LocalKYNews/1.0 (localkynews.com; news@localkynews.com)';
+const NWS_USER_AGENT = 'LiveWeatherAlerts/1.0 (liveweatheralerts.com; alerts@liveweatheralerts.com)';
 const NWS_ACCEPT     = 'application/geo+json,application/json';
 const FB_GRAPH_API   = 'https://graph.facebook.com/v17.0';
 const DEFAULT_WEATHER_LAT = 41.8781;
 const DEFAULT_WEATHER_LON = -87.6298;
 const PRIMARY_APP_ORIGIN = 'https://liveweatheralerts.com';
 const WWW_APP_ORIGIN = 'https://www.liveweatheralerts.com';
+const PUBLIC_ALERTS_PAGE_PATH = '/live-weather-alerts';
+const PUBLIC_ALERTS_PAGE_URL = new URL(PUBLIC_ALERTS_PAGE_PATH, PRIMARY_APP_ORIGIN).toString();
 
 // KV keys
 const KV_ALERT_MAP  = 'alerts:map';       // JSON: Record<alertId, feature> — merged active alerts
 const KV_ETAG       = 'alerts:etag';      // Last ETag string from NWS
 const KV_LAST_POLL  = 'alerts:last-poll'; // ISO timestamp of last successful poll
 const KV_FB_APP_CONFIG = 'fb:app-config';  // JSON: { appId, appSecret }
+const KV_ADMIN_SESSION_PREFIX = 'admin:session:'; // admin:session:{opaqueToken}
 const KV_PUSH_SUB_PREFIX = 'push:sub:'; // push:sub:{sha256(endpoint)}
 const KV_PUSH_STATE_INDEX_PREFIX = 'push:index:state:'; // push:index:state:{stateCode}
+const KV_PUSH_RADIUS_INDEX = 'push:index:radius'; // JSON: string[] of subscription ids with enabled radius scopes
 const KV_PUSH_STATE_ALERT_SNAPSHOT = 'push:state-alert-snapshot:v1'; // JSON: Record<stateCode, alertId[]>
 const KV_ALERT_LIFECYCLE_SNAPSHOT = 'alerts:lifecycle-snapshot:v1'; // JSON: Record<alertId, AlertLifecycleSnapshotEntry>
 const KV_ALERT_CHANGES = 'alerts:changes:v1'; // JSON: AlertChangeRecord[]
@@ -48,6 +52,8 @@ const KV_OPERATIONAL_DIAGNOSTICS = 'ops:diagnostics:v1'; // JSON: OperationalDia
 const ALERT_HISTORY_RETENTION_DAYS = 14;
 const ALERT_HISTORY_MAX_QUERY_DAYS = 14;
 const MAX_RECENT_PUSH_FAILURES = 20;
+const ADMIN_SESSION_COOKIE = 'admin_session';
+const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
 // KV thread keys: thread:{ugc}:{eventSlug} — tracks active FB post threads per county+alertType
 // e.g. thread:KYC195:severe_thunderstorm_warning
 
@@ -65,6 +71,11 @@ interface FbAppConfig {
 	appSecret?: string;
 }
 
+interface AdminSessionRecord {
+	createdAt: string;
+	passwordHash: string;
+}
+
 type PushAlertTypes = {
 	warnings: boolean;
 	watches: boolean;
@@ -72,7 +83,7 @@ type PushAlertTypes = {
 	statements: boolean;
 };
 
-type PushDeliveryScope = 'state' | 'county';
+type PushDeliveryScope = 'state' | 'county' | 'radius';
 type PushDeliveryMode = 'immediate' | 'digest';
 
 type PushQuietHours = {
@@ -89,6 +100,9 @@ type PushScope = {
 	deliveryScope: PushDeliveryScope;
 	countyName?: string | null;
 	countyFips?: string | null;
+	centerLat?: number | null;
+	centerLon?: number | null;
+	radiusMiles?: number | null;
 	enabled: boolean;
 	alertTypes: PushAlertTypes;
 	severeOnly: boolean;
@@ -117,6 +131,9 @@ type LegacyPushPreferences = {
 	deliveryScope?: PushDeliveryScope;
 	countyName?: string | null;
 	countyFips?: string | null;
+	centerLat?: number | null;
+	centerLon?: number | null;
+	radiusMiles?: number | null;
 	alertTypes?: Partial<PushAlertTypes>;
 	quietHours?: Partial<PushQuietHours>;
 	severeOnly?: boolean;
@@ -157,6 +174,8 @@ type AlertChangeRecord = {
 	countyCodes: string[];
 	event: string;
 	areaDesc: string;
+	lat?: number | null;
+	lon?: number | null;
 	changedAt: string;
 	changeType: AlertChangeType;
 	severity?: string | null;
@@ -172,6 +191,8 @@ type AlertLifecycleSnapshotEntry = {
 	countyCodes: string[];
 	event: string;
 	areaDesc: string;
+	lat?: number | null;
+	lon?: number | null;
 	headline: string;
 	description: string;
 	instruction: string;
@@ -350,7 +371,14 @@ function buildCommentText(text: string): string {
 	const filtered = lines.filter(line => {
 		const trimmed = line.trim();
 		if (trimmed.startsWith('#')) return false;
-		if (trimmed.includes('localkynews.com')) return false;
+		if (/^https?:\/\//i.test(trimmed)) {
+			try {
+				const url = new URL(trimmed);
+				if (url.pathname.replace(/\/+$/, '') === PUBLIC_ALERTS_PAGE_PATH) return false;
+			} catch {
+				// Ignore malformed URLs and keep the line.
+			}
+		}
 		return true;
 	});
 	while (filtered.length > 0 && filtered[filtered.length - 1].trim() === '') {
@@ -394,17 +422,63 @@ function findProperty(p: any, key: string): unknown {
 	return undefined;
 }
 
-function authToken(password: string): string {
-	return `LWAUTH:${password}`;
+function getAdminPassword(env: Env): string | null {
+	const password = String(env.ADMIN_PASSWORD || '').trim();
+	return password || null;
 }
 
-function isAuthenticated(request: Request, env: Env): boolean {
+function adminSessionKvKey(sessionId: string): string {
+	return `${KV_ADMIN_SESSION_PREFIX}${sessionId}`;
+}
+
+function getCookieValue(request: Request, name: string): string | null {
 	const cookie = request.headers.get('cookie') || '';
-	const auth = cookie.split(';').map((kv) => kv.trim()).find((kv) => kv.startsWith('admin_session='));
-	if (!auth) return false;
-	const token = auth.split('=')[1] || '';
-	const secret = env.ADMIN_PASSWORD || 'liveweather';
-	return token === encodeURIComponent(authToken(secret));
+	const cookieEntry = cookie.split(';').map((kv) => kv.trim()).find((kv) => kv.startsWith(`${name}=`));
+	if (!cookieEntry) return null;
+	const rawValue = cookieEntry.slice(name.length + 1);
+	if (!rawValue) return null;
+	try {
+		return decodeURIComponent(rawValue);
+	} catch {
+		return rawValue;
+	}
+}
+
+function generateOpaqueToken(byteLength = 32): string {
+	const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function createAdminSession(env: Env, adminPassword: string): Promise<string> {
+	const sessionId = generateOpaqueToken();
+	const record: AdminSessionRecord = {
+		createdAt: new Date().toISOString(),
+		passwordHash: await sha256Hex(adminPassword),
+	};
+	await env.WEATHER_KV.put(adminSessionKvKey(sessionId), JSON.stringify(record), {
+		expirationTtl: ADMIN_SESSION_TTL_SECONDS,
+	});
+	return sessionId;
+}
+
+function buildAdminSessionCookie(request: Request, sessionId: string): string {
+	const secureAttribute = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+	return `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${ADMIN_SESSION_TTL_SECONDS}${secureAttribute}`;
+}
+
+async function isAuthenticated(request: Request, env: Env): Promise<boolean> {
+	const adminPassword = getAdminPassword(env);
+	if (!adminPassword) return false;
+	const sessionId = getCookieValue(request, ADMIN_SESSION_COOKIE);
+	if (!sessionId) return false;
+	const rawRecord = await env.WEATHER_KV.get(adminSessionKvKey(sessionId));
+	if (!rawRecord) return false;
+	try {
+		const record = JSON.parse(rawRecord) as Partial<AdminSessionRecord>;
+		return record.passwordHash === await sha256Hex(adminPassword);
+	} catch {
+		return false;
+	}
 }
 
 function getDebugSummaryBearerToken(env: Env): string | null {
@@ -858,6 +932,24 @@ function normalizeCountyName(input: unknown): string | null {
 	return value ? value : null;
 }
 
+function normalizeLatitude(input: unknown): number | null {
+	const value = Number(input);
+	if (!Number.isFinite(value) || value < -90 || value > 90) return null;
+	return Number(value.toFixed(4));
+}
+
+function normalizeLongitude(input: unknown): number | null {
+	const value = Number(input);
+	if (!Number.isFinite(value) || value < -180 || value > 180) return null;
+	return Number(value.toFixed(4));
+}
+
+function normalizeRadiusMiles(input: unknown): number | null {
+	const value = Number(input);
+	if (!Number.isFinite(value) || value <= 0) return null;
+	return Number(value.toFixed(2));
+}
+
 function normalizePushAlertTypes(input: unknown): PushAlertTypes {
 	const value = input as Record<string, unknown> | null;
 	return {
@@ -890,13 +982,29 @@ function createPushScopeId(
 	stateCode: string,
 	deliveryScope: PushDeliveryScope,
 	countyFips: string | null,
+	radiusMiles: number | null,
+	centerLat: number | null,
+	centerLon: number | null,
 	indexHint: number,
 ): string {
+	const encodeCoordinate = (value: number | null): string =>
+		value == null ? 'na' : String(value.toFixed(2)).replace('-', 'm').replace('.', '_');
 	const suffix =
 		deliveryScope === 'county'
 			? countyFips || `county-${indexHint + 1}`
-			: `state-${indexHint + 1}`;
+			: deliveryScope === 'radius'
+				? `radius-${radiusMiles ?? 'custom'}-${encodeCoordinate(centerLat)}-${encodeCoordinate(centerLon)}`
+				: `state-${indexHint + 1}`;
 	return `${stateCode}-${deliveryScope}-${suffix}`;
+}
+
+function pushScopeHasRadius(scope: PushScope): boolean {
+	return (
+		scope.deliveryScope === 'radius'
+		&& normalizeRadiusMiles(scope.radiusMiles) != null
+		&& normalizeLatitude(scope.centerLat) != null
+		&& normalizeLongitude(scope.centerLon) != null
+	);
 }
 
 function normalizePushScope(
@@ -911,21 +1019,32 @@ function normalizePushScope(
 	if (!stateCode) return null;
 
 	const requestedDeliveryScope =
-		value.deliveryScope === 'county' ? 'county' : 'state';
+		value.deliveryScope === 'county'
+			? 'county'
+			: value.deliveryScope === 'radius'
+				? 'radius'
+				: 'state';
 	const countyFips = normalizeCountyFips(value.countyFips);
 	const countyName = normalizeCountyName(value.countyName);
+	const centerLat = normalizeLatitude(value.centerLat);
+	const centerLon = normalizeLongitude(value.centerLon);
+	const radiusMiles = normalizeRadiusMiles(value.radiusMiles);
 
 	const deliveryScope: PushDeliveryScope =
-		requestedDeliveryScope === 'county' && (countyFips || countyName)
+		requestedDeliveryScope === 'radius' && centerLat != null && centerLon != null && radiusMiles != null
+			? 'radius'
+			: requestedDeliveryScope === 'county' && (countyFips || countyName)
 			? 'county'
 			: 'state';
 	const scopeId =
 		String(value.id ?? '').trim() ||
-		createPushScopeId(stateCode, deliveryScope, countyFips, indexHint);
+		createPushScopeId(stateCode, deliveryScope, countyFips, radiusMiles, centerLat, centerLon, indexHint);
 	const placeIdValue = String(value.placeId ?? '').trim();
 	const placeId = placeIdValue ? placeIdValue : null;
 	const fallbackLabel =
-		deliveryScope === 'county'
+		deliveryScope === 'radius'
+			? `Within ${radiusMiles ?? 0} mi of ${stateCode}`
+			: deliveryScope === 'county'
 			? `${stateCode} ${countyName || `County ${countyFips || ''}`.trim()}`.trim()
 			: `${stateCode} Alerts`;
 	const scopeLabel = String(value.label ?? '').trim() || fallbackLabel;
@@ -938,6 +1057,9 @@ function normalizePushScope(
 		deliveryScope,
 		countyName,
 		countyFips,
+		centerLat: deliveryScope === 'radius' ? centerLat : null,
+		centerLon: deliveryScope === 'radius' ? centerLon : null,
+		radiusMiles: deliveryScope === 'radius' ? radiusMiles : null,
 		enabled: value.enabled !== false,
 		alertTypes: normalizePushAlertTypes(value.alertTypes),
 		severeOnly: value.severeOnly === true,
@@ -953,6 +1075,9 @@ function createDefaultPushScope(stateCode: string): PushScope {
 		deliveryScope: 'state',
 		countyName: null,
 		countyFips: null,
+		centerLat: null,
+		centerLon: null,
+		radiusMiles: null,
 		enabled: true,
 		alertTypes: { ...DEFAULT_PUSH_ALERT_TYPES },
 		severeOnly: false,
@@ -991,25 +1116,50 @@ function normalizePushPreferences(
 		if (legacyState) {
 			const legacy = value as LegacyPushPreferences;
 			const legacyDeliveryScope =
-				legacy.deliveryScope === 'county' ? 'county' : 'state';
+				legacy.deliveryScope === 'county'
+					? 'county'
+					: legacy.deliveryScope === 'radius'
+						? 'radius'
+						: 'state';
 			const legacyCountyFips = normalizeCountyFips(legacy.countyFips);
 			const legacyCountyName = normalizeCountyName(legacy.countyName);
+			const legacyCenterLat = normalizeLatitude(legacy.centerLat);
+			const legacyCenterLon = normalizeLongitude(legacy.centerLon);
+			const legacyRadiusMiles = normalizeRadiusMiles(legacy.radiusMiles);
 			const deliveryScope: PushDeliveryScope =
-				legacyDeliveryScope === 'county' && (legacyCountyFips || legacyCountyName)
+				legacyDeliveryScope === 'radius'
+					&& legacyCenterLat != null
+					&& legacyCenterLon != null
+					&& legacyRadiusMiles != null
+					? 'radius'
+					: legacyDeliveryScope === 'county' && (legacyCountyFips || legacyCountyName)
 					? 'county'
 					: 'state';
 
 			scopes = [
 				{
 					...createDefaultPushScope(legacyState),
-					id: createPushScopeId(legacyState, deliveryScope, legacyCountyFips, 0),
+					id: createPushScopeId(
+						legacyState,
+						deliveryScope,
+						legacyCountyFips,
+						legacyRadiusMiles,
+						legacyCenterLat,
+						legacyCenterLon,
+						0,
+					),
 					label:
-						deliveryScope === 'county'
+						deliveryScope === 'radius'
+							? `Within ${legacyRadiusMiles ?? 0} mi of ${legacyState}`
+							: deliveryScope === 'county'
 							? `${legacyState} ${legacyCountyName || `County ${legacyCountyFips || ''}`.trim()}`.trim()
 							: `${legacyState} Alerts`,
 					deliveryScope,
 					countyName: legacyCountyName,
 					countyFips: legacyCountyFips,
+					centerLat: deliveryScope === 'radius' ? legacyCenterLat : null,
+					centerLon: deliveryScope === 'radius' ? legacyCenterLon : null,
+					radiusMiles: deliveryScope === 'radius' ? legacyRadiusMiles : null,
 					alertTypes: normalizePushAlertTypes(legacy.alertTypes),
 					severeOnly: legacy.severeOnly === true,
 				},
@@ -1046,6 +1196,10 @@ function indexedStateCodesFromPreferences(prefs: PushPreferences): string[] {
 		.map((scope) => normalizeStateCode(scope.stateCode))
 		.filter((code): code is string => !!code);
 	return dedupeStrings(states);
+}
+
+function prefsHaveEnabledRadiusScopes(prefs: PushPreferences): boolean {
+	return prefs.scopes.some((scope) => scope.enabled && pushScopeHasRadius(scope));
 }
 
 function firstStateCodeFromPreferences(prefs: PushPreferences): string | null {
@@ -1107,6 +1261,40 @@ async function readPushStateIndex(env: Env, stateCode: string): Promise<string[]
 	} catch {
 		return [];
 	}
+}
+
+async function readPushRadiusIndex(env: Env): Promise<string[]> {
+	try {
+		const raw = await env.WEATHER_KV.get(KV_PUSH_RADIUS_INDEX);
+		if (!raw) return [];
+		const parsed = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		return dedupeStrings(parsed.map((value) => String(value)));
+	} catch {
+		return [];
+	}
+}
+
+async function writePushRadiusIndex(env: Env, subscriptionIds: string[]): Promise<void> {
+	const ids = dedupeStrings(subscriptionIds);
+	if (ids.length === 0) {
+		await env.WEATHER_KV.delete(KV_PUSH_RADIUS_INDEX);
+		return;
+	}
+	await env.WEATHER_KV.put(KV_PUSH_RADIUS_INDEX, JSON.stringify(ids));
+}
+
+async function addPushIdToRadiusIndex(env: Env, subscriptionId: string): Promise<void> {
+	const current = await readPushRadiusIndex(env);
+	if (current.includes(subscriptionId)) return;
+	current.push(subscriptionId);
+	await writePushRadiusIndex(env, current);
+}
+
+async function removePushIdFromRadiusIndex(env: Env, subscriptionId: string): Promise<void> {
+	const current = await readPushRadiusIndex(env);
+	const next = current.filter((id) => id !== subscriptionId);
+	await writePushRadiusIndex(env, next);
 }
 
 async function writePushStateIndex(env: Env, stateCode: string, subscriptionIds: string[]): Promise<void> {
@@ -1319,6 +1507,16 @@ function alertMatchesScopeCounty(feature: any, scope: PushScope): boolean {
 	return cleanCountyToken(areaDesc).includes(countyName);
 }
 
+function alertMatchesScopeRadius(feature: any, scope: PushScope): boolean {
+	if (!pushScopeHasRadius(scope)) return false;
+	return alertIntersectsRadius(
+		feature,
+		Number(scope.centerLat),
+		Number(scope.centerLon),
+		Number(scope.radiusMiles),
+	);
+}
+
 function alertMatchesSevereOnly(feature: any): boolean {
 	const event = String(feature?.properties?.event || '').toLowerCase();
 	const severity = String(feature?.properties?.severity || '').toLowerCase();
@@ -1335,10 +1533,11 @@ function alertMatchesSevereOnly(feature: any): boolean {
 
 function featureMatchesScope(feature: any, stateCode: string, scope: PushScope): boolean {
 	if (!scope.enabled) return false;
-	if (normalizeStateCode(scope.stateCode) !== stateCode) return false;
+	if (scope.deliveryScope !== 'radius' && normalizeStateCode(scope.stateCode) !== stateCode) return false;
 	const event = String(feature?.properties?.event || '');
 	if (!alertMatchesTypePrefs(event, scope.alertTypes)) return false;
 	if (scope.severeOnly && !alertMatchesSevereOnly(feature)) return false;
+	if (scope.deliveryScope === 'radius') return alertMatchesScopeRadius(feature, scope);
 	if (!alertMatchesScopeCounty(feature, scope)) return false;
 	return true;
 }
@@ -1375,6 +1574,9 @@ async function upsertPushSubscriptionRecord(
 			deliveryScope: 'state',
 			countyName: null,
 			countyFips: null,
+			centerLat: null,
+			centerLon: null,
+			radiusMiles: null,
 			enabled: true,
 		};
 		nextPrefs = {
@@ -1400,6 +1602,7 @@ async function upsertPushSubscriptionRecord(
 	await env.WEATHER_KV.put(pushSubKey(subscriptionId), JSON.stringify(record));
 
 	const previousIndexedStateCodes = existing?.indexedStateCodes || [];
+	const shouldBeRadiusIndexed = prefsHaveEnabledRadiusScopes(nextPrefs);
 	const allKnownStateCodes = dedupeStrings([
 		...Object.keys(STATE_CODE_TO_NAME),
 		...previousIndexedStateCodes,
@@ -1420,17 +1623,29 @@ async function upsertPushSubscriptionRecord(
 		}
 	}
 
+	const currentlyRadiusIndexed = (await readPushRadiusIndex(env)).includes(subscriptionId);
+	if (shouldBeRadiusIndexed && !currentlyRadiusIndexed) {
+		await addPushIdToRadiusIndex(env, subscriptionId);
+	}
+	if (!shouldBeRadiusIndexed && currentlyRadiusIndexed) {
+		await removePushIdFromRadiusIndex(env, subscriptionId);
+	}
+
 	return record;
 }
 
 async function removePushSubscriptionById(env: Env, subscriptionId: string): Promise<boolean> {
 	const existing = await readPushSubscriptionRecordById(env, subscriptionId);
 	if (!existing) {
-		await env.WEATHER_KV.delete(pushSubKey(subscriptionId));
+		await Promise.all([
+			env.WEATHER_KV.delete(pushSubKey(subscriptionId)),
+			removePushIdFromRadiusIndex(env, subscriptionId),
+		]);
 		return false;
 	}
 	await Promise.all([
 		env.WEATHER_KV.delete(pushSubKey(subscriptionId)),
+		removePushIdFromRadiusIndex(env, subscriptionId),
 		...existing.indexedStateCodes.map((stateCode) =>
 			removePushIdFromStateIndex(env, stateCode, subscriptionId),
 		),
@@ -1515,6 +1730,8 @@ function normalizeAlertLifecycleSnapshotEntry(value: unknown): AlertLifecycleSna
 		countyCodes,
 		event: String(entry.event || ''),
 		areaDesc: String(entry.areaDesc || ''),
+		lat: normalizeLatitude(entry.lat),
+		lon: normalizeLongitude(entry.lon),
 		headline: String(entry.headline || ''),
 		description: String(entry.description || ''),
 		instruction: String(entry.instruction || ''),
@@ -1596,6 +1813,8 @@ function normalizeAlertChangeRecord(value: unknown): AlertChangeRecord | null {
 		countyCodes,
 		event: String(record.event || ''),
 		areaDesc: String(record.areaDesc || ''),
+		lat: normalizeLatitude(record.lat),
+		lon: normalizeLongitude(record.lon),
 		changedAt,
 		changeType,
 		severity: String(record.severity || '').trim() || null,
@@ -2161,12 +2380,15 @@ function createLifecycleSnapshotEntry(
 	previousEntry?: AlertLifecycleSnapshotEntry | null,
 ): AlertLifecycleSnapshotEntry {
 	const properties = feature?.properties ?? {};
+	const location = centroidFromGeometry(feature);
 	return {
 		alertId,
 		stateCodes: dedupeStrings(extractStateCodes(feature)).sort(),
 		countyCodes: extractCountyFipsCodes(feature),
 		event: String(properties.event || ''),
 		areaDesc: String(properties.areaDesc || ''),
+		lat: normalizeLatitude(location.lat),
+		lon: normalizeLongitude(location.lon),
 		headline: String(properties.headline || ''),
 		description: String(properties.description || ''),
 		instruction: String(properties.instruction || ''),
@@ -2230,6 +2452,8 @@ function createAlertChangeRecord(
 		countyCodes: dedupeStrings(entry.countyCodes).sort(),
 		event: entry.event || 'Weather Alert',
 		areaDesc: entry.areaDesc,
+		lat: normalizeLatitude(entry.lat),
+		lon: normalizeLongitude(entry.lon),
 		changedAt,
 		changeType,
 		severity: entry.severity || null,
@@ -2397,8 +2621,8 @@ function buildStatePushMessageData(stateCode: string, features: any[]): Record<s
 		const areaDesc = String(properties.areaDesc ?? '').trim();
 		const detailUrl = alertId
 			? canonicalAlertDetailUrl(alertId)
-			: `/alerts?state=${encodeURIComponent(stateCode)}`;
-		const fallbackUrl = `/alerts?state=${encodeURIComponent(stateCode)}`;
+			: canonicalAlertsPageUrl(stateCode);
+		const fallbackUrl = canonicalAlertsPageUrl(stateCode);
 		return {
 			title: `${event} - ${stateName}`,
 			body: truncateText(headline || areaDesc || 'Tap for details.', 140),
@@ -2424,8 +2648,8 @@ function buildStatePushMessageData(stateCode: string, features: any[]): Record<s
 	return {
 		title: `${features.length} new weather alerts - ${stateName}`,
 		body: truncateText(`Includes ${bodyParts.join(', ')}. Tap to review now.`, 140),
-		url: `/alerts?state=${encodeURIComponent(stateCode)}`,
-		fallbackUrl: '/alerts',
+		url: canonicalAlertsPageUrl(stateCode),
+		fallbackUrl: canonicalAlertsPageUrl(),
 		tag: `state-${stateCode}-group`,
 		stateCode,
 		changeType: 'new',
@@ -2441,8 +2665,8 @@ function buildTestPushMessageData(stateCode: string, scopeCount: number): Record
 			scopeCount > 1
 				? `Notifications are active for ${scopeCount} scopes.`
 				: `Notifications are active for ${stateCode}.`,
-		url: '/settings',
-		fallbackUrl: `/alerts?state=${encodeURIComponent(stateCode)}`,
+		url: canonicalSettingsUrl(),
+		fallbackUrl: canonicalAlertsPageUrl(stateCode),
 		tag: `test-${stateCode}`,
 		stateCode,
 		icon: NOTIFICATION_ICON_PATH,
@@ -2463,8 +2687,8 @@ function buildLifecyclePushMessageData(stateCode: string, entries: LifecyclePush
 		return {
 			title: `Weather alert update - ${stateName}`,
 			body: 'Tap to review recent alert updates.',
-			url: `/alerts?state=${encodeURIComponent(stateCode)}`,
-			fallbackUrl: '/alerts',
+			url: canonicalAlertsPageUrl(stateCode),
+			fallbackUrl: canonicalAlertsPageUrl(),
 			tag: `state-${stateCode}-lifecycle`,
 			stateCode,
 			changeType: 'grouped',
@@ -2480,8 +2704,8 @@ function buildLifecyclePushMessageData(stateCode: string, entries: LifecyclePush
 			return {
 				title: `All clear - ${stateName}`,
 				body: 'Active alerts have cleared for this area.',
-				url: `/alerts?state=${encodeURIComponent(stateCode)}`,
-				fallbackUrl: '/alerts',
+				url: canonicalAlertsPageUrl(stateCode),
+				fallbackUrl: canonicalAlertsPageUrl(),
 				tag: `state-${stateCode}-all-clear`,
 				stateCode,
 				changeType: 'all_clear',
@@ -2498,7 +2722,7 @@ function buildLifecyclePushMessageData(stateCode: string, entries: LifecyclePush
 		const areaDesc = String(properties.areaDesc ?? entry.change.areaDesc ?? '').trim();
 		const detailUrl = alertId
 			? canonicalAlertDetailUrl(alertId)
-			: `/alerts?state=${encodeURIComponent(stateCode)}`;
+			: canonicalAlertsPageUrl(stateCode);
 		const changeLabel =
 			changeType === 'extended'
 				? 'extended'
@@ -2511,7 +2735,7 @@ function buildLifecyclePushMessageData(stateCode: string, entries: LifecyclePush
 			body: truncateText(headline || areaDesc || 'Tap for details.', 140),
 			url: detailUrl,
 			detailUrl,
-			fallbackUrl: `/alerts?state=${encodeURIComponent(stateCode)}`,
+			fallbackUrl: canonicalAlertsPageUrl(stateCode),
 			tag: alertId ? `alert-${alertId}-${changeType}` : `state-${stateCode}-${changeType}`,
 			stateCode,
 			alertId: alertId || undefined,
@@ -2547,8 +2771,8 @@ function buildLifecyclePushMessageData(stateCode: string, entries: LifecyclePush
 	return {
 		title: `${usableEntries.length} alert changes - ${stateName}`,
 		body: truncateText(`Includes ${bodyParts.join(', ')}. Tap to review now.`, 140),
-		url: `/alerts?state=${encodeURIComponent(stateCode)}`,
-		fallbackUrl: '/alerts',
+		url: canonicalAlertsPageUrl(stateCode),
+		fallbackUrl: canonicalAlertsPageUrl(),
 		tag: `state-${stateCode}-group`,
 		stateCode,
 		changeType: uniqueTypes.length === 1 ? uniqueTypes[0] : 'grouped',
@@ -2564,10 +2788,24 @@ function buildLifecyclePushMessageData(stateCode: string, entries: LifecyclePush
 function changeMatchesScope(change: AlertChangeRecord, scope: PushScope): boolean {
 	if (!scope.enabled) return false;
 	const scopeStateCode = normalizeStateCode(scope.stateCode);
-	if (!scopeStateCode || !change.stateCodes.includes(scopeStateCode)) return false;
+	if (scope.deliveryScope !== 'radius' && (!scopeStateCode || !change.stateCodes.includes(scopeStateCode))) {
+		return false;
+	}
 	if (!alertMatchesTypePrefs(change.event, scope.alertTypes)) return false;
 	if (scope.severeOnly && !isMajorImpactAlertEvent(change.event, '', deriveAlertImpactCategories(change.event, '', ''))) {
 		return false;
+	}
+	if (scope.deliveryScope === 'radius') {
+		if (!pushScopeHasRadius(scope)) return false;
+		const lat = normalizeLatitude(change.lat);
+		const lon = normalizeLongitude(change.lon);
+		if (lat == null || lon == null) return false;
+		return haversineDistanceMiles(
+			Number(scope.centerLat),
+			Number(scope.centerLon),
+			lat,
+			lon,
+		) <= Number(scope.radiusMiles);
 	}
 	if (scope.deliveryScope !== 'county') return true;
 
@@ -2605,7 +2843,7 @@ function batchLifecycleEntriesForDeliveryMode(
 async function sendPushPayload(
 	vapid: VapidKeys,
 	subscription: WebPushSubscription,
-	data: Record<string, unknown>,
+	data: PushMessage['data'],
 	topic: string,
 ): Promise<Response> {
 	const message: PushMessage = {
@@ -2624,7 +2862,10 @@ async function sendPushForState(
 	map: Record<string, any>,
 ): Promise<void> {
 	if (stateChanges.length === 0) return;
-	const subscriptionIds = await readPushStateIndex(env, stateCode);
+	const subscriptionIds = dedupeStrings([
+		...await readPushStateIndex(env, stateCode),
+		...await readPushRadiusIndex(env),
+	]);
 	if (subscriptionIds.length === 0) return;
 
 	for (const subscriptionId of subscriptionIds) {
@@ -2634,16 +2875,23 @@ async function sendPushForState(
 				env,
 				`push_state_missing_record_${stateCode}_${subscriptionId.slice(0, 12)}`,
 			);
-			await removePushIdFromStateIndex(env, stateCode, subscriptionId);
+			await Promise.all([
+				removePushIdFromStateIndex(env, stateCode, subscriptionId),
+				removePushIdFromRadiusIndex(env, subscriptionId),
+			]);
 			continue;
 		}
-		if (!record.indexedStateCodes.includes(stateCode)) {
+		const hasRadiusScope = prefsHaveEnabledRadiusScopes(record.prefs);
+		if (!record.indexedStateCodes.includes(stateCode) && !hasRadiusScope) {
 			await recordInvalidSubscription(
 				env,
 				`push_state_stale_index_${stateCode}_${subscriptionId.slice(0, 12)}`,
 			);
 			await removePushIdFromStateIndex(env, stateCode, subscriptionId);
 			continue;
+		}
+		if (!hasRadiusScope) {
+			await removePushIdFromRadiusIndex(env, subscriptionId);
 		}
 
 		const prefs = record.prefs;
@@ -2653,7 +2901,12 @@ async function sendPushForState(
 		}
 
 		const matchingScopes = prefs.scopes.filter(
-			(scope) => scope.enabled && normalizeStateCode(scope.stateCode) === stateCode,
+			(scope) =>
+				scope.enabled
+				&& (
+					(scope.deliveryScope === 'radius' && pushScopeHasRadius(scope))
+					|| normalizeStateCode(scope.stateCode) === stateCode
+				),
 		);
 		if (matchingScopes.length === 0) {
 			continue;
@@ -2853,7 +3106,7 @@ function alertToText(properties: any): string {
 
 	// ── Footer ───────────────────────────────────────────────────────────
 	lines.push('');
-	lines.push('https://localkynews.com/live-weather-alerts');
+	lines.push(PUBLIC_ALERTS_PAGE_URL);
 	lines.push('');
 	lines.push('#weatheralert #weather #alert');
 
@@ -3727,7 +3980,7 @@ async function exchangeFacebookToken(appId: string, appSecret: string, userToken
 }
 
 async function handleTokenExchange(request: Request, env: Env): Promise<Response> {
-	if (!isAuthenticated(request, env)) {
+	if (!await isAuthenticated(request, env)) {
 		return new Response('Unauthorized', { status: 401 });
 	}
 	const form = await parseRequestBody(request);
@@ -3755,7 +4008,7 @@ async function handleTokenExchange(request: Request, env: Env): Promise<Response
 }
 
 async function handleTokenConfig(request: Request, env: Env): Promise<Response> {
-	if (!isAuthenticated(request, env)) {
+	if (!await isAuthenticated(request, env)) {
 		return new Response('Unauthorized', { status: 401 });
 	}
 	const form = await parseRequestBody(request);
@@ -4205,15 +4458,29 @@ async function parseRequestBody(request: Request): Promise<URLSearchParams> {
 async function handleAdminLogin(request: Request, env: Env): Promise<Response> {
 	const form = await parseRequestBody(request);
 	const password = form.get('password') || '';
-	const expected = env.ADMIN_PASSWORD || 'liveweather';
+	const expected = getAdminPassword(env);
+	if (!expected) {
+		return new Response(renderLoginPage('Admin access is disabled until ADMIN_PASSWORD is configured.'), {
+			status: 503,
+			headers: {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'no-store',
+			},
+		});
+	}
 	if (password !== expected) {
 		return new Response(renderLoginPage('Invalid password'), {
 			status: 401,
-			headers: { 'Content-Type': 'text/html; charset=utf-8' },
+			headers: {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'no-store',
+			},
 		});
 	}
+	const sessionId = await createAdminSession(env, expected);
 	const headers = new Headers({ 'Location': '/admin' });
-	headers.append('Set-Cookie', `admin_session=${encodeURIComponent(authToken(expected))}; Path=/; HttpOnly; Max-Age=3600`);
+	headers.set('Cache-Control', 'no-store');
+	headers.append('Set-Cookie', buildAdminSessionCookie(request, sessionId));
 	return new Response(null, { status: 303, headers });
 }
 
@@ -4596,8 +4863,199 @@ function deriveInstructionsSummary(instruction: string, description: string): st
 
 function canonicalAlertDetailUrl(alertId: string): string {
 	const normalizedId = String(alertId || '').trim();
-	if (!normalizedId) return '/alerts';
-	return `/alerts/${encodeURIComponent(normalizedId)}`;
+	if (!normalizedId) return '/?tab=alerts';
+	return `/?alert=${encodeURIComponent(normalizedId)}`;
+}
+
+function canonicalAlertsPageUrl(stateCode?: string | null): string {
+	const normalizedState = normalizeStateCode(stateCode || '');
+	const params = new URLSearchParams();
+	params.set('tab', 'alerts');
+	if (normalizedState) {
+		params.set('state', normalizedState);
+	}
+	const query = params.toString();
+	return query ? `/?${query}` : '/';
+}
+
+function canonicalSettingsUrl(): string {
+	return '/?tab=more';
+}
+
+function redirectToCanonicalAppUrl(request: Request, targetPath: string, status = 302): Response {
+	return Response.redirect(new URL(targetPath, request.url).toString(), status);
+}
+
+function haversineDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
+	const earthRadiusMiles = 3958.8;
+	const dLat = ((lat2 - lat1) * Math.PI) / 180;
+	const dLon = ((lon2 - lon1) * Math.PI) / 180;
+	const a =
+		Math.sin(dLat / 2) ** 2
+		+ Math.cos((lat1 * Math.PI) / 180)
+			* Math.cos((lat2 * Math.PI) / 180)
+			* Math.sin(dLon / 2) ** 2;
+	return earthRadiusMiles * 2 * Math.asin(Math.sqrt(a));
+}
+
+function parseLonLatCoordinate(candidate: any): [number, number] | null {
+	if (!Array.isArray(candidate) || candidate.length < 2) return null;
+	const lon = Number(candidate[0]);
+	const lat = Number(candidate[1]);
+	if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+	if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+	return [lon, lat];
+}
+
+function normalizeCoordinateSequence(coordinates: any, closeLoop = false): Array<[number, number]> {
+	if (!Array.isArray(coordinates)) return [];
+	const sequence = coordinates
+		.map((candidate) => parseLonLatCoordinate(candidate))
+		.filter((pair): pair is [number, number] => Boolean(pair));
+	if (
+		closeLoop
+		&& sequence.length > 1
+		&& (sequence[0][0] !== sequence[sequence.length - 1][0] || sequence[0][1] !== sequence[sequence.length - 1][1])
+	) {
+		sequence.push(sequence[0]);
+	}
+	return sequence;
+}
+
+function projectPointToLocalMiles(
+	originLat: number,
+	originLon: number,
+	targetLat: number,
+	targetLon: number,
+): { x: number; y: number } {
+	const meanLatRadians = (((originLat + targetLat) / 2) * Math.PI) / 180;
+	return {
+		x: (targetLon - originLon) * 69.172 * Math.cos(meanLatRadians),
+		y: (targetLat - originLat) * 69.0,
+	};
+}
+
+function distancePointToSegmentMiles(
+	point: { x: number; y: number },
+	start: { x: number; y: number },
+	end: { x: number; y: number },
+): number {
+	const dx = end.x - start.x;
+	const dy = end.y - start.y;
+	if (dx === 0 && dy === 0) {
+		return Math.hypot(point.x - start.x, point.y - start.y);
+	}
+	const t = Math.max(
+		0,
+		Math.min(
+			1,
+			((point.x - start.x) * dx + (point.y - start.y) * dy) / ((dx ** 2) + (dy ** 2)),
+		),
+	);
+	const projection = {
+		x: start.x + (dx * t),
+		y: start.y + (dy * t),
+	};
+	return Math.hypot(point.x - projection.x, point.y - projection.y);
+}
+
+function isPointInLinearRing(lat: number, lon: number, ringCoordinates: any): boolean {
+	const ring = normalizeCoordinateSequence(ringCoordinates, true);
+	if (ring.length < 4) return false;
+	let inside = false;
+	for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index, index += 1) {
+		const [xi, yi] = ring[index];
+		const [xj, yj] = ring[previous];
+		const intersects =
+			((yi > lat) !== (yj > lat))
+			&& (lon < ((xj - xi) * (lat - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+		if (intersects) inside = !inside;
+	}
+	return inside;
+}
+
+function minDistanceToCoordinateSequenceMiles(
+	lat: number,
+	lon: number,
+	coordinates: any,
+	closeLoop = false,
+): number {
+	const sequence = normalizeCoordinateSequence(coordinates, closeLoop);
+	if (sequence.length === 0) return Number.POSITIVE_INFINITY;
+	if (sequence.length === 1) {
+		return haversineDistanceMiles(lat, lon, sequence[0][1], sequence[0][0]);
+	}
+	const origin = { x: 0, y: 0 };
+	let minDistance = Number.POSITIVE_INFINITY;
+	for (let index = 1; index < sequence.length; index += 1) {
+		const start = projectPointToLocalMiles(lat, lon, sequence[index - 1][1], sequence[index - 1][0]);
+		const end = projectPointToLocalMiles(lat, lon, sequence[index][1], sequence[index][0]);
+		minDistance = Math.min(minDistance, distancePointToSegmentMiles(origin, start, end));
+	}
+	return minDistance;
+}
+
+function minDistanceToPolygonMiles(lat: number, lon: number, polygonCoordinates: any): number {
+	const rings = Array.isArray(polygonCoordinates) ? polygonCoordinates : [];
+	const outerRing = rings[0];
+	if (outerRing && isPointInLinearRing(lat, lon, outerRing)) {
+		const insideHole = rings.slice(1).some((ring) => isPointInLinearRing(lat, lon, ring));
+		if (!insideHole) return 0;
+	}
+	let minDistance = Number.POSITIVE_INFINITY;
+	for (const ring of rings) {
+		minDistance = Math.min(minDistance, minDistanceToCoordinateSequenceMiles(lat, lon, ring, true));
+	}
+	return minDistance;
+}
+
+function minDistanceToGeometryMiles(lat: number, lon: number, geometry: any): number {
+	if (!geometry || typeof geometry !== 'object') return Number.POSITIVE_INFINITY;
+	switch (String(geometry.type || '')) {
+		case 'Point':
+			return minDistanceToCoordinateSequenceMiles(lat, lon, [geometry.coordinates]);
+		case 'MultiPoint':
+		case 'LineString':
+			return minDistanceToCoordinateSequenceMiles(lat, lon, geometry.coordinates);
+		case 'MultiLineString': {
+			const parts = Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
+			return parts.reduce(
+				(minDistance: number, part: any) => Math.min(minDistance, minDistanceToCoordinateSequenceMiles(lat, lon, part)),
+				Number.POSITIVE_INFINITY,
+			);
+		}
+		case 'Polygon':
+			return minDistanceToPolygonMiles(lat, lon, geometry.coordinates);
+		case 'MultiPolygon': {
+			const polygons = Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
+			return polygons.reduce(
+				(minDistance: number, polygon: any) => Math.min(minDistance, minDistanceToPolygonMiles(lat, lon, polygon)),
+				Number.POSITIVE_INFINITY,
+			);
+		}
+		case 'GeometryCollection': {
+			const geometries = Array.isArray(geometry.geometries) ? geometry.geometries : [];
+			return geometries.reduce(
+				(minDistance: number, child: any) => Math.min(minDistance, minDistanceToGeometryMiles(lat, lon, child)),
+				Number.POSITIVE_INFINITY,
+			);
+		}
+		default:
+			return Number.POSITIVE_INFINITY;
+	}
+}
+
+function alertIntersectsRadius(feature: any, lat: number, lon: number, radiusMiles: number): boolean {
+	if (!(radiusMiles > 0) || !Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+	const geometryDistance = minDistanceToGeometryMiles(lat, lon, feature?.geometry);
+	if (Number.isFinite(geometryDistance)) {
+		return geometryDistance <= radiusMiles;
+	}
+	const location = centroidFromGeometry(feature);
+	if (Number.isFinite(location.lat) && Number.isFinite(location.lon)) {
+		return haversineDistanceMiles(lat, lon, Number(location.lat), Number(location.lon)) <= radiusMiles;
+	}
+	return false;
 }
 
 function collectGeometryCoordinatePairs(geometry: any): Array<[number, number]> {
@@ -4707,6 +5165,7 @@ function buildAlertsMeta(input: {
 async function handleApiAlerts(request: Request, env: Env): Promise<Response> {
 	let map = await readAlertMap(env);
 	let error: string | undefined;
+	const url = new URL(request.url);
 	const lastPollBefore = await env.WEATHER_KV.get(KV_LAST_POLL);
 	if (
 		Object.keys(map).length === 0
@@ -4720,15 +5179,53 @@ async function handleApiAlerts(request: Request, env: Env): Promise<Response> {
 	const lifecycleByAlertId = lifecycleSnapshot
 		? latestLifecycleStatusByAlertId(lifecycleSnapshot)
 		: {};
-	const alerts = Object.values(map).map((feature: any) =>
+	const radiusParam = url.searchParams.get('radius');
+	const latParam = url.searchParams.get('lat');
+	const lonParam = url.searchParams.get('lon');
+	const hasRadiusFilterParams = radiusParam != null || latParam != null || lonParam != null;
+	const radiusMiles = radiusParam == null || radiusParam === '' ? null : Number(radiusParam);
+	const centerLat = latParam == null || latParam === '' ? null : Number(latParam);
+	const centerLon = lonParam == null || lonParam === '' ? null : Number(lonParam);
+	if (
+		hasRadiusFilterParams
+		&& (
+			!(radiusMiles != null && Number.isFinite(radiusMiles) && radiusMiles > 0)
+			|| !(centerLat != null && Number.isFinite(centerLat) && centerLat >= -90 && centerLat <= 90)
+			|| !(centerLon != null && Number.isFinite(centerLon) && centerLon >= -180 && centerLon <= 180)
+		)
+	) {
+		return new Response(JSON.stringify({
+			error: 'lat, lon, and radius must be valid numbers when using radius filtering.',
+		}), {
+			status: 400,
+			headers: {
+				...corsHeaders(),
+				'Content-Type': 'application/json; charset=utf-8',
+				'Cache-Control': 'no-store',
+			},
+		});
+	}
+	const filteredFeatures = Object.values(map).filter((feature: any) => {
+		if (!(radiusMiles && centerLat != null && centerLon != null)) return true;
+		return alertIntersectsRadius(feature, centerLat, centerLon, radiusMiles);
+	});
+	const alerts = filteredFeatures.map((feature: any) =>
 		normalizeAlertFeature(feature, lifecycleByAlertId),
 	);
 	const lastPoll = await env.WEATHER_KV.get(KV_LAST_POLL);
-	const meta = buildAlertsMeta({
+	const meta = {
+		...buildAlertsMeta({
 		lastPoll: lastPoll ?? null,
 		syncError: error ?? null,
 		count: alerts.length,
-	});
+		}),
+		filterMode: radiusMiles && centerLat != null && centerLon != null ? 'radius' : 'all',
+		radiusMiles: radiusMiles && centerLat != null && centerLon != null ? radiusMiles : null,
+		center:
+			radiusMiles && centerLat != null && centerLon != null
+				? { lat: centerLat, lon: centerLon }
+				: null,
+	};
 	await recordStaleDataCondition(env, meta.staleMinutes, 'api_alerts_response');
 	const headers = {
 		...corsHeaders(),
@@ -6356,10 +6853,16 @@ async function handleApiGeocode(request: Request): Promise<Response> {
 }
 
 async function handleAdminPage(request: Request, env: Env): Promise<Response> {
-	if (!isAuthenticated(request, env)) {
-		return new Response(renderLoginPage(), {
+	if (!await isAuthenticated(request, env)) {
+		const adminConfigMessage = getAdminPassword(env)
+			? undefined
+			: 'Admin access is disabled until ADMIN_PASSWORD is configured.';
+		return new Response(renderLoginPage(adminConfigMessage), {
 			status: 200,
-			headers: { 'Content-Type': 'text/html; charset=utf-8' },
+			headers: {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'no-store',
+			},
 		});
 	}
 
@@ -6372,7 +6875,10 @@ async function handleAdminPage(request: Request, env: Env): Promise<Response> {
 	const appConfig = await readFbAppConfig(env);
 
 	const page = renderAdminPage(alerts, lastPoll ?? undefined, error, appConfig);
-	const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8' });
+	const headers = new Headers({
+		'Content-Type': 'text/html; charset=utf-8',
+		'Cache-Control': 'no-store',
+	});
 	return new Response(page, { status: 200, headers });
 }
 
@@ -6383,7 +6889,7 @@ async function handleAdminPage(request: Request, env: Env): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 async function handleThreadCheck(request: Request, env: Env): Promise<Response> {
-	if (!isAuthenticated(request, env)) {
+	if (!await isAuthenticated(request, env)) {
 		return new Response('Unauthorized', { status: 401 });
 	}
 	const url = new URL(request.url);
@@ -6424,7 +6930,7 @@ async function handleThreadCheck(request: Request, env: Env): Promise<Response> 
 }
 
 async function handlePost(request: Request, env: Env): Promise<Response> {
-	if (!isAuthenticated(request, env)) {
+	if (!await isAuthenticated(request, env)) {
 		return new Response('Unauthorized', { status: 401 });
 	}
 
@@ -6611,6 +7117,12 @@ export const __testing = {
 	canonicalAlertDetailUrl,
 	extractCountyFipsCodes,
 	alertMatchesScopeCounty,
+	alertMatchesScopeRadius,
+	featureMatchesScope,
+	changeMatchesScope,
+	normalizePushPreferences,
+	alertToText,
+	buildCommentText,
 };
 
 export default {
@@ -6682,6 +7194,30 @@ export default {
 				status: 204,
 				headers: corsHeaders(),
 			});
+		}
+		if (request.method === 'GET') {
+			if (url.pathname === '/alerts' || url.pathname === '/alerts/') {
+				return redirectToCanonicalAppUrl(
+					request,
+					canonicalAlertsPageUrl(url.searchParams.get('state')),
+				);
+			}
+			if (url.pathname.startsWith('/alerts/')) {
+				const rawAlertId = url.pathname.slice('/alerts/'.length).replace(/\/+$/, '');
+				if (!rawAlertId) {
+					return redirectToCanonicalAppUrl(request, canonicalAlertsPageUrl());
+				}
+				let alertId = rawAlertId;
+				try {
+					alertId = decodeURIComponent(rawAlertId);
+				} catch {
+					alertId = rawAlertId;
+				}
+				return redirectToCanonicalAppUrl(request, canonicalAlertDetailUrl(alertId));
+			}
+			if (url.pathname === '/settings' || url.pathname === '/settings/') {
+				return redirectToCanonicalAppUrl(request, canonicalSettingsUrl());
+			}
 		}
 		if (url.pathname === '/api/alerts' && request.method === 'GET') {
 			return await handleApiAlerts(request, env);
