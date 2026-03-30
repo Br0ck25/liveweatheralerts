@@ -1935,7 +1935,7 @@ function AppInner() {
                       <div className="mb-2 text-xs font-semibold tracking-wide text-emerald-200">
                         ALL CLEAR
                       </div>
-                      <div className="mb-1 text-3xl font-bold">{currentLocationLabel}</div>
+                      <div className="mb-1 text-3xl font-bold text-white force-white">{currentLocationLabel}</div>
                       <div className="mb-3 text-sm text-emerald-100">
                         There are no active alerts in your area right now.
                       </div>
