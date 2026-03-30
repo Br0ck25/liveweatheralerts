@@ -4,6 +4,7 @@ import {
 	type PushSubscription as WebPushSubscription,
 	type VapidKeys,
 } from '@block65/webcrypto-web-push';
+import metroAllowlistSeed from './metro-allowlist.json';
 
 interface Env {
 	WEATHER_KV: KVNamespace;
@@ -39,7 +40,7 @@ const KV_ALERT_MAP  = 'alerts:map';       // JSON: Record<alertId, feature> — 
 const KV_ETAG       = 'alerts:etag';      // Last ETag string from NWS
 const KV_LAST_POLL  = 'alerts:last-poll'; // ISO timestamp of last successful poll
 const KV_FB_APP_CONFIG = 'fb:app-config';  // JSON: { appId, appSecret }
-const KV_FB_AUTO_POST_CONFIG = 'fb:auto-post-config'; // JSON: { tornadoWarningsEnabled, updatedAt }
+const KV_FB_AUTO_POST_CONFIG = 'fb:auto-post-config'; // JSON: { mode, updatedAt }
 const KV_ADMIN_SESSION_PREFIX = 'admin:session:'; // admin:session:{opaqueToken}
 const KV_PUSH_SUB_PREFIX = 'push:sub:'; // push:sub:{sha256(endpoint)}
 const KV_PUSH_STATE_INDEX_PREFIX = 'push:index:state:'; // push:index:state:{stateCode}
@@ -55,6 +56,8 @@ const ALERT_HISTORY_MAX_QUERY_DAYS = 14;
 const MAX_RECENT_PUSH_FAILURES = 20;
 const ADMIN_SESSION_COOKIE = 'admin_session';
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60;
+const FB_AUTO_POST_MAX_ALERT_AGE_MS = 30 * 60 * 1000;
+const FB_AUTO_POST_DUPLICATE_WINDOW_MS = 60 * 60 * 1000;
 // KV thread keys: thread:{ugc}:{eventSlug} — tracks active FB post threads per county+alertType
 // e.g. thread:KYC195:severe_thunderstorm_warning
 
@@ -65,6 +68,7 @@ interface AlertThread {
 	county: string;       // areaDesc
 	alertType: string;    // properties.event
 	updateCount: number;  // number of update comments posted on this anchor post (0-based)
+	lastPostedAt?: string | null;
 }
 
 interface FbAppConfig {
@@ -72,10 +76,27 @@ interface FbAppConfig {
 	appSecret?: string;
 }
 
+type FbAutoPostMode = 'off' | 'tornado_only' | 'smart_high_impact';
+
 interface FbAutoPostConfig {
-	tornadoWarningsEnabled: boolean;
+	mode: FbAutoPostMode;
 	updatedAt: string | null;
 }
+
+type MetroAllowlistEntry = {
+	id: string;
+	name: string;
+	countyFips: string[];
+};
+
+type FacebookAutoPostDecision = {
+	eligible: boolean;
+	threadAction: FacebookPublishThreadAction;
+	reason: string;
+	mode: FbAutoPostMode;
+	matchedMetroNames: string[];
+	countyCount: number;
+};
 
 type FacebookPublishThreadAction = '' | 'new_post' | 'comment';
 
@@ -338,18 +359,32 @@ async function writeFbAppConfig(env: Env, config: FbAppConfig): Promise<void> {
 	await env.WEATHER_KV.put(KV_FB_APP_CONFIG, JSON.stringify(config));
 }
 
+function normalizeFbAutoPostMode(value: unknown): FbAutoPostMode {
+	const normalized = String(value || '').trim().toLowerCase();
+	if (normalized === 'tornado_only' || normalized === 'smart_high_impact') {
+		return normalized;
+	}
+	return 'off';
+}
+
 function normalizeFbAutoPostConfig(value: unknown): FbAutoPostConfig {
 	if (typeof value === 'boolean') {
 		return {
-			tornadoWarningsEnabled: value,
+			mode: value ? 'tornado_only' : 'off',
 			updatedAt: null,
 		};
 	}
 	const config = value as Record<string, unknown> | null;
 	const updatedAtRaw = String(config?.updatedAt || '').trim();
 	const updatedAtMs = Date.parse(updatedAtRaw);
+	const legacyToggle = config?.tornadoWarningsEnabled === true;
+	const mode = config?.mode != null
+		? normalizeFbAutoPostMode(config.mode)
+		: legacyToggle
+			? 'tornado_only'
+			: 'off';
 	return {
-		tornadoWarningsEnabled: config?.tornadoWarningsEnabled === true,
+		mode,
 		updatedAt: Number.isFinite(updatedAtMs) ? new Date(updatedAtMs).toISOString() : null,
 	};
 }
@@ -369,6 +404,61 @@ async function writeFbAutoPostConfig(env: Env, config: FbAutoPostConfig): Promis
 		KV_FB_AUTO_POST_CONFIG,
 		JSON.stringify(normalizeFbAutoPostConfig(config)),
 	);
+}
+
+function fbAutoPostModeLabel(mode: FbAutoPostMode): string {
+	if (mode === 'tornado_only') return 'Tornado-only';
+	if (mode === 'smart_high_impact') return 'Smart high-impact';
+	return 'Off';
+}
+
+function fbAutoPostModeHelp(mode: FbAutoPostMode): string {
+	if (mode === 'tornado_only') {
+		return 'All active, timely Tornado Warnings auto-post and follow the existing Facebook thread/comment rules.';
+	}
+	if (mode === 'smart_high_impact') {
+		return 'All active, timely Tornado Warnings auto-post. Other warnings must hit a major metro or cover at least 10 counties, with extra Severe Thunderstorm thresholds.';
+	}
+	return 'Automatic Facebook posting is disabled.';
+}
+
+function buildFbAutoPostStatusText(config?: FbAutoPostConfig | null): string {
+	const normalized = normalizeFbAutoPostConfig(config);
+	const savedText = normalized.updatedAt
+		? `Saved ${formatLastSynced(normalized.updatedAt)}.`
+		: 'Changes save immediately.';
+	return `Mode: ${fbAutoPostModeLabel(normalized.mode)}. ${savedText}`;
+}
+
+function normalizeMetroAllowlistEntry(value: unknown): MetroAllowlistEntry | null {
+	const entry = value as Record<string, unknown> | null;
+	if (!entry || typeof entry !== 'object') return null;
+	const id = String(entry.id || '').trim();
+	const name = String(entry.name || '').trim();
+	const countyFips = Array.isArray(entry.countyFips)
+		? dedupeStrings(
+			entry.countyFips
+				.map((code) => String(code || '').replace(/\D/g, ''))
+				.filter((code) => /^\d{5}$/.test(code)),
+		).sort()
+		: [];
+	if (!id || !name || countyFips.length === 0) return null;
+	return { id, name, countyFips };
+}
+
+const METRO_ALLOWLIST: MetroAllowlistEntry[] = Array.isArray(metroAllowlistSeed)
+	? metroAllowlistSeed
+		.map((entry) => normalizeMetroAllowlistEntry(entry))
+		.filter((entry): entry is MetroAllowlistEntry => !!entry)
+	: [];
+
+const METRO_ALLOWLIST_BY_COUNTY_FIPS = new Map<string, MetroAllowlistEntry[]>();
+for (const metro of METRO_ALLOWLIST) {
+	for (const countyFips of metro.countyFips) {
+		const existing = METRO_ALLOWLIST_BY_COUNTY_FIPS.get(countyFips) || [];
+		existing.push(metro);
+		METRO_ALLOWLIST_BY_COUNTY_FIPS.set(countyFips, existing);
+	}
 }
 
 function threadKvKey(ugcCode: string, event: string): string {
@@ -428,6 +518,128 @@ function normalizeFacebookPublishThreadAction(
 
 function isTornadoWarningEvent(event: string): boolean {
 	return /\btornado warning\b/i.test(String(event || '').trim());
+}
+
+function isWarningEvent(event: string): boolean {
+	return /\bwarning\b/i.test(String(event || '').trim());
+}
+
+function isSevereThunderstormWarningEvent(event: string): boolean {
+	return /\bsevere thunderstorm warning\b/i.test(String(event || '').trim());
+}
+
+function threadIsRecentForAutoPost(thread: AlertThread | null, nowMs = Date.now()): boolean {
+	if (!thread) return false;
+	const lastPostedMs = Date.parse(String(thread.lastPostedAt || '').trim());
+	if (!Number.isFinite(lastPostedMs)) {
+		return true;
+	}
+	return (nowMs - lastPostedMs) <= FB_AUTO_POST_DUPLICATE_WINDOW_MS;
+}
+
+function autoPostTimestampMsForChange(feature: any, change: AlertChangeRecord): number | null {
+	const properties = feature?.properties ?? {};
+	const changeType = String(change.changeType || '').toLowerCase();
+	const primaryTimestamp =
+		changeType === 'updated' || changeType === 'extended'
+			? properties.updated
+			: properties.sent;
+	const fallbackCandidates = [
+		primaryTimestamp,
+		properties.updated,
+		properties.sent,
+		properties.effective,
+		change.changedAt,
+	];
+
+	for (const candidate of fallbackCandidates) {
+		const parsed = parseTimeMs(String(candidate || ''));
+		if (parsed != null) return parsed;
+	}
+	return null;
+}
+
+function isAutoPostCandidateActive(feature: any, nowMs = Date.now()): boolean {
+	const expiry = feature?.properties?.ends ?? feature?.properties?.expires;
+	const expiryMs = parseTimeMs(String(expiry || ''));
+	if (expiryMs == null) return true;
+	return expiryMs > nowMs;
+}
+
+function isAutoPostCandidateTimely(
+	feature: any,
+	change: AlertChangeRecord,
+	nowMs = Date.now(),
+): boolean {
+	const timestampMs = autoPostTimestampMsForChange(feature, change);
+	if (timestampMs == null) return true;
+	return (nowMs - timestampMs) <= FB_AUTO_POST_MAX_ALERT_AGE_MS;
+}
+
+function parseAlertNumericValue(value: unknown): number | null {
+	if (Array.isArray(value)) {
+		for (const entry of value) {
+			const parsed = parseAlertNumericValue(entry);
+			if (parsed != null) return parsed;
+		}
+		return null;
+	}
+	if (typeof value === 'number') {
+		return Number.isFinite(value) ? value : null;
+	}
+	const match = String(value ?? '').match(/-?\d+(?:\.\d+)?/);
+	if (!match) return null;
+	const parsed = Number(match[0]);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasSevereThunderstormDestructiveCriteria(feature: any): boolean {
+	const properties = feature?.properties ?? {};
+	const maxWind = parseAlertNumericValue(findProperty(properties, 'maxWindGust'));
+	if (maxWind != null && maxWind >= 80) return true;
+	const maxHail = parseAlertNumericValue(findProperty(properties, 'maxHailSize'));
+	if (maxHail != null && maxHail >= 2.75) return true;
+	const text = [
+		properties.event,
+		properties.headline,
+		properties.description,
+		properties.instruction,
+		findProperty(properties, 'damageThreat'),
+	]
+		.map((value) => mapSomeValue(value))
+		.join(' ')
+		.toLowerCase();
+	return /\bdestructive\b/.test(text);
+}
+
+function detectTierOneAutoPostReason(feature: any): string | null {
+	const properties = feature?.properties ?? {};
+	const event = String(properties.event || '').trim();
+	const text = [
+		event,
+		properties.headline,
+		properties.description,
+		properties.instruction,
+	]
+		.map((value) => String(value || ''))
+		.join(' ')
+		.toLowerCase();
+
+	if (/\btornado emergency\b/.test(text)) return 'tornado_emergency';
+	if (/\bparticularly dangerous situation\b|\bpds tornado\b/.test(text)) return 'pds_tornado_warning';
+	if (/\bflash flood emergency\b/.test(text)) return 'flash_flood_emergency';
+	if (/\bhurricane\b/.test(text) && /\b(?:landfall|made landfall)\b/.test(text)) return 'hurricane_landfall';
+	return null;
+}
+
+function matchingMetroNamesForAlert(feature: any, change?: AlertChangeRecord | null): string[] {
+	const names = new Set<string>();
+	for (const countyFips of extractFullCountyFipsCodes(feature, change)) {
+		for (const metro of METRO_ALLOWLIST_BY_COUNTY_FIPS.get(countyFips) || []) {
+			names.add(metro.name);
+		}
+	}
+	return Array.from(names).sort();
 }
 
 /**
@@ -1801,6 +2013,52 @@ function extractCountyFipsCodes(feature: any): string[] {
 	return dedupeStrings(
 		[...fromUgc, ...fromSame],
 	).sort();
+}
+
+function normalizeFullCountyFips(input: unknown): string | null {
+	const digits = String(input ?? '').replace(/\D/g, '');
+	if (!/^\d{5}$/.test(digits)) return null;
+	return digits;
+}
+
+function extractFullCountyFipsCodes(
+	feature: any,
+	change?: AlertChangeRecord | null,
+): string[] {
+	const fullCodes = new Set<string>();
+
+	for (const ugcCode of extractCountyUgcCodes(feature)) {
+		const stateCode = ugcCode.slice(0, 2).toUpperCase();
+		const countyCode = ugcCode.slice(-3);
+		const stateFips = STATE_CODE_TO_FIPS[stateCode];
+		if (stateFips && /^\d{3}$/.test(countyCode)) {
+			fullCodes.add(`${stateFips}${countyCode}`);
+		}
+	}
+
+	const sameCodes = Array.isArray(feature?.properties?.geocode?.SAME)
+		? feature.properties.geocode.SAME
+		: [];
+	for (const sameCode of sameCodes) {
+		const normalized = normalizeFullCountyFips(sameCode);
+		if (normalized) {
+			fullCodes.add(normalized);
+		}
+	}
+
+	if (fullCodes.size === 0 && change && change.stateCodes.length === 1) {
+		const stateFips = STATE_CODE_TO_FIPS[String(change.stateCodes[0] || '').toUpperCase()];
+		if (stateFips) {
+			for (const countyCode of change.countyCodes) {
+				const normalizedCounty = normalizeCountyFips(countyCode);
+				if (normalizedCounty) {
+					fullCodes.add(`${stateFips}${normalizedCounty}`);
+				}
+			}
+		}
+	}
+
+	return Array.from(fullCodes).sort();
 }
 
 function normalizeIsoTimestamp(value: unknown): string {
@@ -3250,13 +3508,8 @@ function renderAdminPage(
 ): string {
 	const savedAppId = appConfig?.appId ?? '';
 	const savedAppSecret = appConfig?.appSecret ? '********' : '';
-	const tornadoAutoPostEnabled = autoPostConfig?.tornadoWarningsEnabled === true;
-	const autoPostSavedText = autoPostConfig?.updatedAt
-		? `Saved ${formatLastSynced(autoPostConfig.updatedAt)}.`
-		: 'Changes save immediately.';
-	const autoPostStatusText = tornadoAutoPostEnabled
-		? `Auto-post tornado warnings is enabled. ${autoPostSavedText}`
-		: `Auto-post tornado warnings is disabled. ${autoPostSavedText}`;
+	const normalizedAutoPostConfig = normalizeFbAutoPostConfig(autoPostConfig);
+	const autoPostStatusText = buildFbAutoPostStatusText(normalizedAutoPostConfig);
 	// Build post text map keyed by numeric index.
 	// We NEVER inject post text into onclick attributes — NWS text contains quotes,
 	// apostrophes, and special chars that break HTML attribute parsing. Instead we
@@ -3360,7 +3613,7 @@ function renderAdminPage(
 	// and newlines — safe to embed directly in a <script> block.
 	const postTextsJs = 'const POST_TEXTS = ' + JSON.stringify(postTextMap) + ';';
 	const autoPostConfigJs = 'const AUTO_POST_CONFIG = ' + JSON.stringify(
-		normalizeFbAutoPostConfig(autoPostConfig),
+		normalizedAutoPostConfig,
 	) + ';';
 
 	const stateOptions = Array.from(states).sort().map((s) =>
@@ -3401,8 +3654,8 @@ function renderAdminPage(
 		'.admin-panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-bottom: 22px; }',
 		'.admin-panel h2 { margin: 0 0 8px; font-size: 1rem; }',
 		'.admin-panel p { margin: 8px 0; font-size: 0.88rem; color: #444; }',
-		'.toggle-row { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-top: 10px; }',
-		'.toggle-row input { width: 18px; height: 18px; margin: 0; }',
+		'.toggle-row { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-top: 10px; flex-wrap: wrap; }',
+		'.toggle-row select { min-width: 220px; padding: 8px 10px; border: 1px solid #c7ccd1; border-radius: 6px; font-size: 0.9rem; background: #fff; }',
 		'.toggle-help { margin-top: 8px; color: #555; }',
 		'.auto-post-status { margin-top: 10px; font-size: 0.83rem; color: #333; }',
 		'.auto-post-status.ok { color: #1a7f37; }',
@@ -3709,6 +3962,7 @@ function setThreadIndicator(state, threadInfo) {
     const updateCount = threadInfo.updateCount ?? 0;
     const remaining = 3 - updateCount;
     const atLimit = remaining <= 0;
+    currentThreadAction = atLimit ? 'new_post' : 'comment';
     el.className = 'thread-indicator is-comment';
     const countLabel = atLimit
       ? '<strong>Chain limit reached</strong> — will create a new post'
@@ -3719,6 +3973,7 @@ function setThreadIndicator(state, threadInfo) {
       ' <button class="btn-force-new" onclick="forceNewPost()">Force new post instead</button>';
     postBtn.textContent = atLimit ? 'Post (New Thread)' : 'Post Comment';
   } else {
+    currentThreadAction = 'new_post';
     el.className = 'thread-indicator is-new';
     el.textContent = 'Creating new Facebook post';
   }
@@ -3875,8 +4130,14 @@ if (filterStateSelect) filterStateSelect.addEventListener('change', applyFilters
 if (filterSeveritySelect) filterSeveritySelect.addEventListener('change', applyFilters);
 if (clearFiltersBtn) clearFiltersBtn.addEventListener('click', clearFilters);
 
-const autoPostToggleInput = document.getElementById('autoPostTornadoWarnings');
+const autoPostModeSelect = document.getElementById('autoPostMode');
+const autoPostHelp = document.getElementById('autoPostHelp');
 const autoPostStatus = document.getElementById('autoPostStatus');
+const AUTO_POST_MODE_HELP = {
+  off: 'Automatic Facebook posting is disabled.',
+  tornado_only: 'All active, timely Tornado Warnings auto-post and follow the existing Facebook thread/comment rules.',
+  smart_high_impact: 'All active, timely Tornado Warnings auto-post. Other warnings must hit a major metro or cover at least 10 counties, with extra Severe Thunderstorm thresholds.',
+};
 
 function setAutoPostStatus(message, variant) {
   if (!autoPostStatus) return;
@@ -3884,35 +4145,44 @@ function setAutoPostStatus(message, variant) {
   autoPostStatus.textContent = message;
 }
 
-async function saveAutoPostToggle() {
-  if (!autoPostToggleInput) return;
-  const previousChecked = !autoPostToggleInput.checked;
-  autoPostToggleInput.disabled = true;
+function syncAutoPostHelp() {
+  if (!autoPostHelp || !autoPostModeSelect) return;
+  autoPostHelp.textContent = AUTO_POST_MODE_HELP[autoPostModeSelect.value] || AUTO_POST_MODE_HELP.off;
+}
+
+async function saveAutoPostMode() {
+  if (!autoPostModeSelect) return;
+  const previousMode = AUTO_POST_CONFIG.mode || 'off';
+  autoPostModeSelect.disabled = true;
   setAutoPostStatus('Saving auto-post setting...', '');
 
   try {
     const response = await fetch('/admin/auto-post-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tornadoWarningsEnabled: autoPostToggleInput.checked }),
+      body: JSON.stringify({ mode: autoPostModeSelect.value }),
     });
     const data = await response.json();
     if (!response.ok || !data.success) {
       throw new Error(data.error || 'Unable to save auto-post setting');
     }
+    AUTO_POST_CONFIG.mode = data.config && data.config.mode ? data.config.mode : autoPostModeSelect.value;
+    syncAutoPostHelp();
     setAutoPostStatus(data.message || 'Auto-post setting saved.', 'ok');
   } catch (err) {
-    autoPostToggleInput.checked = previousChecked;
+    autoPostModeSelect.value = previousMode;
+    syncAutoPostHelp();
     const message = err instanceof Error ? err.message : String(err);
     setAutoPostStatus('Error saving auto-post setting: ' + message, 'err');
   } finally {
-    autoPostToggleInput.disabled = false;
+    autoPostModeSelect.disabled = false;
   }
 }
 
-if (autoPostToggleInput) {
-  autoPostToggleInput.checked = AUTO_POST_CONFIG.tornadoWarningsEnabled === true;
-  autoPostToggleInput.addEventListener('change', saveAutoPostToggle);
+if (autoPostModeSelect) {
+  autoPostModeSelect.value = AUTO_POST_CONFIG.mode || 'off';
+  syncAutoPostHelp();
+  autoPostModeSelect.addEventListener('change', saveAutoPostMode);
 }
 
 const btnTokenExchange = document.getElementById('btnTokenExchange');
@@ -4021,12 +4291,16 @@ applyFilters();
 		'</div>\n' +
 		'\n<div class="admin-panel">\n' +
 		'  <h2>Facebook Auto Post</h2>\n' +
-		'  <p>Automatically post Tornado Warnings to Facebook and keep updates in the same post/comment thread flow used by manual posting.</p>\n' +
-		'  <label class="toggle-row" for="autoPostTornadoWarnings">\n' +
-		'    <input id="autoPostTornadoWarnings" type="checkbox"' + (tornadoAutoPostEnabled ? ' checked' : '') + ' />\n' +
-		'    <span>Auto-post Tornado Warnings</span>\n' +
+		'  <p>Choose how automatic Facebook posting should behave. Auto-posted alerts use the same post/comment thread flow as manual posting in admin.</p>\n' +
+		'  <label class="toggle-row" for="autoPostMode">\n' +
+		'    <span>Auto-post mode</span>\n' +
+		'    <select id="autoPostMode">\n' +
+		'      <option value="off"' + (normalizedAutoPostConfig.mode === 'off' ? ' selected' : '') + '>Off</option>\n' +
+		'      <option value="tornado_only"' + (normalizedAutoPostConfig.mode === 'tornado_only' ? ' selected' : '') + '>Tornado-only</option>\n' +
+		'      <option value="smart_high_impact"' + (normalizedAutoPostConfig.mode === 'smart_high_impact' ? ' selected' : '') + '>Smart high-impact</option>\n' +
+		'    </select>\n' +
 		'  </label>\n' +
-		'  <p class="toggle-help">New, updated, and extended Tornado Warnings will post automatically when this is enabled.</p>\n' +
+		'  <p id="autoPostHelp" class="toggle-help">' + safeHtml(fbAutoPostModeHelp(normalizedAutoPostConfig.mode)) + '</p>\n' +
 		'  <div id="autoPostStatus" class="auto-post-status">' + safeHtml(autoPostStatusText) + '</div>\n' +
 		'</div>\n' +
 		'\n<div class="token-exchange">\n' +
@@ -4254,6 +4528,7 @@ async function publishFeatureToFacebook(
 	const customMessage = String(options.customMessage || '').trim();
 	const threadAction = normalizeFacebookPublishThreadAction(options.threadAction);
 	const event = String(properties.event ?? 'Weather Alert');
+	const nowIso = new Date().toISOString();
 	const ugcCodes: string[] = Array.isArray(properties.geocode?.UGC) && properties.geocode.UGC.length > 0
 		? properties.geocode.UGC
 		: ['UNKNOWN'];
@@ -4278,6 +4553,7 @@ async function publishFeatureToFacebook(
 			county: String(properties.areaDesc ?? ''),
 			alertType: event,
 			updateCount: 0,
+			lastPostedAt: nowIso,
 		};
 		for (const ugcCode of ugcCodes) {
 			await writeThread(env, ugcCode, { ...nextThread });
@@ -4303,6 +4579,7 @@ async function publishFeatureToFacebook(
 			nwsAlertId: String(feature?.id ?? ''),
 			expiresAt,
 			updateCount: currentCount + 1,
+			lastPostedAt: nowIso,
 		};
 		for (const ugcCode of ugcCodes) {
 			await writeThread(env, ugcCode, { ...updatedThread });
@@ -4337,6 +4614,7 @@ async function publishFeatureToFacebook(
 		county: String(properties.areaDesc ?? ''),
 		alertType: event,
 		updateCount: 0,
+		lastPostedAt: nowIso,
 	};
 	for (const ugcCode of ugcCodes) {
 		await writeThread(env, ugcCode, { ...chainedThread });
@@ -4420,18 +4698,39 @@ async function handleAutoPostConfig(request: Request, env: Env): Promise<Respons
 	}
 
 	const form = await parseRequestBody(request);
-	const rawValue = String(form.get('tornadoWarningsEnabled') || '').trim().toLowerCase();
-	if (!['true', 'false', '1', '0', 'on', 'off'].includes(rawValue)) {
-		return new Response(JSON.stringify({ error: 'tornadoWarningsEnabled must be true or false' }), {
-			status: 400,
-			headers: { 'Content-Type': 'application/json' },
-		});
+	const rawMode = String(form.get('mode') || '').trim().toLowerCase();
+	let mode: FbAutoPostMode | null = null;
+
+	if (rawMode) {
+		if (
+			rawMode === 'off'
+			|| rawMode === 'tornado_only'
+			|| rawMode === 'smart_high_impact'
+		) {
+			mode = rawMode;
+		} else {
+			return new Response(JSON.stringify({ error: 'mode must be off, tornado_only, or smart_high_impact' }), {
+				status: 400,
+				headers: { 'Content-Type': 'application/json' },
+			});
+		}
 	}
 
-	const tornadoWarningsEnabled =
-		rawValue === 'true' || rawValue === '1' || rawValue === 'on';
+	if (!mode) {
+		const rawValue = String(form.get('tornadoWarningsEnabled') || '').trim().toLowerCase();
+		if (!['true', 'false', '1', '0', 'on', 'off'].includes(rawValue)) {
+			return new Response(JSON.stringify({ error: 'mode is required' }), {
+				status: 400,
+				headers: { 'Content-Type': 'application/json' },
+			});
+		}
+		mode = rawValue === 'true' || rawValue === '1' || rawValue === 'on'
+			? 'tornado_only'
+			: 'off';
+	}
+
 	const nextConfig: FbAutoPostConfig = {
-		tornadoWarningsEnabled,
+		mode,
 		updatedAt: new Date().toISOString(),
 	};
 	await writeFbAutoPostConfig(env, nextConfig);
@@ -4439,9 +4738,7 @@ async function handleAutoPostConfig(request: Request, env: Env): Promise<Respons
 	return new Response(JSON.stringify({
 		success: true,
 		config: nextConfig,
-		message: tornadoWarningsEnabled
-			? `Auto-post tornado warnings enabled. Saved ${formatLastSynced(nextConfig.updatedAt || '')}.`
-			: `Auto-post tornado warnings disabled. Saved ${formatLastSynced(nextConfig.updatedAt || '')}.`,
+		message: buildFbAutoPostStatusText(nextConfig),
 	}), {
 		status: 200,
 		headers: { 'Content-Type': 'application/json' },
@@ -7640,25 +7937,121 @@ async function handlePost(request: Request, env: Env): Promise<Response> {
 	});
 }
 
-async function autoPostTornadoWarnings(
+async function evaluateFacebookAutoPostDecision(
+	env: Env,
+	mode: FbAutoPostMode,
+	feature: any,
+	change: AlertChangeRecord,
+): Promise<FacebookAutoPostDecision> {
+	const event = String(feature?.properties?.event || change.event || '').trim();
+	const countyCount = Math.max(
+		extractFullCountyFipsCodes(feature, change).length,
+		dedupeStrings((change.countyCodes || []).map((countyCode) => String(countyCode || '').trim())).length,
+	);
+	const matchedMetroNames = matchingMetroNamesForAlert(feature, change);
+	const noDecision = (
+		reason: string,
+		threadAction: FacebookPublishThreadAction = '',
+	): FacebookAutoPostDecision => ({
+		eligible: false,
+		threadAction,
+		reason,
+		mode,
+		matchedMetroNames,
+		countyCount,
+	});
+
+	if (mode === 'off') return noDecision('mode_off');
+	if (!isWarningEvent(event)) return noDecision('not_warning');
+	if (
+		change.changeType !== 'new'
+		&& change.changeType !== 'updated'
+		&& change.changeType !== 'extended'
+	) {
+		return noDecision('change_not_postable');
+	}
+	if (!isAutoPostCandidateActive(feature)) return noDecision('inactive_or_expired');
+	if (!isAutoPostCandidateTimely(feature, change)) return noDecision('stale_alert');
+
+	const existingThread = await readExistingThreadForAlert(
+		env,
+		Array.isArray(feature?.properties?.geocode?.UGC) ? feature.properties.geocode.UGC : [],
+		event,
+	);
+	const threadAction: FacebookPublishThreadAction = existingThread && !threadIsRecentForAutoPost(existingThread)
+		? 'new_post'
+		: '';
+
+	if (mode === 'tornado_only') {
+		if (!isTornadoWarningEvent(event)) return noDecision('mode_tornado_only_non_tornado', threadAction);
+		return {
+			eligible: true,
+			threadAction,
+			reason: 'all_tornado_warnings',
+			mode,
+			matchedMetroNames,
+			countyCount,
+		};
+	}
+
+	if (isTornadoWarningEvent(event)) {
+		return {
+			eligible: true,
+			threadAction,
+			reason: 'all_tornado_warnings',
+			mode,
+			matchedMetroNames,
+			countyCount,
+		};
+	}
+
+	const tierOneReason = detectTierOneAutoPostReason(feature);
+	if (tierOneReason) {
+		return {
+			eligible: true,
+			threadAction,
+			reason: tierOneReason,
+			mode,
+			matchedMetroNames,
+			countyCount,
+		};
+	}
+
+	const passesBaseImpactGate = matchedMetroNames.length > 0 || countyCount >= 10;
+	if (!passesBaseImpactGate) {
+		return noDecision('impact_gate_not_met', threadAction);
+	}
+
+	if (isSevereThunderstormWarningEvent(event) && !hasSevereThunderstormDestructiveCriteria(feature)) {
+		return noDecision('severe_thunderstorm_below_threshold', threadAction);
+	}
+
+	return {
+		eligible: true,
+		threadAction,
+		reason: matchedMetroNames.length > 0 ? 'major_metro_warning' : 'ten_county_warning',
+		mode,
+		matchedMetroNames,
+		countyCount,
+	};
+}
+
+async function autoPostFacebookAlerts(
 	env: Env,
 	map: Record<string, any>,
 	changes: AlertChangeRecord[],
 ): Promise<void> {
 	const config = await readFbAutoPostConfig(env);
-	if (!config.tornadoWarningsEnabled) return;
+	if (config.mode === 'off') return;
 	if (!env.FB_PAGE_ID || !env.FB_PAGE_ACCESS_TOKEN) {
-		console.warn('[fb-auto-post] Tornado warning auto-post is enabled but Facebook credentials are missing.');
+		console.warn(`[fb-auto-post] ${config.mode} mode is enabled but Facebook credentials are missing.`);
 		return;
 	}
 
 	const relevantChanges = changes.filter((change) =>
-		isTornadoWarningEvent(change.event)
-		&& (
-			change.changeType === 'new'
-			|| change.changeType === 'updated'
-			|| change.changeType === 'extended'
-		),
+		change.changeType === 'new'
+		|| change.changeType === 'updated'
+		|| change.changeType === 'extended',
 	);
 	if (relevantChanges.length === 0) return;
 
@@ -7667,15 +8060,28 @@ async function autoPostTornadoWarnings(
 			map[change.alertId]
 			|| Object.values(map).find((candidate: any) => String(candidate?.id ?? '') === change.alertId);
 		if (!feature) continue;
-		if (!isTornadoWarningEvent(String(feature?.properties?.event || change.event))) continue;
-		try {
-			const result = await publishFeatureToFacebook(env, feature);
+
+		const decision = await evaluateFacebookAutoPostDecision(env, config.mode, feature, change);
+		if (!decision.eligible) {
 			console.log(
-				`[fb-auto-post] ${result.status} tornado warning ${change.alertId} change=${change.changeType} post=${result.postId}`,
+				`[fb-auto-post] skipped ${change.alertId} event="${String(feature?.properties?.event || change.event || '')}" reason=${decision.reason}`,
+			);
+			continue;
+		}
+
+		try {
+			const result = await publishFeatureToFacebook(env, feature, {
+				threadAction: decision.threadAction,
+			});
+			const metroLabel = decision.matchedMetroNames.length > 0
+				? ` metros=${decision.matchedMetroNames.join('|')}`
+				: '';
+			console.log(
+				`[fb-auto-post] ${result.status} ${change.alertId} mode=${decision.mode} reason=${decision.reason} change=${change.changeType} counties=${decision.countyCount}${metroLabel} post=${result.postId}`,
 			);
 		} catch (err) {
 			console.error(
-				`[fb-auto-post] failed for tornado warning ${change.alertId}: ${String(err)}`,
+				`[fb-auto-post] failed for ${change.alertId} mode=${decision.mode} reason=${decision.reason}: ${String(err)}`,
 			);
 		}
 	}
@@ -7690,7 +8096,7 @@ async function handleScheduled(env: Env): Promise<void> {
 	const { map } = await syncAlerts(env);
 	const lifecycleDiff = await syncAlertLifecycleState(env, map);
 	await syncAlertHistoryDailySnapshots(env, map, lifecycleDiff.changes);
-	await autoPostTornadoWarnings(env, map, lifecycleDiff.changes);
+	await autoPostFacebookAlerts(env, map, lifecycleDiff.changes);
 	await dispatchStatePushNotifications(env, map, lifecycleDiff.changes);
 }
 
@@ -7720,6 +8126,10 @@ export const __testing = {
 	normalizePushPreferences,
 	alertToText,
 	buildCommentText,
+	normalizeFbAutoPostConfig,
+	evaluateFacebookAutoPostDecision,
+	matchingMetroNamesForAlert,
+	hasSevereThunderstormDestructiveCriteria,
 };
 
 export default {

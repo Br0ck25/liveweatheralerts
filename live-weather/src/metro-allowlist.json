@@ -1,0 +1,252 @@
+[
+  {
+    "id": "new_york_city",
+    "name": "New York City",
+    "countyFips": ["36005", "36047", "36061", "36081", "36085", "34003", "34013", "34017", "34031", "34039"]
+  },
+  {
+    "id": "los_angeles",
+    "name": "Los Angeles",
+    "countyFips": ["06037", "06059", "06111", "06065"]
+  },
+  {
+    "id": "chicago",
+    "name": "Chicago",
+    "countyFips": ["17031", "17043", "17089", "17097", "17197", "18089", "18091", "18111"]
+  },
+  {
+    "id": "dallas_fort_worth",
+    "name": "Dallas-Fort Worth",
+    "countyFips": ["48113", "48439", "48085", "48121", "48397", "48231", "48257"]
+  },
+  {
+    "id": "houston",
+    "name": "Houston",
+    "countyFips": ["48201", "48157", "48339", "48039", "48071", "48167"]
+  },
+  {
+    "id": "washington_dc",
+    "name": "Washington, DC",
+    "countyFips": ["11001", "24031", "24033", "51013", "51059", "51510"]
+  },
+  {
+    "id": "miami",
+    "name": "Miami",
+    "countyFips": ["12086", "12011", "12099"]
+  },
+  {
+    "id": "philadelphia",
+    "name": "Philadelphia",
+    "countyFips": ["42101", "42017", "42029", "42045", "42091", "34007", "34015"]
+  },
+  {
+    "id": "atlanta",
+    "name": "Atlanta",
+    "countyFips": ["13121", "13067", "13089", "13063", "13135", "13057"]
+  },
+  {
+    "id": "phoenix",
+    "name": "Phoenix",
+    "countyFips": ["04013", "04021"]
+  },
+  {
+    "id": "boston",
+    "name": "Boston",
+    "countyFips": ["25025", "25009", "25017", "25021", "25023"]
+  },
+  {
+    "id": "inland_empire",
+    "name": "Riverside-San Bernardino",
+    "countyFips": ["06065", "06071"]
+  },
+  {
+    "id": "san_francisco_bay_area",
+    "name": "San Francisco Bay Area",
+    "countyFips": ["06001", "06013", "06041", "06075", "06081", "06085"]
+  },
+  {
+    "id": "detroit",
+    "name": "Detroit",
+    "countyFips": ["26099", "26125", "26163"]
+  },
+  {
+    "id": "seattle",
+    "name": "Seattle",
+    "countyFips": ["53033", "53053", "53061"]
+  },
+  {
+    "id": "minneapolis_st_paul",
+    "name": "Minneapolis-St. Paul",
+    "countyFips": ["27003", "27037", "27053", "27123", "27163"]
+  },
+  {
+    "id": "san_diego",
+    "name": "San Diego",
+    "countyFips": ["06073"]
+  },
+  {
+    "id": "tampa_bay",
+    "name": "Tampa Bay",
+    "countyFips": ["12057", "12101", "12103", "12105"]
+  },
+  {
+    "id": "denver",
+    "name": "Denver",
+    "countyFips": ["08001", "08005", "08013", "08031", "08059"]
+  },
+  {
+    "id": "baltimore",
+    "name": "Baltimore",
+    "countyFips": ["24003", "24005", "24027", "24510"]
+  },
+  {
+    "id": "st_louis",
+    "name": "St. Louis",
+    "countyFips": ["29183", "29189", "29510"]
+  },
+  {
+    "id": "charlotte",
+    "name": "Charlotte",
+    "countyFips": ["37025", "37071", "37119", "37179"]
+  },
+  {
+    "id": "orlando",
+    "name": "Orlando",
+    "countyFips": ["12095", "12097", "12117"]
+  },
+  {
+    "id": "san_antonio",
+    "name": "San Antonio",
+    "countyFips": ["48029", "48091", "48187"]
+  },
+  {
+    "id": "portland",
+    "name": "Portland",
+    "countyFips": ["41005", "41051", "41067", "53011"]
+  },
+  {
+    "id": "sacramento",
+    "name": "Sacramento",
+    "countyFips": ["06017", "06061", "06067", "06113"]
+  },
+  {
+    "id": "pittsburgh",
+    "name": "Pittsburgh",
+    "countyFips": ["42003", "42125", "42129"]
+  },
+  {
+    "id": "las_vegas",
+    "name": "Las Vegas",
+    "countyFips": ["32003"]
+  },
+  {
+    "id": "cincinnati",
+    "name": "Cincinnati",
+    "countyFips": ["21015", "21037", "21117", "39017", "39061", "39165"]
+  },
+  {
+    "id": "kansas_city",
+    "name": "Kansas City",
+    "countyFips": ["20091", "20209", "29047", "29095", "29165"]
+  },
+  {
+    "id": "columbus",
+    "name": "Columbus",
+    "countyFips": ["39041", "39045", "39049", "39089"]
+  },
+  {
+    "id": "indianapolis",
+    "name": "Indianapolis",
+    "countyFips": ["18057", "18063", "18081", "18097"]
+  },
+  {
+    "id": "cleveland",
+    "name": "Cleveland",
+    "countyFips": ["39035", "39085", "39093", "39103"]
+  },
+  {
+    "id": "austin",
+    "name": "Austin",
+    "countyFips": ["48209", "48453", "48491"]
+  },
+  {
+    "id": "nashville",
+    "name": "Nashville",
+    "countyFips": ["47037", "47149", "47187"]
+  },
+  {
+    "id": "san_jose",
+    "name": "San Jose",
+    "countyFips": ["06085"]
+  },
+  {
+    "id": "hampton_roads",
+    "name": "Hampton Roads",
+    "countyFips": ["51550", "51650", "51700", "51710", "51740", "51800", "51810"]
+  },
+  {
+    "id": "providence",
+    "name": "Providence",
+    "countyFips": ["44003", "44007"]
+  },
+  {
+    "id": "milwaukee",
+    "name": "Milwaukee",
+    "countyFips": ["55079", "55089", "55131", "55133"]
+  },
+  {
+    "id": "jacksonville",
+    "name": "Jacksonville",
+    "countyFips": ["12019", "12031", "12089", "12109"]
+  },
+  {
+    "id": "oklahoma_city",
+    "name": "Oklahoma City",
+    "countyFips": ["40017", "40027", "40109"]
+  },
+  {
+    "id": "raleigh",
+    "name": "Raleigh",
+    "countyFips": ["37063", "37101", "37183"]
+  },
+  {
+    "id": "memphis",
+    "name": "Memphis",
+    "countyFips": ["05035", "28033", "47157"]
+  },
+  {
+    "id": "richmond",
+    "name": "Richmond",
+    "countyFips": ["51041", "51087", "51760"]
+  },
+  {
+    "id": "louisville",
+    "name": "Louisville",
+    "countyFips": ["21029", "21111", "21185"]
+  },
+  {
+    "id": "new_orleans",
+    "name": "New Orleans",
+    "countyFips": ["22051", "22071", "22087", "22103"]
+  },
+  {
+    "id": "salt_lake_city",
+    "name": "Salt Lake City",
+    "countyFips": ["49011", "49035", "49049"]
+  },
+  {
+    "id": "hartford",
+    "name": "Hartford",
+    "countyFips": ["09003", "09007", "09013"]
+  },
+  {
+    "id": "buffalo",
+    "name": "Buffalo",
+    "countyFips": ["36029", "36063"]
+  },
+  {
+    "id": "birmingham",
+    "name": "Birmingham",
+    "countyFips": ["01073", "01117"]
+  }
+]

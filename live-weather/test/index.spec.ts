@@ -145,7 +145,7 @@ describe('Live Weather Admin worker', () => {
 		expect(response.status).toBe(200);
 		expect(body).toContain('Live Weather Alerts Admin');
 		expect(body).toContain('Tornado Warning');
-		expect(body).toContain('autoPostTornadoWarnings');
+		expect(body).toContain('autoPostMode');
 		expect(body).toContain('liveWeatherAdminFilters:v1');
 	});
 
@@ -1533,7 +1533,7 @@ describe('Live Weather Admin worker', () => {
 		expect((globalThis.fetch as any).mock.calls.some(([input]) => String(input).includes('/photos'))).toBe(true);
 	});
 
-	it('saves the tornado warning auto-post toggle and renders it checked on admin refresh', async () => {
+	it('saves the facebook auto-post mode and renders it selected on admin refresh', async () => {
 		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
 		const loginResp = await worker.fetch(
 			new IncomingRequest('https://live-weather.example/admin/login', {
@@ -1552,7 +1552,7 @@ describe('Live Weather Admin worker', () => {
 				'Content-Type': 'application/json',
 				Cookie: cookie,
 			},
-			body: JSON.stringify({ tornadoWarningsEnabled: true }),
+			body: JSON.stringify({ mode: 'smart_high_impact' }),
 		});
 		const saveCtx = createExecutionContext();
 		const saveResponse = await worker.fetch(saveRequest, goodEnv as any, saveCtx);
@@ -1560,11 +1560,11 @@ describe('Live Weather Admin worker', () => {
 		expect(saveResponse.status).toBe(200);
 		const savePayload = await saveResponse.json() as any;
 		expect(savePayload.success).toBe(true);
-		expect(savePayload.config.tornadoWarningsEnabled).toBe(true);
+		expect(savePayload.config.mode).toBe('smart_high_impact');
 
 		const storedConfigRaw = await goodEnv.WEATHER_KV.get('fb:auto-post-config');
 		expect(storedConfigRaw).toBeTruthy();
-		expect(JSON.parse(storedConfigRaw || '{}').tornadoWarningsEnabled).toBe(true);
+		expect(JSON.parse(storedConfigRaw || '{}').mode).toBe('smart_high_impact');
 
 		const pageRequest = new IncomingRequest('https://live-weather.example/admin', {
 			headers: { Cookie: cookie },
@@ -1574,8 +1574,9 @@ describe('Live Weather Admin worker', () => {
 		await waitOnExecutionContext(pageCtx);
 		expect(pageResponse.status).toBe(200);
 		const body = await pageResponse.text();
-		expect(body).toContain('Auto-post Tornado Warnings');
-		expect(body).toContain('id="autoPostTornadoWarnings" type="checkbox" checked');
+		expect(body).toContain('Auto-post mode');
+		expect(body).toContain('id="autoPostMode"');
+		expect(body).toContain('<option value="smart_high_impact" selected>');
 	});
 
 	it('auto-posts updated tornado warnings as Facebook comments during the scheduled sync', async () => {
@@ -1586,7 +1587,7 @@ describe('Live Weather Admin worker', () => {
 		};
 		const nowIso = new Date().toISOString();
 		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
-			tornadoWarningsEnabled: true,
+			mode: 'tornado_only',
 			updatedAt: nowIso,
 		}));
 		await goodEnv.WEATHER_KV.put('alerts:lifecycle-snapshot:v1', JSON.stringify({
@@ -1639,6 +1640,213 @@ describe('Live Weather Admin worker', () => {
 		const threadRaw = await goodEnv.WEATHER_KV.get('thread:KYC001:tornado_warning');
 		expect(threadRaw).toBeTruthy();
 		expect(JSON.parse(threadRaw || '{}').updateCount).toBe(2);
+	});
+
+	it('starts a new tornado thread after the auto-post comment chain limit is reached', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowIso = new Date().toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'tornado_only',
+			updatedAt: nowIso,
+		}));
+		await goodEnv.WEATHER_KV.put('alerts:lifecycle-snapshot:v1', JSON.stringify({
+			'alert-1': {
+				alertId: 'alert-1',
+				stateCodes: ['KY'],
+				countyCodes: ['001'],
+				event: 'Tornado Warning',
+				areaDesc: 'Test County',
+				lat: 37.17,
+				lon: -83.28,
+				headline: 'Test tornado warning',
+				description: 'Previous tornado warning details',
+				instruction: '',
+				severity: 'Severe',
+				urgency: '',
+				certainty: '',
+				updated: '',
+				expires: '2026-03-29T23:00:00-04:00',
+				lastChangeType: 'new',
+				lastChangedAt: '2026-03-29T20:00:00.000Z',
+			},
+		}));
+		await goodEnv.WEATHER_KV.put('thread:KYC001:tornado_warning', JSON.stringify({
+			postId: 'existing-post-1',
+			nwsAlertId: 'alert-1',
+			expiresAt: Math.floor(Date.now() / 1000) + 3600,
+			county: 'Test County',
+			alertType: 'Tornado Warning',
+			updateCount: 3,
+			lastPostedAt: nowIso,
+		}));
+
+		const ctx = createExecutionContext();
+		await worker.scheduled(
+			{
+				cron: '*/2 * * * *',
+				scheduledTime: Date.now(),
+			} as any,
+			goodEnv as any,
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(
+			(globalThis.fetch as any).mock.calls.some(([input]) =>
+				String(input).includes('/existing-post-1/comments'),
+			),
+		).toBe(true);
+
+		const threadRaw = await goodEnv.WEATHER_KV.get('thread:KYC001:tornado_warning');
+		expect(threadRaw).toBeTruthy();
+		const nextThread = JSON.parse(threadRaw || '{}');
+		expect(nextThread.postId).toBe('12345');
+		expect(nextThread.updateCount).toBe(0);
+	});
+
+	it('normalizes legacy boolean auto-post config to tornado-only mode', () => {
+		expect(__testing.normalizeFbAutoPostConfig(true).mode).toBe('tornado_only');
+		expect(__testing.normalizeFbAutoPostConfig(false).mode).toBe('off');
+	});
+
+	it('qualifies smart auto-post warnings using the new tornado, metro, and county-count rules', async () => {
+		const tornadoDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'tw-rural',
+				properties: {
+					event: 'Tornado Warning',
+					areaDesc: 'Leslie County',
+					geocode: { UGC: ['KYC131'] },
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'tw-rural',
+				stateCodes: ['KY'],
+				countyCodes: ['131'],
+				event: 'Tornado Warning',
+				areaDesc: 'Leslie County',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(tornadoDecision.eligible).toBe(true);
+		expect(tornadoDecision.reason).toBe('all_tornado_warnings');
+
+		const floodDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'flood-10',
+				properties: {
+					event: 'Flood Warning',
+					areaDesc: 'Ten county flood warning',
+					geocode: {
+						UGC: ['KYC001', 'KYC003', 'KYC005', 'KYC007', 'KYC009', 'KYC011', 'KYC013', 'KYC015', 'KYC017', 'KYC019'],
+					},
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'flood-10',
+				stateCodes: ['KY'],
+				countyCodes: ['001', '003', '005', '007', '009', '011', '013', '015', '017', '019'],
+				event: 'Flood Warning',
+				areaDesc: 'Ten county flood warning',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(floodDecision.eligible).toBe(true);
+		expect(floodDecision.countyCount).toBe(10);
+
+		const metroSevereDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'svr-metro-low',
+				properties: {
+					event: 'Severe Thunderstorm Warning',
+					areaDesc: 'Dallas County',
+					geocode: { UGC: ['TXC113'] },
+					parameters: { maxWindGust: ['60'], maxHailSize: ['1.00'] },
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'svr-metro-low',
+				stateCodes: ['TX'],
+				countyCodes: ['113'],
+				event: 'Severe Thunderstorm Warning',
+				areaDesc: 'Dallas County',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(metroSevereDecision.eligible).toBe(false);
+		expect(metroSevereDecision.reason).toBe('severe_thunderstorm_below_threshold');
+
+		const metroSevereHighDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'svr-metro-high',
+				properties: {
+					event: 'Severe Thunderstorm Warning',
+					areaDesc: 'Dallas County',
+					geocode: { UGC: ['TXC113'] },
+					parameters: { maxWindGust: ['80'] },
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'svr-metro-high',
+				stateCodes: ['TX'],
+				countyCodes: ['113'],
+				event: 'Severe Thunderstorm Warning',
+				areaDesc: 'Dallas County',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(metroSevereHighDecision.eligible).toBe(true);
+		expect(metroSevereHighDecision.reason).toBe('major_metro_warning');
+
+		const staleTornadoDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'tw-stale',
+				properties: {
+					event: 'Tornado Warning',
+					areaDesc: 'Old Tornado Warning',
+					geocode: { UGC: ['KYC131'] },
+					sent: new Date(Date.now() - 31 * 60 * 1000).toISOString(),
+					expires: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'tw-stale',
+				stateCodes: ['KY'],
+				countyCodes: ['131'],
+				event: 'Tornado Warning',
+				areaDesc: 'Old Tornado Warning',
+				changedAt: new Date(Date.now() - 31 * 60 * 1000).toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(staleTornadoDecision.eligible).toBe(false);
+		expect(staleTornadoDecision.reason).toBe('stale_alert');
 	});
 
 	it('subscribes with multi-scope prefs and writes state indexes', async () => {
