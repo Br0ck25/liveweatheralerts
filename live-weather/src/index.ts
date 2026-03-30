@@ -32,8 +32,8 @@ const DEFAULT_WEATHER_LAT = 41.8781;
 const DEFAULT_WEATHER_LON = -87.6298;
 const PRIMARY_APP_ORIGIN = 'https://liveweatheralerts.com';
 const WWW_APP_ORIGIN = 'https://www.liveweatheralerts.com';
-const PUBLIC_ALERTS_PAGE_PATH = '/live-weather-alerts';
-const PUBLIC_ALERTS_PAGE_URL = new URL(PUBLIC_ALERTS_PAGE_PATH, PRIMARY_APP_ORIGIN).toString();
+const PUBLIC_ALERTS_PAGE_PATH = '/';
+const PUBLIC_ALERTS_PAGE_URL = PRIMARY_APP_ORIGIN;
 
 // KV keys
 const KV_ALERT_MAP  = 'alerts:map';       // JSON: Record<alertId, feature> — merged active alerts
@@ -374,7 +374,8 @@ function buildCommentText(text: string): string {
 		if (/^https?:\/\//i.test(trimmed)) {
 			try {
 				const url = new URL(trimmed);
-				if (url.pathname.replace(/\/+$/, '') === PUBLIC_ALERTS_PAGE_PATH) return false;
+				const normalizedPath = url.pathname.replace(/\/+$/, '') || '/';
+				if (normalizedPath === PUBLIC_ALERTS_PAGE_PATH) return false;
 			} catch {
 				// Ignore malformed URLs and keep the line.
 			}
@@ -606,6 +607,10 @@ function formatTimestampText(text: string): string {
 		});
 }
 
+function escapeRegExp(value: string): string {
+	return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function formatAlertDescription(raw: string): string {
 	let text = String(raw || '').trim();
 
@@ -638,11 +643,38 @@ function formatAlertDescription(raw: string): string {
 	// start of a line OR immediately after a newline, then inject "LABEL: ".
 	// We use a lookahead for an uppercase letter or digit after the keyword to
 	// catch the run-together case, and also match the ellipsis form "WHAT...".
-	text = text.replace(/(\n|^)WHAT(\.{0,3}|(?=[A-Z0-9]))(\s*)/gm,   '\nWHAT: ');
-	text = text.replace(/(\n|^)WHERE(\.{0,3}|(?=[A-Z0-9]))(\s*)/gm,  '\nWHERE: ');
-	text = text.replace(/(\n|^)WHEN(\.{0,3}|(?=[A-Z0-9]))(\s*)/gm,   '\nWHEN: ');
-	text = text.replace(/(\n|^)IMPACTS(\.{0,3}|(?=[A-Z0-9]))(\s*)/gm,'\nIMPACTS: ');
-	text = text.replace(/(\n|^)ADDITIONAL DETAILS(\.{0,3}|(?=[A-Z0-9]))(\s*)/gim, '\nADDITIONAL DETAILS: ');
+	text = text.replace(/(\n|^)WHAT(\.{0,3}|(?=[A-Z0-9]))([ \t]*)/gm,   '\nWHAT: ');
+	text = text.replace(/(\n|^)WHERE(\.{0,3}|(?=[A-Z0-9]))([ \t]*)/gm,  '\nWHERE: ');
+	text = text.replace(/(\n|^)WHEN(\.{0,3}|(?=[A-Z0-9]))([ \t]*)/gm,   '\nWHEN: ');
+	text = text.replace(/(\n|^)IMPACTS(\.{0,3}|(?=[A-Z0-9]))([ \t]*)/gm,'\nIMPACTS: ');
+	text = text.replace(/(\n|^)ADDITIONAL DETAILS(\.{0,3}|(?=[A-Z0-9]))([ \t]*)/gim, '\nADDITIONAL DETAILS: ');
+
+	// Format 3: Fire weather / technical products — WINDS... RELATIVE HUMIDITY...
+	// TEMPERATURES... FUELS (ERC)... WEATHER... FIRE ENVIRONMENT...
+	const nwsSectionLabels = [
+		'WINDS',
+		'RELATIVE HUMIDITY',
+		'TEMPERATURES',
+		'SEVERITY',
+		'FUELS (ERC)',
+		'WEATHER',
+		'FIRE ENVIRONMENT',
+		'THUNDERSTORMS',
+		'TIMING',
+		'MIXING HEIGHT',
+		'TRANSPORT WINDS',
+		'SMOKE DISPERSION',
+		'RED FLAG THREAT INDEX',
+		'CHANCE OF WETTING RAIN',
+		'LIGHTNING ACTIVITY LEVEL',
+	];
+	for (const label of nwsSectionLabels) {
+		const pattern = new RegExp(
+			`(\\n|^)${escapeRegExp(label)}(\\.{0,3}|(?=[A-Z0-9]))([ \\t]*)`,
+			'gm',
+		);
+		text = text.replace(pattern, `\n${label}: `);
+	}
 
 	// Normalize "Locations impacted include..." bullet
 	text = text.replace(/\bLocations impacted include\.\.\./gi, 'Locations impacted include:');
@@ -654,7 +686,8 @@ function formatAlertDescription(raw: string): string {
 	});
 
 	// Clean up remaining NWS ellipsis punctuation
-	text = text.replace(/\.\.\./g, '');
+	text = text.replace(/\.\.\./g, ' ');
+	text = text.replace(/[ \t]{2,}/g, ' ');
 
 	// Fix run-together timestamps like "828 PM EDT" -> "8:28 PM EDT"
 	// Covers all US zones including AST (Puerto Rico / Virgin Islands)

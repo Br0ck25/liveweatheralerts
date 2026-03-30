@@ -188,13 +188,53 @@ describe('Live Weather Admin worker', () => {
 
 	it('uses liveweatheralerts.com in generated post text and strips the footer link from comment text', () => {
 		const postText = __testing.alertToText(sampleAlerts.features[0].properties);
-		expect(postText).toContain('https://liveweatheralerts.com/live-weather-alerts');
+		expect(postText).toContain('https://liveweatheralerts.com');
 		expect(postText).not.toContain('localkynews.com');
 
-		const commentText = __testing.buildCommentText(`${postText}\nhttps://example.com/live-weather-alerts`);
-		expect(commentText).not.toContain('https://liveweatheralerts.com/live-weather-alerts');
-		expect(commentText).not.toContain('https://example.com/live-weather-alerts');
+		const commentText = __testing.buildCommentText(`${postText}\nhttps://example.com/`);
+		expect(commentText).not.toContain('https://liveweatheralerts.com');
+		expect(commentText).not.toContain('https://example.com/');
 		expect(commentText).not.toContain('#weatheralert');
+	});
+
+	it('formats fire weather watch section headings cleanly for Facebook post previews', () => {
+		const postText = __testing.alertToText({
+			event: 'Fire Weather Watch',
+			areaDesc: 'Cimarron; Texas; Beaver; Dallam',
+			severity: 'Severe',
+			expires: '2026-03-30T02:00:00-05:00',
+			headline: 'Fire Weather Watch issued March 29 at 9:08PM CDT until March 30 at 9:00PM CDT by NWS Amarillo TX',
+			description: [
+				'WINDS...Southwest 15 to 25 mph with gusts up to 35 mph.',
+				'',
+				'RELATIVE HUMIDITY...As low as 8 percent.',
+				'',
+				'TEMPERATURES...In the low 90s.',
+				'',
+				'IMPACTS...Any fires that develop will have the potential to',
+				'spread rapidly. Outdoor burning is not recommended.',
+				'',
+				'SEVERITY...',
+				'',
+				'FUELS (ERC)...90th+ percentile...5 (out of 5).',
+				'',
+				'WEATHER...Near Critical...2 (out of 5).',
+				'',
+				'FIRE ENVIRONMENT...7 (out of 10).',
+			].join('\n'),
+			instruction: 'A Fire Weather Watch means that the potential for critical fire weather conditions exists. Listen for later forecasts and possible red flag warnings.',
+		});
+
+		expect(postText).toContain('WINDS: Southwest 15 to 25 mph with gusts up to 35 mph.');
+		expect(postText).toContain('RELATIVE HUMIDITY: As low as 8 percent.');
+		expect(postText).toContain('TEMPERATURES: In the low 90s.');
+		expect(postText).toContain('SEVERITY:');
+		expect(postText).toContain('FUELS (ERC): 90th+ percentile 5 (out of 5).');
+		expect(postText).toContain('WEATHER: Near Critical 2 (out of 5).');
+		expect(postText).toContain('FIRE ENVIRONMENT: 7 (out of 10).');
+		expect(postText).not.toContain('WINDSSouthwest');
+		expect(postText).not.toContain('RELATIVE HUMIDITYAs');
+		expect(postText).not.toContain('FIRE ENVIRONMENT7');
 	});
 
 	it('normalizes marine forecast heading tokens from NWS dot format', () => {
