@@ -527,30 +527,27 @@ const THEMES: Record<string, { t300: string; t400: string; bg500: string; border
   blue:    { t300: 'text-sky-300',     t400: 'text-sky-400',     bg500: 'bg-sky-500',     borderAccent: 'border-sky-400',     bgMuted: 'bg-sky-500/20',     borderMuted: 'border-sky-400/20',     ring: 'ring-sky-400/70',     iconBg: 'bg-sky-400/10',     iconBorder: 'border-sky-300/10',     hoverBorder: 'hover:border-sky-500/40',     extraBorderMuted: 'border-sky-500/20',     cardBg: 'bg-sky-950/60' },
   purple:  { t300: 'text-purple-300',  t400: 'text-purple-400',  bg500: 'bg-purple-500',  borderAccent: 'border-purple-400',  bgMuted: 'bg-purple-500/20',  borderMuted: 'border-purple-400/20',  ring: 'ring-purple-400/70',  iconBg: 'bg-purple-400/10',  iconBorder: 'border-purple-300/10',  hoverBorder: 'hover:border-purple-500/40',  extraBorderMuted: 'border-purple-500/20',  cardBg: 'bg-purple-950/60' },
   emerald: { t300: 'text-emerald-300', t400: 'text-emerald-400', bg500: 'bg-emerald-500', borderAccent: 'border-emerald-400', bgMuted: 'bg-emerald-500/20', borderMuted: 'border-emerald-400/20', ring: 'ring-emerald-400/70', iconBg: 'bg-emerald-400/10', iconBorder: 'border-emerald-300/10', hoverBorder: 'hover:border-emerald-500/40', extraBorderMuted: 'border-emerald-500/20', cardBg: 'bg-emerald-950/60' },
-  amber:   { t300: 'text-amber-300',   t400: 'text-amber-400',   bg500: 'bg-amber-500',   borderAccent: 'border-amber-400',   bgMuted: 'bg-amber-500/20',   borderMuted: 'border-amber-400/20',   ring: 'ring-amber-400/70',   iconBg: 'bg-amber-400/10',   iconBorder: 'border-amber-300/10',   hoverBorder: 'hover:border-amber-500/40',   extraBorderMuted: 'border-amber-500/20',   cardBg: 'bg-amber-950/60' },
-  rose:    { t300: 'text-rose-300',    t400: 'text-rose-400',    bg500: 'bg-rose-500',    borderAccent: 'border-rose-400',    bgMuted: 'bg-rose-500/20',    borderMuted: 'border-rose-400/20',    ring: 'ring-rose-400/70',    iconBg: 'bg-rose-400/10',    iconBorder: 'border-rose-300/10',    hoverBorder: 'hover:border-rose-500/40',    extraBorderMuted: 'border-rose-500/20',    cardBg: 'bg-rose-950/60' },
   teal:    { t300: 'text-teal-300',    t400: 'text-teal-400',    bg500: 'bg-teal-500',    borderAccent: 'border-teal-400',    bgMuted: 'bg-teal-500/20',    borderMuted: 'border-teal-400/20',    ring: 'ring-teal-400/70',    iconBg: 'bg-teal-400/10',    iconBorder: 'border-teal-300/10',    hoverBorder: 'hover:border-teal-500/40',    extraBorderMuted: 'border-teal-500/20',    cardBg: 'bg-teal-950/60' },
   white:   { t300: 'text-black/70',    t400: 'text-black',       bg500: 'bg-sky-500',     borderAccent: 'border-sky-400',     bgMuted: 'bg-slate-200',      borderMuted: 'border-slate-400',      ring: 'ring-sky-400/70',     iconBg: 'bg-sky-400/10',     iconBorder: 'border-sky-300/10',     hoverBorder: 'hover:border-sky-500/40',     extraBorderMuted: 'border-sky-500/20',     cardBg: 'bg-slate-100' },
+  black:   { t300: 'text-slate-300',    t400: 'text-slate-100',   bg500: 'bg-slate-900',   borderAccent: 'border-slate-700', bgMuted: 'bg-slate-800/70', borderMuted: 'border-slate-600/40', ring: 'ring-slate-400/70', iconBg: 'bg-slate-700/20', iconBorder: 'border-slate-600/20', hoverBorder: 'hover:border-slate-500/40', extraBorderMuted: 'border-slate-500/20', cardBg: 'bg-slate-950/70' },
 }
 
 const THEME_BG: Record<string, string> = {
   blue:    '#091320',
   purple:  '#0d091e',
   emerald: '#071510',
-  amber:   '#150e04',
-  rose:    '#17080b',
   teal:    '#071514',
   white:   '#091320',
+  black:   '#020611',
 }
 
 const NAV_BG: Record<string, string> = {
   blue:    '#0c1b30',
   purple:  '#130d24',
   emerald: '#0a1a14',
-  amber:   '#1a1204',
-  rose:    '#1c090e',
   teal:    '#0a1a18',
   white:   '#ffffff',
+  black:   '#0b1320',
 }
 
 function normalizeAlertCount(alerts: Array<Record<string, unknown>>) {
@@ -865,7 +862,9 @@ function AppInner() {
 
   const tc = THEMES[themeKey] ?? THEMES.blue
   const isWhiteTheme = themeKey === 'white'
+  const isBlackTheme = themeKey === 'black'
   const rootText = isWhiteTheme ? 'text-black' : 'text-white'
+  const radarHighlight = isWhiteTheme ? 'text-sky-500' : tc.t300
   const cardBase = `card rounded-2xl border p-5 ${tc.cardBg} ${isWhiteTheme ? 'border-slate-300 shadow-md' : 'border-white/10 shadow-2xl'}`
 
   const current = weather?.current || {}
@@ -960,7 +959,7 @@ function AppInner() {
   const activeAlertHero = countyAlerts[0] || null
 
   return (
-    <div className={`min-h-screen ${rootText} ${isWhiteTheme ? 'theme-white' : ''}`} style={{ backgroundColor: THEME_BG[themeKey] || '#091320' }}>
+    <div className={`min-h-screen ${rootText} ${isWhiteTheme ? 'theme-white' : isBlackTheme ? 'theme-black' : ''}`} style={{ backgroundColor: THEME_BG[themeKey] || '#091320' }}>
       {/* PWA install banner — slides down from top */}
       <div
         className={`fixed left-1/2 z-40 w-full max-w-md -translate-x-1/2 px-4 transition-all duration-300 ease-out ${
@@ -1454,7 +1453,7 @@ function AppInner() {
                 <div className="flex flex-col px-4 pt-4" style={{ height: 'calc(100vh - 11rem)' }}>
                   <div className="mb-3 flex items-center justify-between">
                     <div>
-                      <div className={`mb-1 text-xs tracking-wide ${tc.t300}`}>LIVE RADAR</div>
+                      <div className={`mb-1 text-xs tracking-wide ${radarHighlight}`}>LIVE RADAR</div>
                       <div className="text-lg font-semibold">{currentLocationLabel}</div>
                     </div>
                     <a
@@ -1753,10 +1752,9 @@ function AppInner() {
                         { key: 'blue',    dot: 'bg-sky-400',     label: 'Blue' },
                         { key: 'purple',  dot: 'bg-purple-400',  label: 'Purple' },
                         { key: 'emerald', dot: 'bg-emerald-400', label: 'Green' },
-                        { key: 'amber',   dot: 'bg-amber-400',   label: 'Amber' },
-                        { key: 'rose',    dot: 'bg-rose-400',    label: 'Rose' },
                         { key: 'teal',    dot: 'bg-teal-400',    label: 'Teal' },
                         { key: 'white',   dot: 'bg-white',       label: 'White' },
+                        { key: 'black',   dot: 'bg-zinc-800',    label: 'Black' },
                       ] as const).map((t) => (
                         <button
                           key={t.key}

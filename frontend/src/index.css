@@ -75,7 +75,54 @@ body {
   box-shadow: 0 1px 2px rgba(15,23,42,0.08), 0 2px 4px rgba(15,23,42,0.1) !important;
 }
 
-.theme-white .text-yellow-50,
+.theme-black {
+  color: #e2e8f0;
+  background-color: #020611;
+}
+
+.theme-black, .theme-black body, .theme-black #root {
+  background-color: #020611 !important;
+}
+
+.theme-black .bg-white\/5 { background-color: #0f172a !important; }
+.theme-black .bg-white\/10 { background-color: #141d2f !important; }
+.theme-black .bg-white\/20 { background-color: #1b2640 !important; }
+.theme-black .bg-white\/30 { background-color: #2a3960 !important; }
+
+.theme-black .border-white\/10 { border-color: #1e2d48 !important; }
+.theme-black .border-white\/20 { border-color: #20334f !important; }
+.theme-black .border-white\/30 { border-color: #243759 !important; }
+
+.theme-black .text-white,
+.theme-black [class*="text-white/"] {
+  color: #ffffff !important;
+}
+
+.theme-black .text-black,
+.theme-black [class*="text-black"] {
+  color: #ffffff !important;
+}
+
+.theme-black .text-white\/10,
+.theme-black .text-white\/20,
+.theme-black .text-white\/30,
+.theme-black .text-white\/40,
+.theme-black .text-white\/45,
+.theme-black .text-white\/50,
+.theme-black .text-white\/60,
+.theme-black .text-white\/70,
+.theme-black .text-white\/80,
+.theme-black .text-white\/90 {
+  color: rgba(255,255,255,0.85) !important;
+}
+
+.theme-black .card {
+  background-color: #0a1221 !important;
+  border-color: #1f2c48 !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.45), 0 2px 4px rgba(0,0,0,0.35) !important;
+}
+
+.theme-black .text-yellow-50,
 .theme-white .text-yellow-100,
 .theme-white .text-yellow-200,
 .theme-white .text-yellow-300,
