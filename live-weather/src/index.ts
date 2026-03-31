@@ -98,6 +98,15 @@ type FacebookAutoPostDecision = {
 	countyCount: number;
 };
 
+type AutoPostEvaluationRecord = {
+	feature: any;
+	change: AlertChangeRecord;
+	decision: FacebookAutoPostDecision;
+	event: string;
+	matchedMetroNames: string[];
+	countyCount: number;
+};
+
 type FacebookPublishThreadAction = '' | 'new_post' | 'comment';
 
 type FacebookPublishOptions = {
@@ -334,6 +343,37 @@ interface SavedLocation {
 	label: string;
 }
 
+type AdminForecastLocationConfig = {
+	id: string;
+	label: string;
+	region: string;
+	zip: string;
+	discussionOfficeCode: string;
+	discussionOfficeLabel: string;
+};
+
+type AdminConvectiveOutlookConfig = {
+	id: string;
+	label: string;
+	pageUrl: string;
+	imagePrefix: string;
+};
+
+const ADMIN_FORECAST_LOCATIONS: AdminForecastLocationConfig[] = [
+	{ id: 'new_york_city', label: 'New York City', region: 'Northeast', zip: '10001', discussionOfficeCode: 'OKX', discussionOfficeLabel: 'New York NY' },
+	{ id: 'atlanta', label: 'Atlanta', region: 'Southeast', zip: '30303', discussionOfficeCode: 'FFC', discussionOfficeLabel: 'Peachtree City GA' },
+	{ id: 'chicago', label: 'Chicago', region: 'Midwest', zip: '60601', discussionOfficeCode: 'LOT', discussionOfficeLabel: 'Chicago/Romeoville IL' },
+	{ id: 'dallas', label: 'Dallas', region: 'Plains', zip: '75201', discussionOfficeCode: 'FWD', discussionOfficeLabel: 'Fort Worth TX' },
+	{ id: 'denver', label: 'Denver', region: 'West', zip: '80202', discussionOfficeCode: 'BOU', discussionOfficeLabel: 'Boulder CO' },
+];
+
+const ADMIN_DISCUSSION_LIMIT = 10;
+const ADMIN_CONVECTIVE_OUTLOOKS: AdminConvectiveOutlookConfig[] = [
+	{ id: 'day1', label: 'Day 1', pageUrl: 'https://www.spc.noaa.gov/products/outlook/day1otlk.html', imagePrefix: 'day1' },
+	{ id: 'day2', label: 'Day 2', pageUrl: 'https://www.spc.noaa.gov/products/outlook/day2otlk.html', imagePrefix: 'day2' },
+	{ id: 'day3', label: 'Day 3', pageUrl: 'https://www.spc.noaa.gov/products/outlook/day3otlk.html', imagePrefix: 'day3' },
+];
+
 class HttpError extends Error {
 	status: number;
 
@@ -417,7 +457,7 @@ function fbAutoPostModeHelp(mode: FbAutoPostMode): string {
 		return 'All active, timely Tornado Warnings auto-post and follow the existing Facebook thread/comment rules.';
 	}
 	if (mode === 'smart_high_impact') {
-		return 'All active, timely Tornado Warnings auto-post. Other warnings must hit a major metro or cover at least 10 counties, with extra Severe Thunderstorm thresholds.';
+		return 'All active, timely Tornado Warnings auto-post. If multiple Severe Thunderstorm Warnings or Watches hit a major metro or 10+ counties with no tornado/emergency competing, the top 1-2 severe events can auto-post by metro and coverage priority. Otherwise Severe Thunderstorm Warnings need metro or 10 counties plus destructive, 70 mph, 2-inch hail, or strong wording. Fire warnings need wildfire or public safety escalation. Flood and winter warnings must pass the base impact gate.';
 	}
 	return 'Automatic Facebook posting is disabled.';
 }
@@ -452,8 +492,10 @@ const METRO_ALLOWLIST: MetroAllowlistEntry[] = Array.isArray(metroAllowlistSeed)
 		.filter((entry): entry is MetroAllowlistEntry => !!entry)
 	: [];
 
+const METRO_ALLOWLIST_RANK = new Map<string, number>();
 const METRO_ALLOWLIST_BY_COUNTY_FIPS = new Map<string, MetroAllowlistEntry[]>();
-for (const metro of METRO_ALLOWLIST) {
+for (const [index, metro] of METRO_ALLOWLIST.entries()) {
+	METRO_ALLOWLIST_RANK.set(metro.name, index);
 	for (const countyFips of metro.countyFips) {
 		const existing = METRO_ALLOWLIST_BY_COUNTY_FIPS.get(countyFips) || [];
 		existing.push(metro);
@@ -528,6 +570,14 @@ function isSevereThunderstormWarningEvent(event: string): boolean {
 	return /\bsevere thunderstorm warning\b/i.test(String(event || '').trim());
 }
 
+function isSevereThunderstormWatchEvent(event: string): boolean {
+	return /\bsevere thunderstorm watch\b/i.test(String(event || '').trim());
+}
+
+function isSevereWeatherFallbackEvent(event: string): boolean {
+	return isSevereThunderstormWarningEvent(event) || isSevereThunderstormWatchEvent(event);
+}
+
 function threadIsRecentForAutoPost(thread: AlertThread | null, nowMs = Date.now()): boolean {
 	if (!thread) return false;
 	const lastPostedMs = Date.parse(String(thread.lastPostedAt || '').trim());
@@ -576,6 +626,19 @@ function isAutoPostCandidateTimely(
 	return (nowMs - timestampMs) <= FB_AUTO_POST_MAX_ALERT_AGE_MS;
 }
 
+async function resolveAutoPostThreadAction(
+	env: Env,
+	feature: any,
+	event: string,
+): Promise<FacebookPublishThreadAction> {
+	const existingThread = await readExistingThreadForAlert(
+		env,
+		Array.isArray(feature?.properties?.geocode?.UGC) ? feature.properties.geocode.UGC : [],
+		event,
+	);
+	return existingThread && !threadIsRecentForAutoPost(existingThread) ? 'new_post' : '';
+}
+
 function parseAlertNumericValue(value: unknown): number | null {
 	if (Array.isArray(value)) {
 		for (const entry of value) {
@@ -596,9 +659,9 @@ function parseAlertNumericValue(value: unknown): number | null {
 function hasSevereThunderstormDestructiveCriteria(feature: any): boolean {
 	const properties = feature?.properties ?? {};
 	const maxWind = parseAlertNumericValue(findProperty(properties, 'maxWindGust'));
-	if (maxWind != null && maxWind >= 80) return true;
+	if (maxWind != null && maxWind >= 70) return true;
 	const maxHail = parseAlertNumericValue(findProperty(properties, 'maxHailSize'));
-	if (maxHail != null && maxHail >= 2.75) return true;
+	if (maxHail != null && maxHail >= 2) return true;
 	const text = [
 		properties.event,
 		properties.headline,
@@ -610,6 +673,43 @@ function hasSevereThunderstormDestructiveCriteria(feature: any): boolean {
 		.join(' ')
 		.toLowerCase();
 	return /\bdestructive\b/.test(text);
+}
+
+function hasSevereThunderstormStrongWording(feature: any): boolean {
+	const properties = feature?.properties ?? {};
+	const text = [
+		properties.event,
+		properties.headline,
+		properties.description,
+		properties.instruction,
+		findProperty(properties, 'damageThreat'),
+	]
+		.map((value) => mapSomeValue(value))
+		.join(' ')
+		.toLowerCase();
+	return /\bconsiderable damage\b|\bdangerous storm\b|\bdangerous thunderstorm\b|\bconsiderable\b/.test(text);
+}
+
+function hasSevereThunderstormNearThresholdMetrics(feature: any): boolean {
+	const properties = feature?.properties ?? {};
+	const maxWind = parseAlertNumericValue(findProperty(properties, 'maxWindGust'));
+	if (maxWind != null && maxWind >= 65) return true;
+	const maxHail = parseAlertNumericValue(findProperty(properties, 'maxHailSize'));
+	return maxHail != null && maxHail >= 1.75;
+}
+
+function hasFireFamilyEscalationCriteria(feature: any): boolean {
+	const properties = feature?.properties ?? {};
+	const text = [
+		properties.event,
+		properties.headline,
+		properties.description,
+		properties.instruction,
+	]
+		.map((value) => mapSomeValue(value))
+		.join(' ')
+		.toLowerCase();
+	return /\bevacuat(?:e|ion|ions|ed)\b|\bpublic safety\b|\blife safety\b|\bactive wildfire\b|\bwildfire impact\b|\bwildfire\b|\bstructures? threatened\b|\bhomes? threatened\b/.test(text);
 }
 
 function detectTierOneAutoPostReason(feature: any): string | null {
@@ -640,6 +740,53 @@ function matchingMetroNamesForAlert(feature: any, change?: AlertChangeRecord | n
 		}
 	}
 	return Array.from(names).sort();
+}
+
+function highestPriorityMetroRank(matchedMetroNames: string[]): number {
+	let bestRank = Number.POSITIVE_INFINITY;
+	for (const metroName of matchedMetroNames) {
+		const metroRank = METRO_ALLOWLIST_RANK.get(metroName);
+		if (metroRank != null) {
+			bestRank = Math.min(bestRank, metroRank);
+		}
+	}
+	return bestRank;
+}
+
+function autoPostChangePriority(changeType: string): number {
+	const normalized = String(changeType || '').trim().toLowerCase();
+	if (normalized === 'new') return 0;
+	if (normalized === 'updated') return 1;
+	if (normalized === 'extended') return 2;
+	return 3;
+}
+
+function sortSevereWeatherFallbackCandidates(
+	a: AutoPostEvaluationRecord,
+	b: AutoPostEvaluationRecord,
+): number {
+	const aHasMetro = a.matchedMetroNames.length > 0 ? 1 : 0;
+	const bHasMetro = b.matchedMetroNames.length > 0 ? 1 : 0;
+	if (aHasMetro !== bHasMetro) return bHasMetro - aHasMetro;
+
+	const aMetroRank = highestPriorityMetroRank(a.matchedMetroNames);
+	const bMetroRank = highestPriorityMetroRank(b.matchedMetroNames);
+	if (aMetroRank !== bMetroRank) return aMetroRank - bMetroRank;
+
+	if (a.countyCount !== b.countyCount) return b.countyCount - a.countyCount;
+
+	const aIsWarning = isSevereThunderstormWarningEvent(a.event) ? 1 : 0;
+	const bIsWarning = isSevereThunderstormWarningEvent(b.event) ? 1 : 0;
+	if (aIsWarning !== bIsWarning) return bIsWarning - aIsWarning;
+
+	const changePriorityDiff = autoPostChangePriority(a.change.changeType) - autoPostChangePriority(b.change.changeType);
+	if (changePriorityDiff !== 0) return changePriorityDiff;
+
+	return String(a.change.alertId || a.feature?.id || '').localeCompare(String(b.change.alertId || b.feature?.id || ''));
+}
+
+function hasHigherTierAutoPostCompetition(record: AutoPostEvaluationRecord): boolean {
+	return isTornadoWarningEvent(record.event) || detectTierOneAutoPostReason(record.feature) != null;
 }
 
 /**
@@ -688,6 +835,18 @@ function safeHtml(text: string): string {
 		.replace(/>/g, '&gt;')
 		.replace(/"/g, '&quot;')
 		.replace(/'/g, '&#39;');
+}
+
+function decodeHtmlEntities(text: string): string {
+	return text
+		.replace(/&nbsp;/gi, ' ')
+		.replace(/&amp;/gi, '&')
+		.replace(/&lt;/gi, '<')
+		.replace(/&gt;/gi, '>')
+		.replace(/&quot;/gi, '"')
+		.replace(/&#39;/gi, '\'')
+		.replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
+		.replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCharCode(parseInt(code, 16)));
 }
 
 function nl2br(text: string): string {
@@ -3615,6 +3774,8 @@ function renderAdminPage(
 	const autoPostConfigJs = 'const AUTO_POST_CONFIG = ' + JSON.stringify(
 		normalizedAutoPostConfig,
 	) + ';';
+	const adminForecastConfigJs = 'const ADMIN_FORECAST_LOCATIONS = ' + JSON.stringify(ADMIN_FORECAST_LOCATIONS) + ';';
+	const adminConvectiveOutlookConfigJs = 'const ADMIN_CONVECTIVE_OUTLOOKS = ' + JSON.stringify(ADMIN_CONVECTIVE_OUTLOOKS) + ';';
 
 	const stateOptions = Array.from(states).sort().map((s) =>
 		'<option value="' + safeHtml(s) + '">' + safeHtml(s) + '</option>'
@@ -3636,6 +3797,25 @@ function renderAdminPage(
 		'  <div class="stat-value">' + safeHtml(String(item.count)) + '</div>\n' +
 		'</div>'
 	).join('\n');
+	const forecastLocationTabs = ADMIN_FORECAST_LOCATIONS.map((location, index) =>
+		'<button class="forecast-loc-tab' + (index === 0 ? ' is-active' : '') + '" type="button" data-forecast-view="' + safeHtml(location.id) + '">\n' +
+		'  <span class="forecast-loc-label">' + safeHtml(location.label) + '</span>\n' +
+		'  <span class="forecast-loc-region">' + safeHtml(location.region) + ' • ' + safeHtml(location.zip) + '</span>\n' +
+		'</button>'
+	).join('\n');
+	const discussionLocationTabs = ADMIN_FORECAST_LOCATIONS.map((location, index) =>
+		'<button class="forecast-loc-tab discussion-loc-tab' + (index === 0 ? ' is-active' : '') + '" type="button" data-discussion-view="' + safeHtml(location.id) + '">\n' +
+		'  <span class="forecast-loc-label">' + safeHtml(location.label) + '</span>\n' +
+		'  <span class="forecast-loc-region">' + safeHtml(location.region) + '</span>\n' +
+		'  <span class="discussion-tab-count" data-discussion-tab-count="' + safeHtml(location.id) + '">Loading discussions...</span>\n' +
+		'</button>'
+	).join('\n');
+	const convectiveOutlookTabs = ADMIN_CONVECTIVE_OUTLOOKS.map((day, index) =>
+		'<button class="forecast-loc-tab outlook-day-tab' + (index === 0 ? ' is-active' : '') + '" type="button" data-outlook-view="' + safeHtml(day.id) + '">\n' +
+		'  <span class="forecast-loc-label">' + safeHtml(day.label) + ' Convective Outlook</span>\n' +
+		'  <span class="forecast-loc-region" data-outlook-tab-meta="' + safeHtml(day.id) + '">SPC image + discussion</span>\n' +
+		'</button>'
+	).join('\n');
 
 	const css = [
 		'*, *::before, *::after { box-sizing: border-box; }',
@@ -3646,6 +3826,11 @@ function renderAdminPage(
 		'.stat-card { background: #fff; border: 1px solid #ddd; border-left: 5px solid #ccc; border-radius: 8px; padding: 12px 14px; }',
 		'.stat-label { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #666; }',
 		'.stat-value { margin-top: 6px; font-size: 1.45rem; font-weight: 700; color: #111827; }',
+		'.admin-page-tabs { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 18px; }',
+		'.admin-page-tab { border: 1px solid #cfd6de; border-radius: 999px; background: #fff; color: #334155; cursor: pointer; padding: 10px 16px; font-size: 0.9rem; font-weight: 700; }',
+		'.admin-page-tab.is-active { background: #0f172a; border-color: #0f172a; color: #fff; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16); }',
+		'.admin-page-panel { display: none; }',
+		'.admin-page-panel.is-active { display: block; }',
 		'.filter-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 22px; padding: 14px 16px; background: #fff; border-radius: 8px; border: 1px solid #ddd; }',
 		'.filter-bar label { font-size: 0.9rem; color: #333; }',
 		'.filter-bar input, .filter-bar select { margin-left: 6px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; }',
@@ -3660,6 +3845,67 @@ function renderAdminPage(
 		'.auto-post-status { margin-top: 10px; font-size: 0.83rem; color: #333; }',
 		'.auto-post-status.ok { color: #1a7f37; }',
 		'.auto-post-status.err { color: #b30000; }',
+		'.forecast-hub { background: linear-gradient(180deg, #ffffff, #f8fafc); border: 1px solid #d8e0ea; border-radius: 16px; padding: 20px; box-shadow: 0 18px 32px rgba(15, 23, 42, 0.06); }',
+		'.forecast-hub-head { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 16px; }',
+		'.forecast-hub-head h2 { margin: 0 0 4px; font-size: 1.15rem; }',
+		'.forecast-hub-head p { margin: 0; color: #526277; }',
+		'.forecast-refresh { padding: 10px 16px; border: none; border-radius: 10px; background: #1d4ed8; color: #fff; font-weight: 700; cursor: pointer; box-shadow: 0 10px 18px rgba(29, 78, 216, 0.2); }',
+		'.forecast-refresh:hover { background: #1e40af; }',
+		'.forecast-subtabs { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }',
+		'.forecast-loc-tab { min-width: 160px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; padding: 12px 16px; border-radius: 14px; border: 1px solid #d5dce5; background: #fff; cursor: pointer; box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06); }',
+		'.forecast-loc-tab.is-active { border-color: #f97316; box-shadow: 0 10px 20px rgba(249, 115, 22, 0.18); transform: translateY(-1px); }',
+		'.forecast-loc-label { font-weight: 700; color: #0f172a; }',
+		'.forecast-loc-region { font-size: 0.8rem; color: #64748b; }',
+		'.discussion-tab-count { font-size: 0.8rem; color: #475569; }',
+		'.forecast-status { min-height: 22px; margin-bottom: 14px; font-size: 0.86rem; color: #475569; }',
+		'.forecast-status.err { color: #b42318; }',
+		'.forecast-view { display: none; }',
+		'.forecast-view.is-active { display: block; }',
+		'.forecast-city-shell { background: #fff; border-radius: 16px; border: 1px solid #d7dde5; padding: 18px; }',
+		'.forecast-city-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }',
+		'.forecast-city-head h3 { margin: 0; font-size: 1.05rem; }',
+		'.forecast-city-head p { margin: 4px 0 0; color: #64748b; font-size: 0.88rem; }',
+		'.forecast-updated { font-size: 0.84rem; color: #64748b; }',
+		'.forecast-periods { display: grid; gap: 12px; }',
+		'.forecast-period-card { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: start; padding: 16px 18px; border-radius: 16px; border: 1px solid #dde4ec; background: #fff; box-shadow: inset 4px 0 0 #f59e0b, 0 8px 18px rgba(15, 23, 42, 0.05); }',
+		'.forecast-period-card.is-night { box-shadow: inset 4px 0 0 #4f46e5, 0 8px 18px rgba(15, 23, 42, 0.05); }',
+		'.forecast-period-card h4 { margin: 0 0 4px; font-size: 1rem; }',
+		'.forecast-period-card .forecast-short { margin: 0 0 10px; color: #64748b; font-size: 0.9rem; }',
+		'.forecast-period-card .forecast-detail { margin: 0; color: #1f2937; line-height: 1.55; }',
+		'.forecast-period-side { min-width: 132px; text-align: right; }',
+		'.forecast-period-temp { font-size: 2rem; font-weight: 800; color: #ea580c; line-height: 1; }',
+		'.forecast-period-card.is-night .forecast-period-temp { color: #16a34a; }',
+		'.forecast-period-meta { margin-top: 8px; font-size: 0.85rem; color: #64748b; line-height: 1.5; }',
+		'.forecast-summary-card { background: #fff; border: 1px solid #d7dde5; border-radius: 16px; padding: 18px; }',
+		'.forecast-summary-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }',
+		'.forecast-summary-head h3 { margin: 0; font-size: 1.05rem; }',
+		'.forecast-summary-actions { display: flex; gap: 8px; flex-wrap: wrap; }',
+		'.forecast-summary-actions button { padding: 9px 14px; border-radius: 10px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; font-weight: 700; }',
+		'.forecast-summary-actions .primary { background: #2563eb; border-color: #2563eb; color: #fff; }',
+		'.forecast-summary-actions .accent { background: #f97316; border-color: #f97316; color: #fff; }',
+		'.forecast-summary-actions button:hover { filter: brightness(0.97); }',
+		'.forecast-summary-editor { width: 100%; min-height: 360px; border-radius: 14px; border: 1px solid #d8e0ea; background: #f8fafc; padding: 16px; font: 0.92rem/1.6 Consolas, Monaco, monospace; color: #0f172a; resize: vertical; }',
+		'.forecast-summary-meta { margin-top: 8px; font-size: 0.84rem; color: #64748b; }',
+		'.discussion-hub { background: linear-gradient(180deg, #ffffff, #f8fafc); border: 1px solid #d8e0ea; border-radius: 16px; padding: 20px; box-shadow: 0 18px 32px rgba(15, 23, 42, 0.06); }',
+		'.discussion-list { display: grid; gap: 10px; }',
+		'.discussion-card { background: #fff; border: 1px solid #d7dde5; border-radius: 16px; overflow: hidden; box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05); }',
+		'.discussion-card summary { list-style: none; cursor: pointer; padding: 16px 18px; display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }',
+		'.discussion-card summary::-webkit-details-marker { display: none; }',
+		'.discussion-card summary:hover { background: #f8fafc; }',
+		'.discussion-title { font-size: 1rem; font-weight: 700; color: #0f172a; }',
+		'.discussion-issued { margin-top: 6px; font-size: 0.84rem; color: #64748b; }',
+		'.discussion-toggle { font-size: 0.85rem; color: #64748b; white-space: nowrap; }',
+		'.discussion-body-wrap { border-top: 1px solid #e8edf3; padding: 14px 18px 18px; }',
+		'.discussion-body { margin: 0; padding: 14px; background: #f8fafc; border: 1px solid #dde4ec; border-radius: 14px; font: 0.86rem/1.65 Consolas, Monaco, monospace; color: #111827; white-space: pre-wrap; max-height: 420px; overflow: auto; }',
+		'.discussion-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }',
+		'.discussion-actions button, .discussion-actions a { padding: 9px 14px; border-radius: 10px; border: 1px solid #cbd5e1; background: #fff; color: #0f172a; cursor: pointer; font-weight: 700; text-decoration: none; }',
+		'.discussion-actions .primary { background: #2563eb; border-color: #2563eb; color: #fff; }',
+		'.discussion-empty { background: #fff; border: 1px solid #d7dde5; border-radius: 16px; padding: 18px; color: #64748b; }',
+		'.outlook-summary { margin: 0 0 16px; padding: 14px 16px; background: linear-gradient(180deg, #fff7ed, #fffbeb); border: 1px solid #fed7aa; border-radius: 14px; color: #9a3412; font-weight: 600; line-height: 1.5; }',
+		'.outlook-image-card { margin-bottom: 16px; }',
+		'.outlook-image-link { display: block; border-radius: 16px; overflow: hidden; border: 1px solid #d8e0ea; background: #fff; box-shadow: 0 12px 24px rgba(15, 23, 42, 0.06); }',
+		'.outlook-image { display: block; width: 100%; height: auto; background: #fff; }',
+		'.outlook-empty { background: #fff; border: 1px solid #d7dde5; border-radius: 16px; padding: 18px; color: #64748b; }',
 		'.token-exchange { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-bottom: 22px; }',
 		'.token-exchange h2 { margin: 0 0 8px; font-size: 1rem; }',
 		'.token-exchange label { display: block; margin: 8px 0; font-size: 0.87rem; }',
@@ -3711,14 +3957,24 @@ function renderAdminPage(
     '.thread-indicator.is-comment { background: #e8f0fb; color: #1a3a7a; }',
     '.btn-force-new { margin-left: 10px; font-size: 0.78rem; padding: 2px 8px; border: 1px solid #aac; border-radius: 4px; background: #fff; cursor: pointer; color: #445; }',
     '.sync-error { background: #fff8e1; color: #7a5a00; border: 1px solid #ffe082; border-radius: 5px; padding: 6px 12px; font-size: 0.84rem; margin-bottom: 12px; }',
+		'@media (max-width: 720px) { .forecast-period-card { grid-template-columns: 1fr; } .forecast-period-side { text-align: left; min-width: 0; } .details-grid { grid-template-columns: 1fr; } .detail-col:first-child { border-right: none; border-bottom: 1px solid #eee; padding-bottom: 10px; margin-bottom: 10px; } .card-meta { white-space: normal; } }',
 	].join('\n');
 
-	const js = postTextsJs + '\n' + autoPostConfigJs + `
+	const js = postTextsJs + '\n' + autoPostConfigJs + '\n' + adminForecastConfigJs + '\n' + adminConvectiveOutlookConfigJs + `
 let currentAlertId = null;
 let currentThreadAction = 'new_post'; // 'new_post' | 'comment'
 let currentPostId = null;
 let currentImageUrl = null;
 const ADMIN_FILTERS_STORAGE_KEY = 'liveWeatherAdminFilters:v1';
+let currentAdminPanel = 'alerts';
+let currentForecastView = (ADMIN_FORECAST_LOCATIONS[0] && ADMIN_FORECAST_LOCATIONS[0].id) || 'forecast-summary';
+let currentDiscussionView = (ADMIN_FORECAST_LOCATIONS[0] && ADMIN_FORECAST_LOCATIONS[0].id) || '';
+let currentOutlookView = (ADMIN_CONVECTIVE_OUTLOOKS[0] && ADMIN_CONVECTIVE_OUTLOOKS[0].id) || '';
+let forecastHubData = null;
+let discussionsHubData = null;
+let convectiveOutlookHubData = null;
+let forecastSummaryEditable = false;
+let forecastSummaryDraft = '';
 
 const STATE_CODE_TO_NAME = {
   AL: 'alabama', AK: 'alaska', AZ: 'arizona', AR: 'arkansas', CA: 'california',
@@ -4130,13 +4386,655 @@ if (filterStateSelect) filterStateSelect.addEventListener('change', applyFilters
 if (filterSeveritySelect) filterSeveritySelect.addEventListener('change', applyFilters);
 if (clearFiltersBtn) clearFiltersBtn.addEventListener('click', clearFilters);
 
+function forecastEscHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function setActiveAdminPanel(panelId) {
+  currentAdminPanel = panelId === 'forecast' || panelId === 'discussions' || panelId === 'outlook' ? panelId : 'alerts';
+  document.querySelectorAll('[data-admin-panel-btn]').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.getAttribute('data-admin-panel-btn') === currentAdminPanel);
+  });
+  document.querySelectorAll('[data-admin-panel]').forEach((panel) => {
+    panel.classList.toggle('is-active', panel.getAttribute('data-admin-panel') === currentAdminPanel);
+  });
+  if (currentAdminPanel === 'forecast' && !forecastHubData) {
+    loadForecastHub(false);
+  }
+  if (currentAdminPanel === 'discussions' && !discussionsHubData) {
+    loadDiscussionsHub(false);
+  }
+  if (currentAdminPanel === 'outlook' && !convectiveOutlookHubData) {
+    loadConvectiveOutlookHub(false);
+  }
+}
+
+function formatForecastUpdatedAt(value) {
+  const parsed = Date.parse(String(value || ''));
+  if (!Number.isFinite(parsed)) return 'Updated just now';
+  return 'Updated ' + new Date(parsed).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function forecastTempLabel(period) {
+  if (!Number.isFinite(Number(period && period.temperatureF))) return '--';
+  return Math.round(Number(period.temperatureF)) + '°F';
+}
+
+function forecastMetaText(period) {
+  const items = [];
+  const windSpeed = String(period && period.windSpeed || '').trim();
+  const windDirection = String(period && period.windDirection || '').trim();
+  if (windSpeed || windDirection) {
+    items.push([windSpeed, windDirection].filter(Boolean).join(' '));
+  }
+  if (Number.isFinite(Number(period && period.precipitationChance))) {
+    items.push('Precip: ' + Math.round(Number(period.precipitationChance)) + '%');
+  }
+  return items.map((item) => '<div>' + forecastEscHtml(item) + '</div>').join('');
+}
+
+function syncForecastTabs() {
+  document.querySelectorAll('[data-forecast-view]').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.getAttribute('data-forecast-view') === currentForecastView);
+  });
+}
+
+function renderForecastContent() {
+  const host = document.getElementById('forecastHubContent');
+  if (!host) return;
+
+  syncForecastTabs();
+
+  if (!forecastHubData) {
+    host.innerHTML = '<div class="forecast-city-shell"><p>Loading forecast data...</p></div>';
+    return;
+  }
+
+  if (currentForecastView === 'forecast-summary') {
+    const summaryText = (forecastSummaryDraft || String(forecastHubData.summaryText || '')).trim();
+    const errorCount = Array.isArray(forecastHubData.errors) ? forecastHubData.errors.length : 0;
+    host.innerHTML =
+      '<div class="forecast-summary-card">' +
+      '  <div class="forecast-summary-head">' +
+      '    <div>' +
+      '      <h3>' + forecastEscHtml(forecastHubData.summaryTitle || '3-Day USA Forecast') + '</h3>' +
+      '      <p class="forecast-updated">' + forecastEscHtml(formatForecastUpdatedAt(forecastHubData.generatedAt)) + '</p>' +
+      '    </div>' +
+      '    <div class="forecast-summary-actions">' +
+      '      <button type="button" id="copyForecastSummary" class="primary">Copy for Facebook</button>' +
+      '      <button type="button" id="toggleForecastSummaryEdit">Edit</button>' +
+      '      <button type="button" id="refreshForecastSummary" class="accent">Generate New</button>' +
+      '    </div>' +
+      '  </div>' +
+      '  <textarea id="forecastSummaryEditor" class="forecast-summary-editor"' + (forecastSummaryEditable ? '' : ' readonly') + '>' + forecastEscHtml(summaryText) + '</textarea>' +
+      '  <div class="forecast-summary-meta">' + forecastEscHtml(errorCount > 0 ? ('Loaded with ' + errorCount + ' forecast issue' + (errorCount === 1 ? '' : 's') + '.') : 'Built from the latest Northeast, Southeast, Midwest, Plains, and West city forecasts.') + '</div>' +
+      '</div>';
+
+    const copyBtn = document.getElementById('copyForecastSummary');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', async function() {
+        const editor = document.getElementById('forecastSummaryEditor');
+        const text = editor ? editor.value : summaryText;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else if (editor) {
+            editor.select();
+            document.execCommand('copy');
+          }
+          const status = document.getElementById('forecastHubStatus');
+          if (status) {
+            status.className = 'forecast-status';
+            status.textContent = 'Forecast summary copied to clipboard.';
+          }
+        } catch (err) {
+          const status = document.getElementById('forecastHubStatus');
+          if (status) {
+            status.className = 'forecast-status err';
+            status.textContent = 'Unable to copy forecast summary: ' + err;
+          }
+        }
+      });
+    }
+
+    const editBtn = document.getElementById('toggleForecastSummaryEdit');
+    if (editBtn) {
+      editBtn.textContent = forecastSummaryEditable ? 'Done Editing' : 'Edit';
+      editBtn.addEventListener('click', function() {
+        forecastSummaryEditable = !forecastSummaryEditable;
+        renderForecastContent();
+      });
+    }
+
+    const refreshBtn = document.getElementById('refreshForecastSummary');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', function() {
+        loadForecastHub(true);
+      });
+    }
+
+    const summaryEditor = document.getElementById('forecastSummaryEditor');
+    if (summaryEditor) {
+      summaryEditor.addEventListener('input', function() {
+        forecastSummaryDraft = summaryEditor.value;
+      });
+    }
+    return;
+  }
+
+  const city = Array.isArray(forecastHubData.cities)
+    ? forecastHubData.cities.find((entry) => entry.id === currentForecastView)
+    : null;
+  if (!city) {
+    host.innerHTML = '<div class="forecast-city-shell"><p>Select a city tab to view its forecast.</p></div>';
+    return;
+  }
+
+  const periodsMarkup = (Array.isArray(city.periods) ? city.periods : []).map((period) =>
+    '<article class="forecast-period-card' + (!period.isDaytime ? ' is-night' : '') + '">' +
+    '  <div>' +
+    '    <h4>' + forecastEscHtml(period.name || 'Forecast Period') + '</h4>' +
+    '    <p class="forecast-short">' + forecastEscHtml(period.shortForecast || '') + '</p>' +
+    '    <p class="forecast-detail">' + forecastEscHtml(period.detailedForecast || '') + '</p>' +
+    '  </div>' +
+    '  <div class="forecast-period-side">' +
+    '    <div class="forecast-period-temp">' + forecastEscHtml(forecastTempLabel(period)) + '</div>' +
+    '    <div class="forecast-period-meta">' + forecastMetaText(period) + '</div>' +
+    '  </div>' +
+    '</article>'
+  ).join('');
+
+  host.innerHTML =
+    '<div class="forecast-city-shell">' +
+    '  <div class="forecast-city-head">' +
+    '    <div>' +
+    '      <h3>' + forecastEscHtml(city.label) + ' Forecast</h3>' +
+    '      <p>' + forecastEscHtml(city.region + ' • ' + city.locationLabel + ' • ZIP ' + city.zip) + '</p>' +
+    '    </div>' +
+    '    <div class="forecast-updated">' + forecastEscHtml(formatForecastUpdatedAt(city.updated)) + '</div>' +
+    '  </div>' +
+    '  <div class="forecast-periods">' + periodsMarkup + '</div>' +
+    '</div>';
+}
+
+async function loadForecastHub(forceRefresh) {
+  const status = document.getElementById('forecastHubStatus');
+  const refreshBtn = document.getElementById('forecastRefreshBtn');
+  if (refreshBtn) refreshBtn.disabled = true;
+  if (status) {
+    status.className = 'forecast-status';
+    status.textContent = forceRefresh ? 'Refreshing forecast data...' : 'Loading forecast data...';
+  }
+
+  try {
+    const response = await fetch('/admin/forecast-data');
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Unable to load forecast data');
+    }
+    forecastHubData = data;
+    forecastSummaryDraft = String(data.summaryText || '');
+    const cityIds = Array.isArray(data.cities) ? data.cities.map((entry) => entry.id) : [];
+    if (currentForecastView !== 'forecast-summary' && !cityIds.includes(currentForecastView)) {
+      currentForecastView = cityIds[0] || 'forecast-summary';
+    }
+    renderForecastContent();
+    if (status) {
+      const issueCount = Array.isArray(data.errors) ? data.errors.length : 0;
+      status.className = issueCount > 0 ? 'forecast-status err' : 'forecast-status';
+      status.textContent = issueCount > 0
+        ? 'Loaded forecast data with ' + issueCount + ' issue' + (issueCount === 1 ? '' : 's') + '.'
+        : 'Forecast data is up to date.';
+    }
+  } catch (err) {
+    if (status) {
+      status.className = 'forecast-status err';
+      status.textContent = 'Unable to load forecast data: ' + (err instanceof Error ? err.message : String(err));
+    }
+    const host = document.getElementById('forecastHubContent');
+    if (host) {
+      host.innerHTML = '<div class="forecast-city-shell"><p>Forecast data is unavailable right now.</p></div>';
+    }
+  } finally {
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+function formatDiscussionIssuedAt(value) {
+  const parsed = Date.parse(String(value || ''));
+  if (!Number.isFinite(parsed)) return 'Issued recently';
+  return new Date(parsed).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+}
+
+function syncDiscussionTabs() {
+  document.querySelectorAll('[data-discussion-view]').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.getAttribute('data-discussion-view') === currentDiscussionView);
+  });
+
+  if (!discussionsHubData || !Array.isArray(discussionsHubData.cities)) return;
+  discussionsHubData.cities.forEach((city) => {
+    const countEl = document.querySelector('[data-discussion-tab-count="' + city.id + '"]');
+    if (countEl) {
+      countEl.textContent = String(city.discussionCount || 0) + ' discussions';
+    }
+  });
+}
+
+function findDiscussionEntry(cityId, discussionId) {
+  if (!discussionsHubData || !Array.isArray(discussionsHubData.cities)) return null;
+  const city = discussionsHubData.cities.find((entry) => entry.id === cityId);
+  if (!city || !Array.isArray(city.discussions)) return null;
+  return city.discussions.find((entry) => entry.id === discussionId) || null;
+}
+
+async function copyDiscussionContent(cityId, discussionId, kind) {
+  const discussion = findDiscussionEntry(cityId, discussionId);
+  const status = document.getElementById('discussionHubStatus');
+  if (!discussion) {
+    if (status) {
+      status.className = 'forecast-status err';
+      status.textContent = 'Unable to find that discussion entry.';
+    }
+    return;
+  }
+
+  const text = kind === 'facebook'
+    ? String(discussion.facebookText || discussion.productText || '').trim()
+    : String(discussion.productText || '').trim();
+
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const temp = document.createElement('textarea');
+      temp.value = text;
+      document.body.appendChild(temp);
+      temp.select();
+      document.execCommand('copy');
+      document.body.removeChild(temp);
+    }
+    if (status) {
+      status.className = 'forecast-status';
+      status.textContent = kind === 'facebook'
+        ? 'Discussion copied in Facebook-ready format.'
+        : 'Discussion text copied to clipboard.';
+    }
+  } catch (err) {
+    if (status) {
+      status.className = 'forecast-status err';
+      status.textContent = 'Unable to copy discussion text: ' + err;
+    }
+  }
+}
+
+function renderDiscussionsContent() {
+  const host = document.getElementById('discussionHubContent');
+  if (!host) return;
+
+  syncDiscussionTabs();
+
+  if (!discussionsHubData) {
+    host.innerHTML = '<div class="discussion-empty">Loading NWS discussions...</div>';
+    return;
+  }
+
+  const city = Array.isArray(discussionsHubData.cities)
+    ? discussionsHubData.cities.find((entry) => entry.id === currentDiscussionView)
+    : null;
+
+  if (!city) {
+    host.innerHTML = '<div class="discussion-empty">Select a city tab to view its Area Forecast Discussions.</div>';
+    return;
+  }
+
+  const discussions = Array.isArray(city.discussions) ? city.discussions : [];
+  if (discussions.length === 0) {
+    host.innerHTML = '<div class="discussion-empty">No discussions are available for ' + forecastEscHtml(city.label) + ' right now.</div>';
+    return;
+  }
+
+  const cards = discussions.map((discussion, index) =>
+    '<details class="discussion-card"' + (index === 0 ? ' open' : '') + ' data-discussion-card>' +
+    '  <summary>' +
+    '    <div>' +
+    '      <div class="discussion-title">' + forecastEscHtml(discussion.title || 'Area Forecast Discussion') + '</div>' +
+    '      <div class="discussion-issued">' + forecastEscHtml(formatDiscussionIssuedAt(discussion.issuanceTime)) + '</div>' +
+    '    </div>' +
+    '    <div class="discussion-toggle" data-discussion-toggle-label>' + (index === 0 ? 'Collapse' : 'Expand') + '</div>' +
+    '  </summary>' +
+    '  <div class="discussion-body-wrap">' +
+    '    <pre class="discussion-body">' + forecastEscHtml(discussion.productText || '') + '</pre>' +
+    '    <div class="discussion-actions">' +
+    '      <button type="button" data-discussion-copy="raw" data-city-id="' + forecastEscHtml(city.id) + '" data-discussion-id="' + forecastEscHtml(discussion.id) + '">Copy Text</button>' +
+    '      <button type="button" class="primary" data-discussion-copy="facebook" data-city-id="' + forecastEscHtml(city.id) + '" data-discussion-id="' + forecastEscHtml(discussion.id) + '">Copy for Facebook</button>' +
+    (discussion.productUrl ? '      <a href="' + forecastEscHtml(discussion.productUrl) + '" target="_blank" rel="noreferrer">Open NOAA Product</a>' : '') +
+    '    </div>' +
+    '  </div>' +
+    '</details>'
+  ).join('');
+
+  host.innerHTML =
+    '<div class="forecast-city-shell">' +
+    '  <div class="forecast-city-head">' +
+    '    <div>' +
+    '      <h3>' + forecastEscHtml(city.label) + ' NWS Discussions</h3>' +
+    '      <p>' + forecastEscHtml(city.region + ' • ' + city.officeLabel + ' (' + city.officeCode + ')') + '</p>' +
+    '    </div>' +
+    '    <div class="forecast-updated">' + forecastEscHtml(String(city.discussionCount || 0) + ' discussions available') + '</div>' +
+    '  </div>' +
+    '  <div class="discussion-list">' + cards + '</div>' +
+    '</div>';
+
+  host.querySelectorAll('[data-discussion-card]').forEach((details) => {
+    details.addEventListener('toggle', function() {
+      const label = details.querySelector('[data-discussion-toggle-label]');
+      if (label) {
+        label.textContent = details.open ? 'Collapse' : 'Expand';
+      }
+    });
+  });
+
+  host.querySelectorAll('[data-discussion-copy]').forEach((btn) => {
+    btn.addEventListener('click', function() {
+      copyDiscussionContent(
+        btn.getAttribute('data-city-id') || '',
+        btn.getAttribute('data-discussion-id') || '',
+        btn.getAttribute('data-discussion-copy') || 'raw',
+      );
+    });
+  });
+}
+
+async function loadDiscussionsHub(forceRefresh) {
+  const status = document.getElementById('discussionHubStatus');
+  const refreshBtn = document.getElementById('discussionRefreshBtn');
+  if (refreshBtn) refreshBtn.disabled = true;
+  if (status) {
+    status.className = 'forecast-status';
+    status.textContent = forceRefresh ? 'Refreshing NWS discussions...' : 'Loading NWS discussions...';
+  }
+
+  try {
+    const response = await fetch('/admin/discussions-data');
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Unable to load NWS discussions');
+    }
+    discussionsHubData = data;
+    const cityIds = Array.isArray(data.cities) ? data.cities.map((entry) => entry.id) : [];
+    if (!cityIds.includes(currentDiscussionView)) {
+      currentDiscussionView = cityIds[0] || currentDiscussionView;
+    }
+    renderDiscussionsContent();
+    if (status) {
+      const issueCount = Array.isArray(data.errors) ? data.errors.length : 0;
+      status.className = issueCount > 0 ? 'forecast-status err' : 'forecast-status';
+      status.textContent = issueCount > 0
+        ? 'Loaded discussions with ' + issueCount + ' issue' + (issueCount === 1 ? '' : 's') + '.'
+        : 'NWS discussions are up to date.';
+    }
+  } catch (err) {
+    if (status) {
+      status.className = 'forecast-status err';
+      status.textContent = 'Unable to load NWS discussions: ' + (err instanceof Error ? err.message : String(err));
+    }
+    const host = document.getElementById('discussionHubContent');
+    if (host) {
+      host.innerHTML = '<div class="discussion-empty">NWS discussions are unavailable right now.</div>';
+    }
+  } finally {
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+function syncConvectiveOutlookTabs() {
+  document.querySelectorAll('[data-outlook-view]').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.getAttribute('data-outlook-view') === currentOutlookView);
+  });
+
+  if (!convectiveOutlookHubData || !Array.isArray(convectiveOutlookHubData.days)) return;
+  convectiveOutlookHubData.days.forEach((day) => {
+    const metaEl = document.querySelector('[data-outlook-tab-meta="' + day.id + '"]');
+    if (metaEl) {
+      metaEl.textContent = day.updated || 'SPC image + discussion';
+    }
+  });
+}
+
+function findConvectiveOutlookEntry(dayId) {
+  if (!convectiveOutlookHubData || !Array.isArray(convectiveOutlookHubData.days)) return null;
+  return convectiveOutlookHubData.days.find((entry) => entry.id === dayId) || null;
+}
+
+async function copyConvectiveOutlookContent(dayId, kind) {
+  const day = findConvectiveOutlookEntry(dayId);
+  const status = document.getElementById('convectiveOutlookStatus');
+  if (!day) {
+    if (status) {
+      status.className = 'forecast-status err';
+      status.textContent = 'Unable to find that convective outlook.';
+    }
+    return;
+  }
+
+  const text = kind === 'facebook'
+    ? String(day.facebookText || day.discussionText || '').trim()
+    : String(day.discussionText || '').trim();
+
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const temp = document.createElement('textarea');
+      temp.value = text;
+      document.body.appendChild(temp);
+      temp.select();
+      document.execCommand('copy');
+      document.body.removeChild(temp);
+    }
+    if (status) {
+      status.className = 'forecast-status';
+      status.textContent = kind === 'facebook'
+        ? 'Convective outlook copied in Facebook-ready format.'
+        : 'Convective outlook discussion copied to clipboard.';
+    }
+  } catch (err) {
+    if (status) {
+      status.className = 'forecast-status err';
+      status.textContent = 'Unable to copy convective outlook text: ' + err;
+    }
+  }
+}
+
+function renderConvectiveOutlookContent() {
+  const host = document.getElementById('convectiveOutlookContent');
+  if (!host) return;
+
+  syncConvectiveOutlookTabs();
+
+  if (!convectiveOutlookHubData) {
+    host.innerHTML = '<div class="outlook-empty">Loading SPC convective outlook data...</div>';
+    return;
+  }
+
+  const day = Array.isArray(convectiveOutlookHubData.days)
+    ? convectiveOutlookHubData.days.find((entry) => entry.id === currentOutlookView)
+    : null;
+
+  if (!day) {
+    host.innerHTML = '<div class="outlook-empty">Select a day tab to view the latest SPC convective outlook.</div>';
+    return;
+  }
+
+  host.innerHTML =
+    '<div class="forecast-city-shell">' +
+    '  <div class="forecast-city-head">' +
+    '    <div>' +
+    '      <h3>' + forecastEscHtml(day.title || (day.label + ' Convective Outlook')) + '</h3>' +
+    '      <p>' + forecastEscHtml((day.pageTitle || '') + (day.issuedLabel ? ' | Issued ' + day.issuedLabel : '')) + '</p>' +
+    '    </div>' +
+    '    <div class="forecast-updated">' + forecastEscHtml(day.updated ? ('Updated ' + day.updated) : 'SPC current cycle') + '</div>' +
+    '  </div>' +
+    (day.summary ? '  <div class="outlook-summary">' + forecastEscHtml(day.summary) + '</div>' : '') +
+    (day.imageUrl
+      ? '  <div class="outlook-image-card"><a class="outlook-image-link" href="' + forecastEscHtml(day.imageUrl) + '" target="_blank" rel="noreferrer"><img class="outlook-image" src="' + forecastEscHtml(day.imageUrl) + '" alt="' + forecastEscHtml(day.title || (day.label + ' Convective Outlook')) + '" /></a></div>'
+      : '  <div class="outlook-empty">The SPC outlook image is unavailable right now.</div>') +
+    '  <details class="discussion-card" open>' +
+    '    <summary>' +
+    '      <div>' +
+    '        <div class="discussion-title">Forecast Discussion</div>' +
+    '        <div class="discussion-issued">' + forecastEscHtml(day.issuedLabel || day.updated || 'Issued recently') + '</div>' +
+    '      </div>' +
+    '      <div class="discussion-toggle">Collapse</div>' +
+    '    </summary>' +
+    '    <div class="discussion-body-wrap">' +
+    '      <pre class="discussion-body">' + forecastEscHtml(day.discussionText || '') + '</pre>' +
+    '      <div class="discussion-actions">' +
+    '        <button type="button" data-outlook-copy="raw" data-outlook-id="' + forecastEscHtml(day.id) + '">Copy Text</button>' +
+    '        <button type="button" class="primary" data-outlook-copy="facebook" data-outlook-id="' + forecastEscHtml(day.id) + '">Copy for Facebook</button>' +
+    (day.pageUrl ? '        <a href="' + forecastEscHtml(day.pageUrl) + '" target="_blank" rel="noreferrer">Open SPC Page</a>' : '') +
+    (day.imageUrl ? '        <a href="' + forecastEscHtml(day.imageUrl) + '" target="_blank" rel="noreferrer">Open Image</a>' : '') +
+    '      </div>' +
+    '    </div>' +
+    '  </details>' +
+    '</div>';
+
+  host.querySelectorAll('[data-outlook-copy]').forEach((btn) => {
+    btn.addEventListener('click', function() {
+      copyConvectiveOutlookContent(
+        btn.getAttribute('data-outlook-id') || '',
+        btn.getAttribute('data-outlook-copy') || 'raw',
+      );
+    });
+  });
+}
+
+async function loadConvectiveOutlookHub(forceRefresh) {
+  const status = document.getElementById('convectiveOutlookStatus');
+  const refreshBtn = document.getElementById('convectiveOutlookRefreshBtn');
+  if (refreshBtn) refreshBtn.disabled = true;
+  if (status) {
+    status.className = 'forecast-status';
+    status.textContent = forceRefresh ? 'Refreshing SPC convective outlooks...' : 'Loading SPC convective outlooks...';
+  }
+
+  try {
+    const response = await fetch('/admin/convective-outlook-data');
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Unable to load SPC convective outlooks');
+    }
+    convectiveOutlookHubData = data;
+    const dayIds = Array.isArray(data.days) ? data.days.map((entry) => entry.id) : [];
+    if (!dayIds.includes(currentOutlookView)) {
+      currentOutlookView = dayIds[0] || currentOutlookView;
+    }
+    renderConvectiveOutlookContent();
+    if (status) {
+      const issueCount = Array.isArray(data.errors) ? data.errors.length : 0;
+      status.className = issueCount > 0 ? 'forecast-status err' : 'forecast-status';
+      status.textContent = issueCount > 0
+        ? 'Loaded convective outlooks with ' + issueCount + ' issue' + (issueCount === 1 ? '' : 's') + '.'
+        : 'SPC convective outlooks are up to date.';
+    }
+  } catch (err) {
+    if (status) {
+      status.className = 'forecast-status err';
+      status.textContent = 'Unable to load SPC convective outlooks: ' + (err instanceof Error ? err.message : String(err));
+    }
+    const host = document.getElementById('convectiveOutlookContent');
+    if (host) {
+      host.innerHTML = '<div class="outlook-empty">SPC convective outlook data is unavailable right now.</div>';
+    }
+  } finally {
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+document.querySelectorAll('[data-admin-panel-btn]').forEach((btn) => {
+  btn.addEventListener('click', function() {
+    setActiveAdminPanel(btn.getAttribute('data-admin-panel-btn'));
+  });
+});
+
+document.querySelectorAll('[data-forecast-view]').forEach((btn) => {
+  btn.addEventListener('click', function() {
+    currentForecastView = btn.getAttribute('data-forecast-view') || currentForecastView;
+    renderForecastContent();
+    if (!forecastHubData) {
+      loadForecastHub(false);
+    }
+  });
+});
+
+const forecastRefreshBtn = document.getElementById('forecastRefreshBtn');
+if (forecastRefreshBtn) {
+  forecastRefreshBtn.addEventListener('click', function() {
+    loadForecastHub(true);
+  });
+}
+
+document.querySelectorAll('[data-discussion-view]').forEach((btn) => {
+  btn.addEventListener('click', function() {
+    currentDiscussionView = btn.getAttribute('data-discussion-view') || currentDiscussionView;
+    renderDiscussionsContent();
+    if (!discussionsHubData) {
+      loadDiscussionsHub(false);
+    }
+  });
+});
+
+const discussionRefreshBtn = document.getElementById('discussionRefreshBtn');
+if (discussionRefreshBtn) {
+  discussionRefreshBtn.addEventListener('click', function() {
+    loadDiscussionsHub(true);
+  });
+}
+
+document.querySelectorAll('[data-outlook-view]').forEach((btn) => {
+  btn.addEventListener('click', function() {
+    currentOutlookView = btn.getAttribute('data-outlook-view') || currentOutlookView;
+    renderConvectiveOutlookContent();
+    if (!convectiveOutlookHubData) {
+      loadConvectiveOutlookHub(false);
+    }
+  });
+});
+
+const convectiveOutlookRefreshBtn = document.getElementById('convectiveOutlookRefreshBtn');
+if (convectiveOutlookRefreshBtn) {
+  convectiveOutlookRefreshBtn.addEventListener('click', function() {
+    loadConvectiveOutlookHub(true);
+  });
+}
+
+setActiveAdminPanel('alerts');
+renderForecastContent();
+renderDiscussionsContent();
+renderConvectiveOutlookContent();
+
 const autoPostModeSelect = document.getElementById('autoPostMode');
 const autoPostHelp = document.getElementById('autoPostHelp');
 const autoPostStatus = document.getElementById('autoPostStatus');
 const AUTO_POST_MODE_HELP = {
   off: 'Automatic Facebook posting is disabled.',
   tornado_only: 'All active, timely Tornado Warnings auto-post and follow the existing Facebook thread/comment rules.',
-  smart_high_impact: 'All active, timely Tornado Warnings auto-post. Other warnings must hit a major metro or cover at least 10 counties, with extra Severe Thunderstorm thresholds.',
+  smart_high_impact: 'All active, timely Tornado Warnings auto-post. If multiple Severe Thunderstorm Warnings or Watches hit a major metro or 10+ counties with no tornado/emergency competing, the top 1-2 severe events can auto-post by metro and coverage priority. Otherwise Severe Thunderstorm Warnings need metro or 10 counties plus destructive, 70 mph, 2-inch hail, or strong wording. Fire warnings need wildfire or public safety escalation. Flood and winter warnings must pass the base impact gate.',
 };
 
 function setAutoPostStatus(message, variant) {
@@ -4282,6 +5180,13 @@ applyFilters();
     (lastPoll ? 'Last synced: ' + formatLastSynced(lastPoll) + '. ' : '') +
     'Click "Preview &amp; Post" to review and edit before posting.</p>\n' +
     (syncError ? '<p class="sync-error">&#9888; Sync warning: ' + safeHtml(syncError) + '</p>\n' : '') +
+		'<div class="admin-page-tabs">\n' +
+		'  <button type="button" class="admin-page-tab is-active" data-admin-panel-btn="alerts">Alerts</button>\n' +
+		'  <button type="button" class="admin-page-tab" data-admin-panel-btn="forecast">Forecast Center</button>\n' +
+		'  <button type="button" class="admin-page-tab" data-admin-panel-btn="discussions">NWS Discussions</button>\n' +
+		'  <button type="button" class="admin-page-tab" data-admin-panel-btn="outlook">Convective Outlook</button>\n' +
+		'</div>\n' +
+		'<div class="admin-page-panel is-active" data-admin-panel="alerts">\n' +
 		'\n<div class="stats-grid">\n' + statsMarkup + '\n</div>\n' +
 		'\n<div class="filter-bar">\n' +
 		'  <label>Search: <input id="filterSearch" type="search" placeholder="Search event, area, headline" /></label>\n' +
@@ -4314,6 +5219,56 @@ applyFilters();
 		'  <div id="tokenResult" style="margin-top:10px;color:#333;"></div>\n' +
 		'</div>\n' +
 		'\n<div class="alerts-list">\n' + cards + '\n</div>\n' +
+		'</div>\n' +
+		'<div class="admin-page-panel" data-admin-panel="forecast">\n' +
+		'  <div class="forecast-hub">\n' +
+		'    <div class="forecast-hub-head">\n' +
+		'      <div>\n' +
+		'        <h2>National Forecast Center</h2>\n' +
+		'        <p>Regional NWS forecasts for New York City, Atlanta, Chicago, Dallas, and Denver, plus a Facebook-ready 3-day USA summary.</p>\n' +
+		'      </div>\n' +
+		'      <button type="button" class="forecast-refresh" id="forecastRefreshBtn">Refresh</button>\n' +
+		'    </div>\n' +
+		'    <div class="forecast-subtabs">\n' + forecastLocationTabs + '\n' +
+		'      <button class="forecast-loc-tab" type="button" data-forecast-view="forecast-summary">\n' +
+		'        <span class="forecast-loc-label">3-Day USA Summary</span>\n' +
+		'        <span class="forecast-loc-region">Facebook-ready national recap</span>\n' +
+		'      </button>\n' +
+		'    </div>\n' +
+		'    <div class="forecast-status" id="forecastHubStatus">Forecast data will load when you open this tab.</div>\n' +
+		'    <div id="forecastHubContent"></div>\n' +
+		'  </div>\n' +
+		'</div>\n' +
+		'<div class="admin-page-panel" data-admin-panel="discussions">\n' +
+		'  <div class="discussion-hub">\n' +
+		'    <div class="forecast-hub-head">\n' +
+		'      <div>\n' +
+		'        <h2>NWS Discussions</h2>\n' +
+		'        <p>Area Forecast Discussions for New York City, Atlanta, Chicago, Dallas, and Denver. Open any discussion to read the full NWS text.</p>\n' +
+		'      </div>\n' +
+		'      <button type="button" class="forecast-refresh" id="discussionRefreshBtn">Refresh</button>\n' +
+		'    </div>\n' +
+		'    <div class="forecast-subtabs">\n' + discussionLocationTabs + '\n' +
+		'    </div>\n' +
+		'    <div class="forecast-status" id="discussionHubStatus">Discussion data will load when you open this tab.</div>\n' +
+		'    <div id="discussionHubContent"></div>\n' +
+		'  </div>\n' +
+		'</div>\n' +
+		'<div class="admin-page-panel" data-admin-panel="outlook">\n' +
+		'  <div class="forecast-hub">\n' +
+		'    <div class="forecast-hub-head">\n' +
+		'      <div>\n' +
+		'        <h2>Convective Outlook</h2>\n' +
+		'        <p>Current SPC Day 1, Day 2, and Day 3 convective outlook images with the full forecast discussion text.</p>\n' +
+		'      </div>\n' +
+		'      <button type="button" class="forecast-refresh" id="convectiveOutlookRefreshBtn">Refresh</button>\n' +
+		'    </div>\n' +
+		'    <div class="forecast-subtabs">\n' + convectiveOutlookTabs + '\n' +
+		'    </div>\n' +
+		'    <div class="forecast-status" id="convectiveOutlookStatus">Convective outlook data will load when you open this tab.</div>\n' +
+		'    <div id="convectiveOutlookContent"></div>\n' +
+		'  </div>\n' +
+		'</div>\n' +
 		'\n<div class="modal-overlay" id="fbModal">\n' +
 		'  <div class="modal">\n' +
 		'    <div class="modal-header">\n' +
@@ -6713,6 +7668,40 @@ async function fetchNwsJson(url: string, label: string): Promise<any> {
 	return await response.json();
 }
 
+async function fetchRemoteText(url: string, label: string): Promise<string> {
+	const response = await fetch(url, {
+		headers: {
+			'User-Agent': NWS_USER_AGENT,
+			Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+		},
+	});
+	if (response.status === 404) {
+		throw new HttpError(404, `${label} not found.`);
+	}
+	if (!response.ok) {
+		throw new HttpError(502, `${label} request failed: ${response.status} ${response.statusText}`);
+	}
+	return await response.text();
+}
+
+async function fetchNwsProductList(productCode: string, locationCode: string): Promise<any[]> {
+	const payload = await fetchNwsJson(
+		`https://api.weather.gov/products/types/${encodeURIComponent(productCode)}/locations/${encodeURIComponent(locationCode)}`,
+		`${productCode} product list`,
+	);
+	const graph = Array.isArray(payload?.['@graph']) ? payload['@graph'] : [];
+	return graph
+		.filter((entry: any) => entry && typeof entry === 'object' && entry.id)
+		.sort((a: any, b: any) => Date.parse(String(b?.issuanceTime || '')) - Date.parse(String(a?.issuanceTime || '')));
+}
+
+async function fetchNwsProductById(productId: string): Promise<any> {
+	return await fetchNwsJson(
+		`https://api.weather.gov/products/${encodeURIComponent(productId)}`,
+		'NWS product',
+	);
+}
+
 async function fetchMapClickForecastJson(lat: number, lon: number): Promise<any | null> {
 	const url = new URL('https://forecast.weather.gov/MapClick.php');
 	url.searchParams.set('lat', lat.toFixed(2));
@@ -7161,6 +8150,8 @@ function normalizeDailyPeriods(periods: any[], mapClickOverrides: MapClickPeriod
 					nightOverride?.detailedForecast || nightPeriod?.detailedForecast || '',
 				),
 				nightPrecipitationChance: roundTo(nightPrecipitationChance, 0),
+				nightWindSpeed: String(nightPeriod?.windSpeed || ''),
+				nightWindDirection: String(nightPeriod?.windDirection || ''),
 				nightIcon: String(nightOverride?.icon || nightPeriod?.icon || ''),
 				sunrise: null,
 				sunset: null,
@@ -7539,6 +8530,466 @@ function buildRadarPayload(input: {
 	};
 }
 
+async function buildWeatherPayloadForPoint(point: any): Promise<any> {
+	if (!point.forecast || !point.forecastHourly) {
+		throw new HttpError(502, 'Forecast endpoints are unavailable for this location.');
+	}
+
+	const [forecastPayload, hourlyPayload, observation, mapClickPayload] = await Promise.all([
+		fetchNwsJson(point.forecast, 'Daily forecast'),
+		fetchNwsJson(point.forecastHourly, 'Hourly forecast'),
+		fetchLatestObservation(point.observationStations, point.lat, point.lon),
+		fetchMapClickForecastJson(point.lat, point.lon),
+	]);
+
+	const hourlyPeriodsRaw = Array.isArray(hourlyPayload?.properties?.periods)
+		? hourlyPayload.properties.periods
+		: [];
+	const dailyPeriodsRaw = Array.isArray(forecastPayload?.properties?.periods)
+		? forecastPayload.properties.periods
+		: [];
+
+	const hourly = normalizeHourlyPeriods(hourlyPeriodsRaw);
+	const mapClickOverrides = buildMapClickPeriodOverrides(mapClickPayload);
+	let daily = normalizeDailyPeriods(dailyPeriodsRaw, mapClickOverrides);
+	const currentLocalDateKey = calendarDateKey(Date.now(), point.timeZone || null);
+	const sunriseSunsetSchedule = await fetchSunriseSunsetSchedule(
+		point.lat,
+		point.lon,
+		point.timeZone || null,
+		[
+			...(currentLocalDateKey ? [currentLocalDateKey] : []),
+			...daily
+				.slice(0, 7)
+				.map((day: any) => calendarDateKey(String(day?.startTime || ''), point.timeZone || null))
+				.filter(Boolean) as string[],
+		],
+	);
+	const sun = buildSunTimesFromDailyPeriods(dailyPeriodsRaw);
+	const currentDaySun = currentLocalDateKey ? sunriseSunsetSchedule[currentLocalDateKey] : null;
+	if (currentDaySun?.sunrise) {
+		sun.sunrise = currentDaySun.sunrise;
+	}
+	if (currentDaySun?.sunset) {
+		sun.sunset = currentDaySun.sunset;
+	}
+	if (!sun.sunrise && observation?.properties?.sunrise) {
+		sun.sunrise = String(observation.properties.sunrise);
+	}
+	if (!sun.sunset && observation?.properties?.sunset) {
+		sun.sunset = String(observation.properties.sunset);
+	}
+	daily = daily.map((day: any) => {
+		const dateKey = calendarDateKey(String(day?.startTime || ''), point.timeZone || null);
+		const daySun = dateKey ? sunriseSunsetSchedule[dateKey] : null;
+		return {
+			...day,
+			sunrise: daySun?.sunrise || normalizeIsoOrNull(day?.startTime) || null,
+			sunset: daySun?.sunset || normalizeIsoOrNull(day?.endTime) || null,
+		};
+	});
+	let current = buildCurrentConditions(
+		observation?.properties ?? {},
+		hourlyPeriodsRaw[0] ?? {},
+		sun,
+	);
+
+	const now = Date.now();
+	let isNight = true;
+	if (sun?.sunrise && sun?.sunset) {
+		const sunrise = Date.parse(String(sun.sunrise));
+		const sunset = Date.parse(String(sun.sunset));
+		if (Number.isFinite(sunrise) && Number.isFinite(sunset) && now >= sunrise && now < sunset) {
+			isNight = false;
+		}
+	}
+
+	current = { ...current, isNight };
+
+	const radarStation = point.radarStation || observation?.stationId || '';
+	const radar = buildRadarPayload({
+		lat: point.lat,
+		lon: point.lon,
+		station: radarStation || null,
+		updated: String(observation?.properties?.timestamp || hourly[0]?.startTime || new Date().toISOString()),
+		summary: String(observation?.properties?.textDescription || current.condition || ''),
+	});
+
+	const generatedAt = new Date().toISOString();
+
+	return {
+		location: {
+			lat: point.lat,
+			lon: point.lon,
+			city: point.city,
+			state: point.state,
+			label: point.label,
+			timeZone: point.timeZone || null,
+			gridId: point.gridId || null,
+			gridX: Number.isFinite(point.gridX) ? point.gridX : null,
+			gridY: Number.isFinite(point.gridY) ? point.gridY : null,
+			radarStation: radarStation || null,
+		},
+		current,
+		hourly,
+		daily,
+		radar,
+		updated: generatedAt,
+		generatedAt,
+		meta: {
+			generatedAt,
+		},
+	};
+}
+
+function buildAdminForecastPeriods(daily: any[]): any[] {
+	const periods: any[] = [];
+	for (const day of (Array.isArray(daily) ? daily : []).slice(0, 3)) {
+		periods.push({
+			id: `${String(day?.name || 'day').toLowerCase().replace(/\s+/g, '-')}-day`,
+			name: String(day?.name || ''),
+			shortForecast: String(day?.shortForecast || ''),
+			detailedForecast: String(day?.detailedForecast || ''),
+			temperatureF: Number.isFinite(Number(day?.highF)) ? Number(day.highF) : Number(day?.temperatureF ?? NaN),
+			temperatureLabel: Number.isFinite(Number(day?.highF)) ? 'High' : 'Temp',
+			windSpeed: String(day?.windSpeed || ''),
+			windDirection: String(day?.windDirection || ''),
+			precipitationChance: Number.isFinite(Number(day?.precipitationChance)) ? Number(day.precipitationChance) : null,
+			isDaytime: true,
+		});
+
+		if (day?.nightName) {
+			periods.push({
+				id: `${String(day.nightName).toLowerCase().replace(/\s+/g, '-')}-night`,
+				name: String(day.nightName || ''),
+				shortForecast: String(day?.nightShortForecast || ''),
+				detailedForecast: String(day?.nightDetailedForecast || ''),
+				temperatureF: Number.isFinite(Number(day?.lowF)) ? Number(day.lowF) : null,
+				temperatureLabel: 'Low',
+				windSpeed: String(day?.nightWindSpeed || ''),
+				windDirection: String(day?.nightWindDirection || ''),
+				precipitationChance: Number.isFinite(Number(day?.nightPrecipitationChance)) ? Number(day.nightPrecipitationChance) : null,
+				isDaytime: false,
+			});
+		}
+	}
+	return periods;
+}
+
+function buildAdminForecastSummaryLine(period: any): string {
+	const tempPart = Number.isFinite(Number(period?.temperatureF))
+		? `${String(period?.temperatureLabel || 'Temp')}: ${Math.round(Number(period.temperatureF))}F`
+		: null;
+	const precipPart = Number.isFinite(Number(period?.precipitationChance))
+		? `${Math.round(Number(period.precipitationChance))}% precip`
+		: null;
+	return [
+		`${String(period?.name || 'Period')}: ${String(period?.shortForecast || '').trim()}`,
+		tempPart,
+		precipPart,
+	].filter(Boolean).join(', ');
+}
+
+function buildNationalForecastSummaryText(cities: any[]): string {
+	const lines = [
+		'3-Day USA Forecast',
+		'',
+	];
+
+	for (const city of cities) {
+		lines.push(`${city.label} (${city.region})`);
+		for (const period of city.periods) {
+			lines.push(buildAdminForecastSummaryLine(period));
+		}
+		lines.push('');
+	}
+
+	const rainFocusedCities = cities
+		.map((city) => ({
+			label: city.label,
+			rainPeriods: city.periods.filter((period: any) => Number(period?.precipitationChance || 0) >= 40).length,
+		}))
+		.filter((entry) => entry.rainPeriods > 0)
+		.sort((a, b) => b.rainPeriods - a.rainPeriods)
+		.slice(0, 2);
+	if (rainFocusedCities.length > 0) {
+		lines.push('National Weather Story');
+		lines.push(`- Greatest rain chances: ${rainFocusedCities.map((entry) => entry.label).join(' and ')}`);
+		lines.push('');
+	}
+
+	lines.push('#USWeather #NationalForecast #LiveWeatherAlerts');
+	return lines.join('\n').trim();
+}
+
+function extractSpcDiscussionSummary(text: string): string {
+	const lines = String(text || '').split(/\r?\n/);
+	const summaryIndex = lines.findIndex((line) => line.trim().toUpperCase() === '...SUMMARY...');
+	if (summaryIndex === -1) return '';
+	const collected: string[] = [];
+	for (let index = summaryIndex + 1; index < lines.length; index += 1) {
+		const line = lines[index]?.trim() || '';
+		if (!line) {
+			if (collected.length > 0) break;
+			continue;
+		}
+		if (/^\.\.\..+\.\.\.$/.test(line)) break;
+		collected.push(line.replace(/\s+/g, ' '));
+	}
+	return collected.join(' ').trim();
+}
+
+function buildConvectiveOutlookFacebookText(day: any): string {
+	const lines = [
+		String(day?.title || day?.label || 'SPC Convective Outlook'),
+		day?.updated ? `Updated ${String(day.updated)}` : '',
+		day?.summary ? `Summary: ${String(day.summary)}` : '',
+		'',
+		String(day?.discussionText || '').trim(),
+	];
+	return lines.filter(Boolean).join('\n').trim();
+}
+
+function buildDiscussionFacebookText(city: any, discussion: any): string {
+	const lines = [
+		`NWS Discussion: ${String(city?.label || 'Discussion')}`,
+		`Issued ${formatDateTime(String(discussion?.issuanceTime || ''))}`,
+		'',
+		String(discussion?.productText || '').trim(),
+	];
+	return lines.filter(Boolean).join('\n').trim();
+}
+
+function parseSpcConvectiveOutlookPage(html: string, config: AdminConvectiveOutlookConfig): any {
+	const pageTitleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
+	const pageTitle = decodeHtmlEntities(String(pageTitleMatch?.[1] || `${config.label} Convective Outlook`))
+		.replace(/\s+/g, ' ')
+		.trim();
+	const updatedMatch = html.match(/Updated:(?:&nbsp;|\s)*([^<]+?)(?:&nbsp;|\s)*\(/i);
+	const updated = decodeHtmlEntities(String(updatedMatch?.[1] || ''))
+		.replace(/\s+/g, ' ')
+		.trim();
+	const defaultTabMatch = html.match(/onload="[^"]*show_tab\('([^']+)'\)/i) || html.match(/show_tab\('([^']+)'\)/i);
+	const defaultTab = String(defaultTabMatch?.[1] || '').trim();
+	const imageUrl = defaultTab
+		? new URL(`${config.imagePrefix}${defaultTab}.png`, config.pageUrl).toString()
+		: '';
+	const markerIndex = html.toLowerCase().indexOf('forecast discussion');
+	const preStart = markerIndex >= 0 ? html.indexOf('<pre>', markerIndex) : html.indexOf('<pre>');
+	const preEnd = preStart >= 0 ? html.indexOf('</pre>', preStart) : -1;
+	const discussionText = preStart >= 0 && preEnd > preStart
+		? decodeHtmlEntities(html.slice(preStart + 5, preEnd)).replace(/\r/g, '').trim()
+		: '';
+	const productLines = discussionText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+	const productTitle = productLines.find((line) => /^Day\s+\d+\s+Convective Outlook/i.test(line)) || `${config.label} Convective Outlook`;
+	const issuedLineMatch = discussionText.match(/NWS Storm Prediction Center Norman OK\s+([^\n]+)/i);
+	const issuedLabel = String(issuedLineMatch?.[1] || '').trim();
+	const summary = extractSpcDiscussionSummary(discussionText);
+	return {
+		id: config.id,
+		label: config.label,
+		title: productTitle,
+		pageTitle,
+		updated,
+		issuedLabel,
+		summary,
+		imageUrl,
+		pageUrl: config.pageUrl,
+		discussionText,
+		facebookText: buildConvectiveOutlookFacebookText({
+			label: config.label,
+			title: productTitle,
+			updated,
+			summary,
+			discussionText,
+		}),
+	};
+}
+
+async function fetchAdminForecastCityData(config: AdminForecastLocationConfig): Promise<any> {
+	const savedLocation = await geocodeZipToLocation(config.zip);
+	const point = await fetchPointWeatherContext(savedLocation.lat, savedLocation.lon);
+	const weather = await buildWeatherPayloadForPoint(point);
+	return {
+		id: config.id,
+		label: config.label,
+		region: config.region,
+		zip: config.zip,
+		locationLabel: String(weather?.location?.label || `${config.label}, ${savedLocation.state || ''}`),
+		updated: String(weather?.updated || weather?.generatedAt || new Date().toISOString()),
+		periods: buildAdminForecastPeriods(weather?.daily || []),
+	};
+}
+
+async function fetchAdminDiscussionCityData(config: AdminForecastLocationConfig): Promise<any> {
+	const list = await fetchNwsProductList('AFD', config.discussionOfficeCode);
+	const latestItems = list.slice(0, ADMIN_DISCUSSION_LIMIT);
+	const products = await Promise.all(
+		latestItems.map(async (item: any) => {
+			const productId = String(item?.id || '').trim();
+			const product = await fetchNwsProductById(productId);
+			return {
+				id: String(product?.id || productId),
+				title: String(product?.productName || item?.productName || 'Area Forecast Discussion'),
+				issuanceTime: String(product?.issuanceTime || item?.issuanceTime || ''),
+				productText: String(product?.productText || '').trim(),
+				productUrl: String(product?.['@id'] || item?.['@id'] || ''),
+			};
+		}),
+	);
+
+	return {
+		id: config.id,
+		label: config.label,
+		region: config.region,
+		zip: config.zip,
+		officeCode: config.discussionOfficeCode,
+		officeLabel: config.discussionOfficeLabel,
+		discussionCount: list.length,
+		discussions: products.map((discussion) => ({
+			...discussion,
+			facebookText: buildDiscussionFacebookText(config, discussion),
+		})),
+	};
+}
+
+async function fetchAdminConvectiveOutlookDayData(config: AdminConvectiveOutlookConfig): Promise<any> {
+	const html = await fetchRemoteText(config.pageUrl, `${config.label} convective outlook`);
+	return parseSpcConvectiveOutlookPage(html, config);
+}
+
+async function handleAdminForecastData(request: Request, env: Env): Promise<Response> {
+	if (!await isAuthenticated(request, env)) {
+		return new Response('Unauthorized', { status: 401 });
+	}
+
+	const headers = new Headers({
+		'Content-Type': 'application/json; charset=utf-8',
+		'Cache-Control': 'no-store',
+	});
+
+	const results = await Promise.allSettled(
+		ADMIN_FORECAST_LOCATIONS.map((config) => fetchAdminForecastCityData(config)),
+	);
+
+	const cities = results
+		.filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
+		.map((result) => result.value);
+	const errors = results
+		.map((result, index) =>
+			result.status === 'rejected'
+				? {
+					id: ADMIN_FORECAST_LOCATIONS[index]?.id || `city-${index + 1}`,
+					label: ADMIN_FORECAST_LOCATIONS[index]?.label || `City ${index + 1}`,
+					error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+				}
+				: null,
+		)
+		.filter(Boolean);
+
+	if (cities.length === 0) {
+		return new Response(JSON.stringify({
+			error: 'Unable to load admin forecast data right now.',
+			errors,
+		}), { status: 502, headers });
+	}
+
+	const generatedAt = new Date().toISOString();
+	return new Response(JSON.stringify({
+		generatedAt,
+		cities,
+		summaryTitle: '3-Day USA Forecast',
+		summaryText: buildNationalForecastSummaryText(cities),
+		errors,
+	}), { status: 200, headers });
+}
+
+async function handleAdminDiscussionData(request: Request, env: Env): Promise<Response> {
+	if (!await isAuthenticated(request, env)) {
+		return new Response('Unauthorized', { status: 401 });
+	}
+
+	const headers = new Headers({
+		'Content-Type': 'application/json; charset=utf-8',
+		'Cache-Control': 'no-store',
+	});
+
+	const results = await Promise.allSettled(
+		ADMIN_FORECAST_LOCATIONS.map((config) => fetchAdminDiscussionCityData(config)),
+	);
+
+	const cities = results
+		.filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
+		.map((result) => result.value);
+	const errors = results
+		.map((result, index) =>
+			result.status === 'rejected'
+				? {
+					id: ADMIN_FORECAST_LOCATIONS[index]?.id || `city-${index + 1}`,
+					label: ADMIN_FORECAST_LOCATIONS[index]?.label || `City ${index + 1}`,
+					error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+				}
+				: null,
+		)
+		.filter(Boolean);
+
+	if (cities.length === 0) {
+		return new Response(JSON.stringify({
+			error: 'Unable to load NWS discussions right now.',
+			errors,
+		}), { status: 502, headers });
+	}
+
+	return new Response(JSON.stringify({
+		generatedAt: new Date().toISOString(),
+		cities,
+		errors,
+	}), { status: 200, headers });
+}
+
+async function handleAdminConvectiveOutlookData(request: Request, env: Env): Promise<Response> {
+	if (!await isAuthenticated(request, env)) {
+		return new Response('Unauthorized', { status: 401 });
+	}
+
+	const headers = new Headers({
+		'Content-Type': 'application/json; charset=utf-8',
+		'Cache-Control': 'no-store',
+	});
+
+	const results = await Promise.allSettled(
+		ADMIN_CONVECTIVE_OUTLOOKS.map((config) => fetchAdminConvectiveOutlookDayData(config)),
+	);
+
+	const days = results
+		.filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
+		.map((result) => result.value);
+	const errors = results
+		.map((result, index) =>
+			result.status === 'rejected'
+				? {
+					id: ADMIN_CONVECTIVE_OUTLOOKS[index]?.id || `day-${index + 1}`,
+					label: ADMIN_CONVECTIVE_OUTLOOKS[index]?.label || `Day ${index + 1}`,
+					error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+				}
+				: null,
+		)
+		.filter(Boolean);
+
+	if (days.length === 0) {
+		return new Response(JSON.stringify({
+			error: 'Unable to load SPC convective outlook data right now.',
+			errors,
+		}), { status: 502, headers });
+	}
+
+	return new Response(JSON.stringify({
+		generatedAt: new Date().toISOString(),
+		days,
+		errors,
+	}), { status: 200, headers });
+}
+
 async function handleApiWeather(request: Request): Promise<Response> {
 	const headers = apiCorsHeaders();
 	headers.set('Content-Type', 'application/json; charset=utf-8');
@@ -7547,118 +8998,9 @@ async function handleApiWeather(request: Request): Promise<Response> {
 	try {
 		const { lat, lon } = parseLatLonForWeather(request);
 		const point = await fetchPointWeatherContext(lat, lon);
-
-		if (!point.forecast || !point.forecastHourly) {
-			throw new HttpError(502, 'Forecast endpoints are unavailable for this location.');
-		}
-
-		const [forecastPayload, hourlyPayload, observation, mapClickPayload] = await Promise.all([
-			fetchNwsJson(point.forecast, 'Daily forecast'),
-			fetchNwsJson(point.forecastHourly, 'Hourly forecast'),
-			fetchLatestObservation(point.observationStations, point.lat, point.lon),
-			fetchMapClickForecastJson(point.lat, point.lon),
-		]);
-
-		const hourlyPeriodsRaw = Array.isArray(hourlyPayload?.properties?.periods)
-			? hourlyPayload.properties.periods
-			: [];
-		const dailyPeriodsRaw = Array.isArray(forecastPayload?.properties?.periods)
-			? forecastPayload.properties.periods
-			: [];
-
-		const hourly = normalizeHourlyPeriods(hourlyPeriodsRaw);
-		const mapClickOverrides = buildMapClickPeriodOverrides(mapClickPayload);
-		let daily = normalizeDailyPeriods(dailyPeriodsRaw, mapClickOverrides);
-		const currentLocalDateKey = calendarDateKey(Date.now(), point.timeZone || null);
-		const sunriseSunsetSchedule = await fetchSunriseSunsetSchedule(
-			point.lat,
-			point.lon,
-			point.timeZone || null,
-			[
-				...(currentLocalDateKey ? [currentLocalDateKey] : []),
-				...daily
-					.slice(0, 7)
-					.map((day: any) => calendarDateKey(String(day?.startTime || ''), point.timeZone || null))
-					.filter(Boolean) as string[],
-			],
-		);
-		const sun = buildSunTimesFromDailyPeriods(dailyPeriodsRaw);
-		const currentDaySun = currentLocalDateKey ? sunriseSunsetSchedule[currentLocalDateKey] : null;
-		if (currentDaySun?.sunrise) {
-			sun.sunrise = currentDaySun.sunrise;
-		}
-		if (currentDaySun?.sunset) {
-			sun.sunset = currentDaySun.sunset;
-		}
-		if (!sun.sunrise && observation?.properties?.sunrise) {
-			sun.sunrise = String(observation.properties.sunrise);
-		}
-		if (!sun.sunset && observation?.properties?.sunset) {
-			sun.sunset = String(observation.properties.sunset);
-		}
-		daily = daily.map((day: any) => {
-			const dateKey = calendarDateKey(String(day?.startTime || ''), point.timeZone || null);
-			const daySun = dateKey ? sunriseSunsetSchedule[dateKey] : null;
-			return {
-				...day,
-				sunrise: daySun?.sunrise || normalizeIsoOrNull(day?.startTime) || null,
-				sunset: daySun?.sunset || normalizeIsoOrNull(day?.endTime) || null,
-			};
-		});
-		let current = buildCurrentConditions(
-			observation?.properties ?? {},
-			hourlyPeriodsRaw[0] ?? {},
-			sun,
-		);
-
-		const now = Date.now();
-		let isNight = true;
-		if (sun?.sunrise && sun?.sunset) {
-			const sunrise = Date.parse(String(sun.sunrise));
-			const sunset = Date.parse(String(sun.sunset));
-			if (Number.isFinite(sunrise) && Number.isFinite(sunset)) {
-				if (now >= sunrise && now < sunset) {
-					isNight = false;
-				}
-			}
-		}
-
-		current = { ...current, isNight };
-
-		const radarStation = point.radarStation || observation?.stationId || '';
-		const radar = buildRadarPayload({
-			lat: point.lat,
-			lon: point.lon,
-			station: radarStation || null,
-			updated: String(observation?.properties?.timestamp || hourly[0]?.startTime || new Date().toISOString()),
-			summary: String(observation?.properties?.textDescription || current.condition || ''),
-		});
-
-		const generatedAt = new Date().toISOString();
+		const payload = await buildWeatherPayloadForPoint(point);
 		headers.set('Cache-Control', 'public, max-age=30, must-revalidate');
-		return new Response(JSON.stringify({
-			location: {
-				lat: point.lat,
-				lon: point.lon,
-				city: point.city,
-				state: point.state,
-				label: point.label,
-				timeZone: point.timeZone || null,
-				gridId: point.gridId || null,
-				gridX: Number.isFinite(point.gridX) ? point.gridX : null,
-				gridY: Number.isFinite(point.gridY) ? point.gridY : null,
-				radarStation: radarStation || null,
-			},
-			current,
-			hourly,
-			daily,
-			radar,
-			updated: generatedAt,
-			generatedAt,
-			meta: {
-				generatedAt,
-			},
-		}), { status: 200, headers });
+		return new Response(JSON.stringify(payload), { status: 200, headers });
 	} catch (error) {
 		const status = error instanceof HttpError ? error.status : 500;
 		const message = error instanceof Error ? error.message : 'Unexpected weather lookup error.';
@@ -7944,11 +9286,17 @@ async function evaluateFacebookAutoPostDecision(
 	change: AlertChangeRecord,
 ): Promise<FacebookAutoPostDecision> {
 	const event = String(feature?.properties?.event || change.event || '').trim();
+	const properties = feature?.properties ?? {};
 	const countyCount = Math.max(
 		extractFullCountyFipsCodes(feature, change).length,
 		dedupeStrings((change.countyCodes || []).map((countyCode) => String(countyCode || '').trim())).length,
 	);
 	const matchedMetroNames = matchingMetroNamesForAlert(feature, change);
+	const impactCategories = deriveAlertImpactCategories(
+		event,
+		String(properties.headline || ''),
+		String(properties.description || ''),
+	);
 	const noDecision = (
 		reason: string,
 		threadAction: FacebookPublishThreadAction = '',
@@ -7973,14 +9321,7 @@ async function evaluateFacebookAutoPostDecision(
 	if (!isAutoPostCandidateActive(feature)) return noDecision('inactive_or_expired');
 	if (!isAutoPostCandidateTimely(feature, change)) return noDecision('stale_alert');
 
-	const existingThread = await readExistingThreadForAlert(
-		env,
-		Array.isArray(feature?.properties?.geocode?.UGC) ? feature.properties.geocode.UGC : [],
-		event,
-	);
-	const threadAction: FacebookPublishThreadAction = existingThread && !threadIsRecentForAutoPost(existingThread)
-		? 'new_post'
-		: '';
+	const threadAction = await resolveAutoPostThreadAction(env, feature, event);
 
 	if (mode === 'tornado_only') {
 		if (!isTornadoWarningEvent(event)) return noDecision('mode_tornado_only_non_tornado', threadAction);
@@ -8017,13 +9358,32 @@ async function evaluateFacebookAutoPostDecision(
 		};
 	}
 
+	if (impactCategories.includes('fire')) {
+		if (!hasFireFamilyEscalationCriteria(feature)) {
+			return noDecision('fire_family_not_escalated', threadAction);
+		}
+		return {
+			eligible: true,
+			threadAction,
+			reason: 'fire_family_escalation',
+			mode,
+			matchedMetroNames,
+			countyCount,
+		};
+	}
+
 	const passesBaseImpactGate = matchedMetroNames.length > 0 || countyCount >= 10;
 	if (!passesBaseImpactGate) {
 		return noDecision('impact_gate_not_met', threadAction);
 	}
 
-	if (isSevereThunderstormWarningEvent(event) && !hasSevereThunderstormDestructiveCriteria(feature)) {
-		return noDecision('severe_thunderstorm_below_threshold', threadAction);
+	if (isSevereThunderstormWarningEvent(event)) {
+		const meetsPrimaryCriteria = hasSevereThunderstormDestructiveCriteria(feature);
+		const meetsSoftCriteria = hasSevereThunderstormStrongWording(feature)
+			|| (matchedMetroNames.length > 0 && hasSevereThunderstormNearThresholdMetrics(feature));
+		if (!meetsPrimaryCriteria && !meetsSoftCriteria) {
+			return noDecision('severe_thunderstorm_below_threshold', threadAction);
+		}
 	}
 
 	return {
@@ -8034,6 +9394,56 @@ async function evaluateFacebookAutoPostDecision(
 		matchedMetroNames,
 		countyCount,
 	};
+}
+
+async function selectSevereWeatherFallbackOverrides(
+	env: Env,
+	evaluations: AutoPostEvaluationRecord[],
+): Promise<Map<string, FacebookAutoPostDecision>> {
+	const overrides = new Map<string, FacebookAutoPostDecision>();
+	const candidates = evaluations.filter((record) => {
+		if (!isSevereWeatherFallbackEvent(record.event)) return false;
+		if (!isAutoPostCandidateActive(record.feature)) return false;
+		if (!isAutoPostCandidateTimely(record.feature, record.change)) return false;
+		return record.matchedMetroNames.length > 0 || record.countyCount >= 10;
+	});
+	if (candidates.length < 2) return overrides;
+	if (evaluations.some((record) => hasHigherTierAutoPostCompetition(record))) {
+		return overrides;
+	}
+
+	const sortedCandidates = [...candidates].sort(sortSevereWeatherFallbackCandidates);
+	const selectedAlertIds = new Set(
+		sortedCandidates
+			.slice(0, 2)
+			.map((record) => String(record.change.alertId || record.feature?.id || ''))
+			.filter(Boolean),
+	);
+
+	for (const record of sortedCandidates) {
+		const alertId = String(record.change.alertId || record.feature?.id || '');
+		if (!alertId) continue;
+		if (selectedAlertIds.has(alertId)) {
+			if (!record.decision.eligible) {
+				overrides.set(alertId, {
+					...record.decision,
+					eligible: true,
+					threadAction: record.decision.threadAction || await resolveAutoPostThreadAction(env, record.feature, record.event),
+					reason: 'severe_weather_fallback',
+				});
+			}
+			continue;
+		}
+
+		overrides.set(alertId, {
+			...record.decision,
+			eligible: false,
+			threadAction: record.decision.threadAction || await resolveAutoPostThreadAction(env, record.feature, record.event),
+			reason: 'severe_weather_fallback_not_selected',
+		});
+	}
+
+	return overrides;
 }
 
 async function autoPostFacebookAlerts(
@@ -8055,6 +9465,7 @@ async function autoPostFacebookAlerts(
 	);
 	if (relevantChanges.length === 0) return;
 
+	const evaluations: AutoPostEvaluationRecord[] = [];
 	for (const change of relevantChanges) {
 		const feature =
 			map[change.alertId]
@@ -8062,26 +9473,43 @@ async function autoPostFacebookAlerts(
 		if (!feature) continue;
 
 		const decision = await evaluateFacebookAutoPostDecision(env, config.mode, feature, change);
+		evaluations.push({
+			feature,
+			change,
+			decision,
+			event: String(feature?.properties?.event || change.event || '').trim(),
+			matchedMetroNames: decision.matchedMetroNames,
+			countyCount: decision.countyCount,
+		});
+	}
+
+	const severeWeatherFallbackOverrides = config.mode === 'smart_high_impact'
+		? await selectSevereWeatherFallbackOverrides(env, evaluations)
+		: new Map<string, FacebookAutoPostDecision>();
+
+	for (const evaluation of evaluations) {
+		const alertId = String(evaluation.change.alertId || evaluation.feature?.id || '');
+		const decision = severeWeatherFallbackOverrides.get(alertId) || evaluation.decision;
 		if (!decision.eligible) {
 			console.log(
-				`[fb-auto-post] skipped ${change.alertId} event="${String(feature?.properties?.event || change.event || '')}" reason=${decision.reason}`,
+				`[fb-auto-post] skipped ${evaluation.change.alertId} event="${String(evaluation.feature?.properties?.event || evaluation.change.event || '')}" reason=${decision.reason}`,
 			);
 			continue;
 		}
 
 		try {
-			const result = await publishFeatureToFacebook(env, feature, {
+			const result = await publishFeatureToFacebook(env, evaluation.feature, {
 				threadAction: decision.threadAction,
 			});
 			const metroLabel = decision.matchedMetroNames.length > 0
 				? ` metros=${decision.matchedMetroNames.join('|')}`
 				: '';
 			console.log(
-				`[fb-auto-post] ${result.status} ${change.alertId} mode=${decision.mode} reason=${decision.reason} change=${change.changeType} counties=${decision.countyCount}${metroLabel} post=${result.postId}`,
+				`[fb-auto-post] ${result.status} ${evaluation.change.alertId} mode=${decision.mode} reason=${decision.reason} change=${evaluation.change.changeType} counties=${decision.countyCount}${metroLabel} post=${result.postId}`,
 			);
 		} catch (err) {
 			console.error(
-				`[fb-auto-post] failed for ${change.alertId} mode=${decision.mode} reason=${decision.reason}: ${String(err)}`,
+				`[fb-auto-post] failed for ${evaluation.change.alertId} mode=${decision.mode} reason=${decision.reason}: ${String(err)}`,
 			);
 		}
 	}
@@ -8130,6 +9558,7 @@ export const __testing = {
 	evaluateFacebookAutoPostDecision,
 	matchingMetroNamesForAlert,
 	hasSevereThunderstormDestructiveCriteria,
+	selectSevereWeatherFallbackOverrides,
 };
 
 export default {
@@ -8299,6 +9728,15 @@ export default {
 		}
 		if (url.pathname === '/admin/thread-check' && request.method === 'GET') {
 			return await handleThreadCheck(request, env);
+		}
+		if (url.pathname === '/admin/forecast-data' && request.method === 'GET') {
+			return await handleAdminForecastData(request, env);
+		}
+		if (url.pathname === '/admin/discussions-data' && request.method === 'GET') {
+			return await handleAdminDiscussionData(request, env);
+		}
+		if (url.pathname === '/admin/convective-outlook-data' && request.method === 'GET') {
+			return await handleAdminConvectiveOutlookData(request, env);
 		}
 		if (url.pathname === '/admin/token-exchange' && request.method === 'POST') {
 			return await handleTokenExchange(request, env);

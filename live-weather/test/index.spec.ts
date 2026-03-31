@@ -146,7 +146,395 @@ describe('Live Weather Admin worker', () => {
 		expect(body).toContain('Live Weather Alerts Admin');
 		expect(body).toContain('Tornado Warning');
 		expect(body).toContain('autoPostMode');
+		expect(body).toContain('Forecast Center');
+		expect(body).toContain('NWS Discussions');
+		expect(body).toContain('Convective Outlook');
+		expect(body).toContain('3-Day USA Summary');
 		expect(body).toContain('liveWeatherAdminFilters:v1');
+	});
+
+	it('returns regional admin forecast data and a 3-day USA summary when authenticated', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+
+		const citiesByZip = {
+			'10001': { label: 'New York City', state: 'NY', lat: 40.7506, lon: -73.9972, county: 'New York', fips: '061', zone: 'NYZ072', timeZone: 'America/New_York' },
+			'30303': { label: 'Atlanta', state: 'GA', lat: 33.7529, lon: -84.3925, county: 'Fulton', fips: '121', zone: 'GAZ025', timeZone: 'America/New_York' },
+			'60601': { label: 'Chicago', state: 'IL', lat: 41.8864, lon: -87.6186, county: 'Cook', fips: '031', zone: 'ILZ014', timeZone: 'America/Chicago' },
+			'75201': { label: 'Dallas', state: 'TX', lat: 32.7877, lon: -96.7997, county: 'Dallas', fips: '113', zone: 'TXZ102', timeZone: 'America/Chicago' },
+			'80202': { label: 'Denver', state: 'CO', lat: 39.7528, lon: -104.9992, county: 'Denver', fips: '031', zone: 'COZ040', timeZone: 'America/Denver' },
+		} as const;
+
+		const pointKeyToZip = new Map(
+			Object.entries(citiesByZip).map(([zip, city]) => [`${city.lat.toFixed(4)},${city.lon.toFixed(4)}`, zip]),
+		);
+
+		(globalThis as any).fetch = vi.fn(async (input: RequestInfo) => {
+			const url = String(input);
+			if (url.startsWith('https://api.zippopotam.us/us/')) {
+				const zip = url.split('/').pop() || '';
+				const city = citiesByZip[zip as keyof typeof citiesByZip];
+				if (!city) return new Response('not found', { status: 404 });
+				return new Response(JSON.stringify({
+					'post code': zip,
+					country: 'United States',
+					places: [{
+						'place name': city.label,
+						'state abbreviation': city.state,
+						latitude: String(city.lat),
+						longitude: String(city.lon),
+					}],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.startsWith('https://geo.fcc.gov/api/census/block/find')) {
+				const parsed = new URL(url);
+				const lat = Number(parsed.searchParams.get('latitude'));
+				const lon = Number(parsed.searchParams.get('longitude'));
+				const zip = pointKeyToZip.get(`${lat.toFixed(4)},${lon.toFixed(4)}`) || '10001';
+				const city = citiesByZip[zip as keyof typeof citiesByZip];
+				return new Response(JSON.stringify({
+					County: {
+						name: city.county,
+						FIPS: city.fips,
+					},
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.startsWith('https://api.weather.gov/points/')) {
+				const pointMatch = url.match(/points\/(-?\d+\.\d+),(-?\d+\.\d+)/);
+				const pointKey = pointMatch ? `${Number(pointMatch[1]).toFixed(4)},${Number(pointMatch[2]).toFixed(4)}` : '';
+				const zip = pointKeyToZip.get(pointKey) || '10001';
+				const city = citiesByZip[zip as keyof typeof citiesByZip];
+				return new Response(JSON.stringify({
+					properties: {
+						relativeLocation: {
+							properties: {
+								city: city.label,
+								state: city.state,
+							},
+						},
+						timeZone: city.timeZone,
+						gridId: city.state,
+						gridX: 1,
+						gridY: 1,
+						forecast: `https://weather.example/${zip}/forecast`,
+						forecastHourly: `https://weather.example/${zip}/hourly`,
+						observationStations: `https://weather.example/${zip}/stations`,
+						forecastZone: `https://api.weather.gov/zones/forecast/${city.zone}`,
+						radarStation: `K${zip.slice(0, 3)}`,
+					},
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.startsWith('https://weather.example/')) {
+				const match = url.match(/weather\.example\/(\d{5})\/(forecast|hourly|stations)/);
+				const zip = match?.[1] || '10001';
+				const endpoint = match?.[2] || 'forecast';
+				const city = citiesByZip[zip as keyof typeof citiesByZip];
+				if (endpoint === 'stations') {
+					return new Response(JSON.stringify({
+						features: [{
+							properties: { stationIdentifier: `K${zip}` },
+							geometry: { coordinates: [city.lon, city.lat] },
+						}],
+					}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+				}
+				if (endpoint === 'hourly') {
+					return new Response(JSON.stringify({
+						properties: {
+							periods: [{
+								startTime: '2026-03-30T13:00:00-04:00',
+								temperature: 68,
+								temperatureUnit: 'F',
+								shortForecast: `${city.label} Hourly`,
+								windSpeed: '10 mph',
+								windDirection: 'SW',
+								probabilityOfPrecipitation: { value: 20 },
+							}],
+						},
+					}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+				}
+				return new Response(JSON.stringify({
+					properties: {
+						periods: [
+							{ name: 'Today', isDaytime: true, temperature: 72, temperatureUnit: 'F', shortForecast: `${city.label} Sunshine`, detailedForecast: `${city.label} will stay mostly sunny and mild.`, windSpeed: '10 mph', windDirection: 'SW', probabilityOfPrecipitation: { value: 10 }, startTime: '2026-03-30T13:00:00-04:00', endTime: '2026-03-30T19:00:00-04:00', icon: 'https://example.com/day.png' },
+							{ name: 'Tonight', isDaytime: false, temperature: 55, temperatureUnit: 'F', shortForecast: 'Partly Cloudy', detailedForecast: `A quiet night settles over ${city.label}.`, windSpeed: '8 mph', windDirection: 'SW', probabilityOfPrecipitation: { value: 15 }, startTime: '2026-03-30T19:00:00-04:00', endTime: '2026-03-31T07:00:00-04:00', icon: 'https://example.com/night.png' },
+							{ name: 'Tuesday', isDaytime: true, temperature: 76, temperatureUnit: 'F', shortForecast: 'Warm and Breezy', detailedForecast: `${city.label} turns warmer with a few passing clouds.`, windSpeed: '12 mph', windDirection: 'SW', probabilityOfPrecipitation: { value: 20 }, startTime: '2026-03-31T07:00:00-04:00', endTime: '2026-03-31T19:00:00-04:00', icon: 'https://example.com/day2.png' },
+							{ name: 'Tuesday Night', isDaytime: false, temperature: 57, temperatureUnit: 'F', shortForecast: 'Chance Showers', detailedForecast: `A few showers are possible around ${city.label} overnight.`, windSpeed: '9 mph', windDirection: 'S', probabilityOfPrecipitation: { value: 40 }, startTime: '2026-03-31T19:00:00-04:00', endTime: '2026-04-01T07:00:00-04:00', icon: 'https://example.com/night2.png' },
+							{ name: 'Wednesday', isDaytime: true, temperature: 74, temperatureUnit: 'F', shortForecast: 'Scattered Showers', detailedForecast: `${city.label} keeps a few scattered showers through the afternoon.`, windSpeed: '11 mph', windDirection: 'W', probabilityOfPrecipitation: { value: 50 }, startTime: '2026-04-01T07:00:00-04:00', endTime: '2026-04-01T19:00:00-04:00', icon: 'https://example.com/day3.png' },
+							{ name: 'Wednesday Night', isDaytime: false, temperature: 53, temperatureUnit: 'F', shortForecast: 'Clearing Late', detailedForecast: `${city.label} dries out overnight with cooler air moving in.`, windSpeed: '7 mph', windDirection: 'NW', probabilityOfPrecipitation: { value: 20 }, startTime: '2026-04-01T19:00:00-04:00', endTime: '2026-04-02T07:00:00-04:00', icon: 'https://example.com/night3.png' },
+						],
+					},
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.startsWith('https://api.weather.gov/stations/K')) {
+				return new Response(JSON.stringify({
+					properties: {
+						timestamp: new Date().toISOString(),
+						textDescription: 'Clear',
+						temperature: { value: 20, unitCode: 'wmoUnit:degC' },
+						dewpoint: { value: 10, unitCode: 'wmoUnit:degC' },
+						relativeHumidity: { value: 55, unitCode: 'wmoUnit:percent' },
+						windSpeed: { value: 4, unitCode: 'wmoUnit:m_s-1' },
+						windDirection: { value: 225, unitCode: 'wmoUnit:degree_(angle)' },
+						visibility: { value: 16093, unitCode: 'wmoUnit:m' },
+						barometricPressure: { value: 101325, unitCode: 'wmoUnit:Pa' },
+					},
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.startsWith('https://forecast.weather.gov/MapClick.php')) {
+				return new Response('not found', { status: 404 });
+			}
+			if (url.startsWith('https://api.sunrise-sunset.org/json')) {
+				return new Response(JSON.stringify({
+					status: 'OK',
+					tzid: 'UTC',
+					results: {
+						sunrise: '2026-03-30T11:00:00+00:00',
+						sunset: '2026-03-30T23:00:00+00:00',
+					},
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			return new Response('not found', { status: 404 });
+		});
+
+		const request = new IncomingRequest('https://live-weather.example/admin/forecast-data', {
+			headers: { Cookie: cookie },
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, goodEnv as any, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json() as any;
+		expect(json.cities).toHaveLength(5);
+		expect(json.cities.map((city: any) => city.label)).toEqual([
+			'New York City',
+			'Atlanta',
+			'Chicago',
+			'Dallas',
+			'Denver',
+		]);
+		expect(json.summaryTitle).toBe('3-Day USA Forecast');
+		expect(json.summaryText).toContain('New York City (Northeast)');
+		expect(json.summaryText).toContain('Denver (West)');
+		expect(Array.isArray(json.cities[0].periods)).toBe(true);
+		expect(json.cities[0].periods.length).toBeGreaterThanOrEqual(6);
+	});
+
+	it('returns NWS discussion data for the admin discussion hub when authenticated', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+
+		const offices = [
+			{ id: 'nyc', label: 'New York City', office: 'OKX', cityCode: 'KOKX', issued: '2026-03-30T08:58:00-04:00' },
+			{ id: 'atlanta', label: 'Atlanta', office: 'FFC', cityCode: 'KFFC', issued: '2026-03-30T08:12:00-04:00' },
+			{ id: 'chicago', label: 'Chicago', office: 'LOT', cityCode: 'KLOT', issued: '2026-03-30T07:45:00-05:00' },
+			{ id: 'dallas', label: 'Dallas', office: 'FWD', cityCode: 'KFWD', issued: '2026-03-30T07:20:00-05:00' },
+			{ id: 'denver', label: 'Denver', office: 'BOU', cityCode: 'KBOU', issued: '2026-03-30T06:40:00-06:00' },
+		] as const;
+
+		(globalThis as any).fetch = vi.fn(async (input: RequestInfo) => {
+			const url = String(input);
+			const productListMatch = url.match(/api\.weather\.gov\/products\/types\/AFD\/locations\/([A-Z]{3})$/);
+			if (productListMatch) {
+				const officeCode = productListMatch[1];
+				const office = offices.find((entry) => entry.office === officeCode);
+				if (!office) return new Response('not found', { status: 404 });
+				return new Response(JSON.stringify({
+					'@graph': [
+						{
+							id: `afd-${office.id}-1`,
+							'@id': `https://api.weather.gov/products/afd-${office.id}-1`,
+							productCode: 'AFD',
+							productName: 'Area Forecast Discussion',
+							issuanceTime: office.issued,
+						},
+					],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+
+			const productMatch = url.match(/api\.weather\.gov\/products\/(afd-[a-z-]+-\d+)$/);
+			if (productMatch) {
+				const productId = productMatch[1];
+				const office = offices.find((entry) => productId.startsWith(`afd-${entry.id}-`));
+				if (!office) return new Response('not found', { status: 404 });
+				return new Response(JSON.stringify({
+					id: productId,
+					'@id': `https://api.weather.gov/products/${productId}`,
+					productCode: 'AFD',
+					productName: 'Area Forecast Discussion',
+					issuanceTime: office.issued,
+					productText: [
+						'000',
+						`FXUS63 ${office.cityCode} 301258`,
+						`AFD${office.office}`,
+						'',
+						'AREA FORECAST DISCUSSION',
+						`National Weather Service ${office.label}`,
+						'',
+						'.KEY MESSAGES...',
+						`- ${office.label} stays active with changing spring weather.`,
+					].join('\n'),
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+
+			return new Response('not found', { status: 404 });
+		});
+
+		const request = new IncomingRequest('https://live-weather.example/admin/discussions-data', {
+			headers: { Cookie: cookie },
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, goodEnv as any, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json() as any;
+		expect(json.cities).toHaveLength(5);
+		expect(json.cities.map((city: any) => city.label)).toEqual([
+			'New York City',
+			'Atlanta',
+			'Chicago',
+			'Dallas',
+			'Denver',
+		]);
+		expect(json.cities[0].discussionCount).toBe(1);
+		expect(json.cities[0].discussions[0].title).toBe('Area Forecast Discussion');
+		expect(json.cities[0].discussions[0].productText).toContain('AREA FORECAST DISCUSSION');
+		expect(json.cities[0].discussions[0].facebookText).toContain('NWS Discussion: New York City');
+	});
+
+	it('returns SPC day 1, 2, and 3 convective outlook data when authenticated', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+
+		const pages = {
+			'https://www.spc.noaa.gov/products/outlook/day1otlk.html': {
+				tab: 'otlk_1630',
+				title: 'Storm Prediction Center Mar 30, 2026 1630 UTC Day 1 Convective Outlook',
+				updated: 'Mon Mar 30 16:13:16 UTC 2026',
+				discussion: [
+					'SPC AC 301613',
+					'',
+					'Day 1 Convective Outlook',
+					'NWS Storm Prediction Center Norman OK',
+					'1113 AM CDT Mon Mar 30 2026',
+					'',
+					'Valid 301630Z - 311200Z',
+					'',
+					'...SUMMARY...',
+					'A few severe thunderstorms are possible across the middle Mississippi Valley tonight.',
+					'',
+					'...IA to Lower MI...',
+				].join('\n'),
+			},
+			'https://www.spc.noaa.gov/products/outlook/day2otlk.html': {
+				tab: 'otlk_0600',
+				title: 'Storm Prediction Center Mar 30, 2026 0600 UTC Day 2 Convective Outlook',
+				updated: 'Mon Mar 30 06:02:03 UTC 2026',
+				discussion: [
+					'SPC AC 300602',
+					'',
+					'Day 2 Convective Outlook',
+					'NWS Storm Prediction Center Norman OK',
+					'0102 AM CDT Mon Mar 30 2026',
+					'',
+					'Valid 311200Z - 011200Z',
+					'',
+					'...SUMMARY...',
+					'Severe thunderstorms remain possible from Iowa into Lower Michigan.',
+					'',
+					'...Synopsis...',
+				].join('\n'),
+			},
+			'https://www.spc.noaa.gov/products/outlook/day3otlk.html': {
+				tab: 'otlk_0730',
+				title: 'Storm Prediction Center Mar 30, 2026 0730 UTC Day 3 Convective Outlook',
+				updated: 'Mon Mar 30 11:10:23 UTC 2026',
+				discussion: [
+					'SPC AC 301110',
+					'',
+					'Day 3 Convective Outlook CORR 1',
+					'NWS Storm Prediction Center Norman OK',
+					'0610 AM CDT Mon Mar 30 2026',
+					'',
+					'Valid 011200Z - 021200Z',
+					'',
+					'...SUMMARY...',
+					'Organized severe thunderstorms could develop across parts of the Plains.',
+					'',
+					'...Plains...',
+				].join('\n'),
+			},
+		} as const;
+
+		(globalThis as any).fetch = vi.fn(async (input: RequestInfo) => {
+			const url = String(input);
+			const page = pages[url as keyof typeof pages];
+			if (page) {
+				return new Response([
+					'<html>',
+					'<head>',
+					`<title>${page.title}</title>`,
+					'</head>',
+					`<body onload="changeOverlay(); updateCookies(); show_tab('${page.tab}')">`,
+					`<div>Updated:&nbsp;${page.updated}&nbsp;(<a href="#">Print Version</a>)</div>`,
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					`<pre>${page.discussion}</pre>`,
+					'</body>',
+					'</html>',
+				].join(''), {
+					status: 200,
+					headers: { 'Content-Type': 'text/html; charset=utf-8' },
+				});
+			}
+
+			return new Response('not found', { status: 404 });
+		});
+
+		const request = new IncomingRequest('https://live-weather.example/admin/convective-outlook-data', {
+			headers: { Cookie: cookie },
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, goodEnv as any, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json() as any;
+		expect(json.days).toHaveLength(3);
+		expect(json.days.map((day: any) => day.id)).toEqual(['day1', 'day2', 'day3']);
+		expect(json.days[0].title).toBe('Day 1 Convective Outlook');
+		expect(json.days[0].summary).toContain('middle Mississippi Valley');
+		expect(json.days[0].imageUrl).toBe('https://www.spc.noaa.gov/products/outlook/day1otlk_1630.png');
+		expect(json.days[1].imageUrl).toBe('https://www.spc.noaa.gov/products/outlook/day2otlk_0600.png');
+		expect(json.days[2].imageUrl).toBe('https://www.spc.noaa.gov/products/outlook/day3otlk_0730.png');
+		expect(json.days[2].facebookText).toContain('Day 3 Convective Outlook CORR 1');
 	});
 
 	it('fails closed when ADMIN_PASSWORD is missing', async () => {
@@ -1713,7 +2101,7 @@ describe('Live Weather Admin worker', () => {
 		expect(__testing.normalizeFbAutoPostConfig(false).mode).toBe('off');
 	});
 
-	it('qualifies smart auto-post warnings using the new tornado, metro, and county-count rules', async () => {
+	it('qualifies smart auto-post warnings using the updated family-specific rules', async () => {
 		const tornadoDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
 			'smart_high_impact',
@@ -1749,7 +2137,7 @@ describe('Live Weather Admin worker', () => {
 					event: 'Flood Warning',
 					areaDesc: 'Ten county flood warning',
 					geocode: {
-						UGC: ['KYC001', 'KYC003', 'KYC005', 'KYC007', 'KYC009', 'KYC011', 'KYC013', 'KYC015', 'KYC017', 'KYC019'],
+						UGC: ['WYC001', 'WYC003', 'WYC005', 'WYC007', 'WYC009', 'WYC011', 'WYC013', 'WYC015', 'WYC017', 'WYC019'],
 					},
 					sent: new Date().toISOString(),
 					expires: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
@@ -1757,7 +2145,7 @@ describe('Live Weather Admin worker', () => {
 			},
 			{
 				alertId: 'flood-10',
-				stateCodes: ['KY'],
+				stateCodes: ['WY'],
 				countyCodes: ['001', '003', '005', '007', '009', '011', '013', '015', '017', '019'],
 				event: 'Flood Warning',
 				areaDesc: 'Ten county flood warning',
@@ -1767,6 +2155,94 @@ describe('Live Weather Admin worker', () => {
 		);
 		expect(floodDecision.eligible).toBe(true);
 		expect(floodDecision.countyCount).toBe(10);
+		expect(floodDecision.reason).toBe('ten_county_warning');
+
+		const winterDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'winter-10',
+				properties: {
+					event: 'Winter Storm Warning',
+					areaDesc: 'Ten county winter warning',
+					geocode: {
+						UGC: ['WYC021', 'WYC023', 'WYC025', 'WYC027', 'WYC029', 'WYC031', 'WYC033', 'WYC035', 'WYC037', 'WYC039'],
+					},
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'winter-10',
+				stateCodes: ['WY'],
+				countyCodes: ['021', '023', '025', '027', '029', '031', '033', '035', '037', '039'],
+				event: 'Winter Storm Warning',
+				areaDesc: 'Ten county winter warning',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(winterDecision.eligible).toBe(true);
+		expect(winterDecision.reason).toBe('ten_county_warning');
+
+		const redFlagDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'red-flag-rural',
+				properties: {
+					event: 'Red Flag Warning',
+					areaDesc: 'Cimarron; Texas; Beaver; Dallam; Sherman; Hansford; Ochiltree; Lipscomb; Hartley; Moore',
+					geocode: {
+						UGC: ['OKC025', 'OKC139', 'OKC007', 'TXC111', 'TXC357', 'TXC195', 'TXC295', 'TXC421', 'TXC205', 'TXC341'],
+					},
+					headline: 'Red Flag Warning issued by NWS Amarillo TX',
+					description: 'Critical fire weather conditions are no longer being met and the warning will be allowed to expire.',
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'red-flag-rural',
+				stateCodes: ['OK', 'TX'],
+				countyCodes: ['025', '139', '007', '111', '357', '195', '295', '421', '205', '341'],
+				event: 'Red Flag Warning',
+				areaDesc: 'Panhandles',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(redFlagDecision.eligible).toBe(false);
+		expect(redFlagDecision.reason).toBe('fire_family_not_escalated');
+
+		const redFlagEscalatedDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'red-flag-evac',
+				properties: {
+					event: 'Red Flag Warning',
+					areaDesc: 'Rural county',
+					geocode: { UGC: ['KSC025'] },
+					headline: 'Red Flag Warning with public safety impacts',
+					description: 'An active wildfire is impacting homes and public safety evacuations are underway.',
+					instruction: 'Evacuate immediately.',
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'red-flag-evac',
+				stateCodes: ['KS'],
+				countyCodes: ['025'],
+				event: 'Red Flag Warning',
+				areaDesc: 'Rural county',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(redFlagEscalatedDecision.eligible).toBe(true);
+		expect(redFlagEscalatedDecision.reason).toBe('fire_family_escalation');
 
 		const metroSevereDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
@@ -1795,22 +2271,23 @@ describe('Live Weather Admin worker', () => {
 		expect(metroSevereDecision.eligible).toBe(false);
 		expect(metroSevereDecision.reason).toBe('severe_thunderstorm_below_threshold');
 
-		const metroSevereHighDecision = await __testing.evaluateFacebookAutoPostDecision(
+		const metroSevereStrongDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
 			'smart_high_impact',
 			{
-				id: 'svr-metro-high',
+				id: 'svr-metro-strong',
 				properties: {
 					event: 'Severe Thunderstorm Warning',
 					areaDesc: 'Dallas County',
 					geocode: { UGC: ['TXC113'] },
-					parameters: { maxWindGust: ['80'] },
+					parameters: { maxWindGust: ['65'], maxHailSize: ['1.75'] },
+					description: 'A dangerous storm with considerable damage is possible as it moves across Dallas County.',
 					sent: new Date().toISOString(),
 					expires: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
 				},
 			},
 			{
-				alertId: 'svr-metro-high',
+				alertId: 'svr-metro-strong',
 				stateCodes: ['TX'],
 				countyCodes: ['113'],
 				event: 'Severe Thunderstorm Warning',
@@ -1819,8 +2296,37 @@ describe('Live Weather Admin worker', () => {
 				changeType: 'new',
 			},
 		);
-		expect(metroSevereHighDecision.eligible).toBe(true);
-		expect(metroSevereHighDecision.reason).toBe('major_metro_warning');
+		expect(metroSevereStrongDecision.eligible).toBe(true);
+		expect(metroSevereStrongDecision.reason).toBe('major_metro_warning');
+
+		const tenCountySevereDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'svr-10-county',
+				properties: {
+					event: 'Severe Thunderstorm Warning',
+					areaDesc: 'Ten county severe warning',
+					geocode: {
+						UGC: ['WYC041', 'WYC043', 'WYC045', 'WYC047', 'WYC049', 'WYC051', 'WYC053', 'WYC055', 'WYC057', 'WYC059'],
+					},
+					parameters: { maxHailSize: ['2.00'] },
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'svr-10-county',
+				stateCodes: ['WY'],
+				countyCodes: ['041', '043', '045', '047', '049', '051', '053', '055', '057', '059'],
+				event: 'Severe Thunderstorm Warning',
+				areaDesc: 'Ten county severe warning',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(tenCountySevereDecision.eligible).toBe(true);
+		expect(tenCountySevereDecision.reason).toBe('ten_county_warning');
 
 		const staleTornadoDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
@@ -1847,6 +2353,227 @@ describe('Live Weather Admin worker', () => {
 		);
 		expect(staleTornadoDecision.eligible).toBe(false);
 		expect(staleTornadoDecision.reason).toBe('stale_alert');
+	});
+
+	it('selects the top two severe weather fallback auto-posts by metro priority before regional coverage', async () => {
+		const nowIso = new Date().toISOString();
+		const futureIso = new Date(Date.now() + 45 * 60 * 1000).toISOString();
+
+		const overrides = await __testing.selectSevereWeatherFallbackOverrides(env as any, [
+			{
+				feature: {
+					id: 'nyc-watch',
+					properties: {
+						event: 'Severe Thunderstorm Watch',
+						geocode: { UGC: ['NYC061'] },
+						sent: nowIso,
+						expires: futureIso,
+					},
+				},
+				change: {
+					alertId: 'nyc-watch',
+					stateCodes: ['NY'],
+					countyCodes: ['061'],
+					event: 'Severe Thunderstorm Watch',
+					areaDesc: 'New York metro',
+					changedAt: nowIso,
+					changeType: 'new',
+				},
+				decision: {
+					eligible: false,
+					threadAction: '',
+					reason: 'not_warning',
+					mode: 'smart_high_impact',
+					matchedMetroNames: ['New York City'],
+					countyCount: 5,
+				},
+				event: 'Severe Thunderstorm Watch',
+				matchedMetroNames: ['New York City'],
+				countyCount: 5,
+			},
+			{
+				feature: {
+					id: 'dfw-warning',
+					properties: {
+						event: 'Severe Thunderstorm Warning',
+						geocode: { UGC: ['TXC113'] },
+						sent: nowIso,
+						expires: futureIso,
+					},
+				},
+				change: {
+					alertId: 'dfw-warning',
+					stateCodes: ['TX'],
+					countyCodes: ['113'],
+					event: 'Severe Thunderstorm Warning',
+					areaDesc: 'Dallas County',
+					changedAt: nowIso,
+					changeType: 'new',
+				},
+				decision: {
+					eligible: false,
+					threadAction: '',
+					reason: 'severe_thunderstorm_below_threshold',
+					mode: 'smart_high_impact',
+					matchedMetroNames: ['Dallas-Fort Worth'],
+					countyCount: 1,
+				},
+				event: 'Severe Thunderstorm Warning',
+				matchedMetroNames: ['Dallas-Fort Worth'],
+				countyCount: 1,
+			},
+			{
+				feature: {
+					id: 'regional-warning',
+					properties: {
+						event: 'Severe Thunderstorm Warning',
+						geocode: {
+							UGC: ['WYC001', 'WYC003', 'WYC005', 'WYC007', 'WYC009', 'WYC011', 'WYC013', 'WYC015', 'WYC017', 'WYC019', 'WYC021', 'WYC023'],
+						},
+						sent: nowIso,
+						expires: futureIso,
+					},
+				},
+				change: {
+					alertId: 'regional-warning',
+					stateCodes: ['WY'],
+					countyCodes: ['001', '003', '005', '007', '009', '011', '013', '015', '017', '019', '021', '023'],
+					event: 'Severe Thunderstorm Warning',
+					areaDesc: 'Regional severe weather',
+					changedAt: nowIso,
+					changeType: 'new',
+				},
+				decision: {
+					eligible: true,
+					threadAction: '',
+					reason: 'ten_county_warning',
+					mode: 'smart_high_impact',
+					matchedMetroNames: [],
+					countyCount: 12,
+				},
+				event: 'Severe Thunderstorm Warning',
+				matchedMetroNames: [],
+				countyCount: 12,
+			},
+		]);
+
+		expect(overrides.get('nyc-watch')).toMatchObject({
+			eligible: true,
+			reason: 'severe_weather_fallback',
+		});
+		expect(overrides.get('dfw-warning')).toMatchObject({
+			eligible: true,
+			reason: 'severe_weather_fallback',
+		});
+		expect(overrides.get('regional-warning')).toMatchObject({
+			eligible: false,
+			reason: 'severe_weather_fallback_not_selected',
+		});
+	});
+
+	it('disables severe weather fallback when a tornado warning is active in the same batch', async () => {
+		const nowIso = new Date().toISOString();
+		const futureIso = new Date(Date.now() + 45 * 60 * 1000).toISOString();
+
+		const overrides = await __testing.selectSevereWeatherFallbackOverrides(env as any, [
+			{
+				feature: {
+					id: 'nyc-watch',
+					properties: {
+						event: 'Severe Thunderstorm Watch',
+						geocode: { UGC: ['NYC061'] },
+						sent: nowIso,
+						expires: futureIso,
+					},
+				},
+				change: {
+					alertId: 'nyc-watch',
+					stateCodes: ['NY'],
+					countyCodes: ['061'],
+					event: 'Severe Thunderstorm Watch',
+					areaDesc: 'New York metro',
+					changedAt: nowIso,
+					changeType: 'new',
+				},
+				decision: {
+					eligible: false,
+					threadAction: '',
+					reason: 'not_warning',
+					mode: 'smart_high_impact',
+					matchedMetroNames: ['New York City'],
+					countyCount: 5,
+				},
+				event: 'Severe Thunderstorm Watch',
+				matchedMetroNames: ['New York City'],
+				countyCount: 5,
+			},
+			{
+				feature: {
+					id: 'regional-warning',
+					properties: {
+						event: 'Severe Thunderstorm Warning',
+						geocode: {
+							UGC: ['WYC001', 'WYC003', 'WYC005', 'WYC007', 'WYC009', 'WYC011', 'WYC013', 'WYC015', 'WYC017', 'WYC019'],
+						},
+						sent: nowIso,
+						expires: futureIso,
+					},
+				},
+				change: {
+					alertId: 'regional-warning',
+					stateCodes: ['WY'],
+					countyCodes: ['001', '003', '005', '007', '009', '011', '013', '015', '017', '019'],
+					event: 'Severe Thunderstorm Warning',
+					areaDesc: 'Regional severe weather',
+					changedAt: nowIso,
+					changeType: 'new',
+				},
+				decision: {
+					eligible: true,
+					threadAction: '',
+					reason: 'ten_county_warning',
+					mode: 'smart_high_impact',
+					matchedMetroNames: [],
+					countyCount: 10,
+				},
+				event: 'Severe Thunderstorm Warning',
+				matchedMetroNames: [],
+				countyCount: 10,
+			},
+			{
+				feature: {
+					id: 'tornado-live',
+					properties: {
+						event: 'Tornado Warning',
+						geocode: { UGC: ['KYC131'] },
+						sent: nowIso,
+						expires: futureIso,
+					},
+				},
+				change: {
+					alertId: 'tornado-live',
+					stateCodes: ['KY'],
+					countyCodes: ['131'],
+					event: 'Tornado Warning',
+					areaDesc: 'Leslie County',
+					changedAt: nowIso,
+					changeType: 'new',
+				},
+				decision: {
+					eligible: true,
+					threadAction: '',
+					reason: 'all_tornado_warnings',
+					mode: 'smart_high_impact',
+					matchedMetroNames: [],
+					countyCount: 1,
+				},
+				event: 'Tornado Warning',
+				matchedMetroNames: [],
+				countyCount: 1,
+			},
+		]);
+
+		expect(overrides.size).toBe(0);
 	});
 
 	it('subscribes with multi-scope prefs and writes state indexes', async () => {
