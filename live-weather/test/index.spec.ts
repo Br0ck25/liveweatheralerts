@@ -146,6 +146,9 @@ describe('Live Weather Admin worker', () => {
 		expect(body).toContain('Live Weather Alerts Admin');
 		expect(body).toContain('Tornado Warning');
 		expect(body).toContain('autoPostMode');
+		expect(body).toContain('Facebook Post');
+		expect(body).toContain('Facebook Post Ranking');
+		expect(body).toContain('Priority is a relative ranking number');
 		expect(body).toContain('Forecast Center');
 		expect(body).toContain('NWS Discussions');
 		expect(body).toContain('Convective Outlook');
@@ -595,6 +598,139 @@ describe('Live Weather Admin worker', () => {
 		expect(commentText).not.toContain('https://liveweatheralerts.com');
 		expect(commentText).not.toContain('https://example.com/');
 		expect(commentText).not.toContain('#weatheralert');
+	});
+
+	it('reflows wrapped prose in alert text while preserving impacted-location blocks', () => {
+		const postText = __testing.alertToText({
+			event: 'Severe Thunderstorm Warning',
+			areaDesc: 'Cook, IL; Will, IL',
+			severity: 'Severe',
+			expires: '2026-03-31T10:30:00-05:00',
+			headline: 'Severe Thunderstorm Warning issued March 31 at 9:54AM CDT until March 31 at 10:30AM CDT by NWS Chicago IL',
+			description: [
+				'At 9:53 AM CDT, severe thunderstorms were located over New Lenox,',
+				'Frankford, and Matteson, moving east at 30 to 50 mph.',
+				'',
+				'HAZARD...60 mph wind gusts and quarter size hail.',
+				'',
+				'SOURCE...Radar indicated.',
+				'',
+				'IMPACT...Hail damage to vehicles is expected. Expect wind damage to',
+				'roofs, siding, and trees.',
+				'',
+				'Locations impacted include...',
+				'Orland Park, Tinley Park, Calumet City, Chicago Heights, Lansing, Oak',
+				'Forest, Harvey, Blue Island, Dolton, Park Forest, Homewood, Matteson,',
+				'Mokena, Frankfort, Steger, Peotone, South Holland, Country Club',
+				'Hills, Midlothian, Hazel Crest, Richton Park, Riverdale, Markham,',
+				'Crestwood, and Sauk Village.',
+			].join('\n'),
+			instruction: 'For your protection move to an interior room on the lowest floor of a\nbuilding.',
+		});
+
+		expect(postText).toContain(
+			'At 9:53 AM CDT, severe thunderstorms were located over New Lenox, Frankford, and Matteson, moving east at 30 to 50 mph.',
+		);
+		expect(postText).toContain(
+			'IMPACT: Hail damage to vehicles is expected. Expect wind damage to roofs, siding, and trees.',
+		);
+		expect(postText).toContain(
+			'For your protection move to an interior room on the lowest floor of a building.',
+		);
+		expect(postText).toContain(
+			'Locations impacted include:\nOrland Park, Tinley Park, Calumet City, Chicago Heights, Lansing, Oak\nForest',
+		);
+	});
+
+	it('preserves sentence-level paragraph breaks in flood watch text while reflowing bullet details', () => {
+		const postText = __testing.alertToText({
+			event: 'Flood Watch',
+			areaDesc: 'Niagara; Orleans; Monroe; Wayne; Northern Cayuga; Northern Erie; Genesee; Wyoming; Livingston; Ontario; Chautauqua; Cattaraugus; Allegany; Southern Erie',
+			severity: 'Severe',
+			expires: '2026-04-01T03:00:00-04:00',
+			headline: 'Flood Watch issued March 31 at 1:44PM EDT until April 1 at 8:00PM EDT by NWS Buffalo NY',
+			description: [
+				'Heavy rain may fall on a deep primed snowpack leading to the melt increasing.',
+				'Flows in rivers may increase quickly and reach critical levels.',
+				'',
+				'WHAT...Flooding caused by excessive rainfall continues to be possible.',
+				'',
+				'WHERE...Portions of western New York and the northern Finger Lakes Region.',
+				'',
+				'WHEN...Through Wednesday evening.',
+				'',
+				'IMPACTS...Excessive runoff may result in flooding of rivers, creeks, streams, and other low-lying and flood-prone locations. Area creeks and streams are running high and could flood with more heavy rain.',
+				'',
+				'ADDITIONAL DETAILS...',
+				'- Multiple rounds of showers and embedded thunderstorms',
+				'continue through tonight which may result in 1" to 1.5", with',
+				'localized amounts of 2" if thunderstorms repeat over the same',
+				'area. Excess runoff from this rainfall may cause area',
+				'waterways to reach or exceed bankfull stage. General flooding',
+				'away from area waterways will also be possible during this',
+				'timeframe, especially in typical low-lying and poor drainage',
+				'areas.',
+				'- http://www.weather.gov/safety/flood',
+			].join('\n'),
+			instruction: 'You should monitor later forecasts and be alert for possible Flood Warnings. Those living in areas prone to flooding should be prepared to take action should flooding develop.',
+		});
+
+		expect(postText).toContain(
+			'Heavy rain may fall on a deep primed snowpack leading to the melt increasing.\n\nFlows in rivers may increase quickly and reach critical levels.',
+		);
+		expect(postText).toContain(
+			'ADDITIONAL DETAILS:\n\n- Multiple rounds of showers and embedded thunderstorms continue through tonight which may result in 1" to 1.5", with localized amounts of 2" if thunderstorms repeat over the same area. Excess runoff from this rainfall may cause area waterways to reach or exceed bankfull stage. General flooding away from area waterways will also be possible during this timeframe, especially in typical low-lying and poor drainage areas.\n\n- http://www.weather.gov/safety/flood',
+		);
+	});
+
+	it('builds facebook update comments from only the changed alert sections', () => {
+		const previousSnapshot = __testing.buildAlertPostedSnapshot({
+			event: 'Severe Thunderstorm Warning',
+			areaDesc: 'Cook, IL; Will, IL',
+			severity: 'Severe',
+			expires: '2026-03-31T10:20:00-05:00',
+			headline: 'Severe Thunderstorm Warning issued March 31 at 9:40AM CDT until March 31 at 10:20AM CDT by NWS Chicago IL',
+			description: [
+				'At 9:40 AM CDT, severe thunderstorms were located over Joliet, moving east at 25 mph.',
+				'',
+				'HAZARD...60 mph wind gusts and quarter size hail.',
+				'',
+				'SOURCE...Radar indicated.',
+				'',
+				'IMPACT...Minor hail damage is possible.',
+			].join('\n'),
+			instruction: 'For your protection move to an interior room on the lowest floor of a building.',
+		});
+
+		const message = __testing.buildFacebookUpdateCommentMessage({
+			event: 'Severe Thunderstorm Warning',
+			areaDesc: 'Cook, IL; Will, IL',
+			severity: 'Severe',
+			expires: '2026-03-31T10:30:00-05:00',
+			headline: 'Severe Thunderstorm Warning issued March 31 at 9:54AM CDT until March 31 at 10:30AM CDT by NWS Chicago IL',
+			description: [
+				'At 9:53 AM CDT, severe thunderstorms were located over New Lenox, Frankford, and Matteson, moving east at 30 to 50 mph.',
+				'',
+				'HAZARD...60 mph wind gusts and quarter size hail.',
+				'',
+				'SOURCE...Radar indicated.',
+				'',
+				'IMPACT...Hail damage to vehicles is expected. Expect wind damage to roofs, siding, and trees.',
+			].join('\n'),
+			instruction: 'For your protection move to an interior room on the lowest floor of a building.',
+		}, previousSnapshot);
+
+		expect(message).toContain('🔄 UPDATE — Severe Thunderstorm Warning for Cook, IL; Will, IL');
+		expect(message).toContain('Expires: Mar 31, 10:30 AM CDT');
+		expect(message).toContain(
+			'At 9:53 AM CDT, severe thunderstorms were located over New Lenox, Frankford, and Matteson, moving east at 30 to 50 mph.',
+		);
+		expect(message).toContain(
+			'IMPACT: Hail damage to vehicles is expected. Expect wind damage to roofs, siding, and trees.',
+		);
+		expect(message).not.toContain('HAZARD: 60 mph wind gusts and quarter size hail.');
+		expect(message).not.toContain('SOURCE: Radar indicated.');
+		expect(message).not.toContain('Area: Cook, IL; Will, IL');
 	});
 
 	it('formats fire weather watch section headings cleanly for Facebook post previews', () => {
@@ -1921,6 +2057,262 @@ describe('Live Weather Admin worker', () => {
 		expect((globalThis.fetch as any).mock.calls.some(([input]) => String(input).includes('/photos'))).toBe(true);
 	});
 
+	it('uses a change-only facebook comment when admin posts the default alert text into an existing thread', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword', FB_PAGE_ID: '1097328350123101', FB_PAGE_ACCESS_TOKEN: 'dummy-token' };
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+		await goodEnv.WEATHER_KV.put('thread:KYC001:tornado_warning', JSON.stringify({
+			postId: 'existing-post-1',
+			nwsAlertId: 'alert-1',
+			expiresAt: Math.floor(Date.now() / 1000) + 3600,
+			county: 'Test County',
+			alertType: 'Tornado Warning',
+			updateCount: 1,
+			lastPostedSnapshot: __testing.buildAlertPostedSnapshot(sampleAlerts.features[0].properties),
+		}));
+
+		const postBody = new URLSearchParams({
+			action: 'post_alert',
+			alertId: 'alert-1',
+			customMessage: __testing.alertToText(sampleAlerts.features[0].properties),
+		}).toString();
+		const request = new IncomingRequest('https://live-weather.example/admin/post', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+			body: postBody,
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, goodEnv as any, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const commentCall = (globalThis.fetch as any).mock.calls.find(([input]: [RequestInfo]) =>
+			String(input).includes('/existing-post-1/comments'),
+		);
+		expect(commentCall).toBeTruthy();
+		const commentBody = commentCall?.[1]?.body;
+		const commentParams = commentBody instanceof URLSearchParams
+			? commentBody
+			: new URLSearchParams(String(commentBody || ''));
+		const message = String(commentParams.get('message') || '');
+		expect(message).toContain('🔄 UPDATE — Tornado Warning for Test County');
+		expect(message).toContain('NWS updated this alert with no major text changes.');
+		expect(message).not.toContain('https://liveweatheralerts.com');
+		expect(message).not.toContain('#weatheralert');
+	});
+
+	it('renders facebook post tab preview buttons with the same state and event metadata used for image lookup', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+		const response = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin', {
+				headers: { Cookie: cookie },
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const body = await response.text();
+		expect(body).toContain('data-admin-panel-btn="facebook-post"');
+		expect(body).toContain('data-state="KY"');
+		expect(body).toContain('data-event="Tornado Warning"');
+	});
+
+	it('reuses a manual facebook post thread for a later scheduled auto-post update comment', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword', FB_PAGE_ID: '1097328350123101', FB_PAGE_ACCESS_TOKEN: 'dummy-token' };
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+
+		const manualPostRequest = new IncomingRequest('https://live-weather.example/admin/post', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+			body: new URLSearchParams({ action: 'post_alert', alertId: 'alert-1' }).toString(),
+		});
+		const manualPostCtx = createExecutionContext();
+		const manualPostResponse = await worker.fetch(manualPostRequest, goodEnv as any, manualPostCtx);
+		await waitOnExecutionContext(manualPostCtx);
+		expect(manualPostResponse.status).toBe(200);
+
+		const manualThreadRaw = await goodEnv.WEATHER_KV.get('thread:KYC001:tornado_warning');
+		expect(manualThreadRaw).toBeTruthy();
+		const manualThread = JSON.parse(manualThreadRaw || '{}');
+		expect(manualThread.postId).toBe('12345');
+
+		const nowIso = new Date().toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'tornado_only',
+			updatedAt: nowIso,
+		}));
+		await goodEnv.WEATHER_KV.put('alerts:lifecycle-snapshot:v1', JSON.stringify({
+			'alert-1': {
+				alertId: 'alert-1',
+				stateCodes: ['KY'],
+				countyCodes: ['001'],
+				event: 'Tornado Warning',
+				areaDesc: 'Test County',
+				lat: 37.17,
+				lon: -83.28,
+				headline: 'Test tornado warning',
+				description: 'Previous tornado warning details',
+				instruction: '',
+				severity: 'Severe',
+				urgency: '',
+				certainty: '',
+				updated: '',
+				expires: '2026-03-29T23:00:00-04:00',
+				lastChangeType: 'new',
+				lastChangedAt: '2026-03-29T20:00:00.000Z',
+			},
+		}));
+
+		const scheduledCtx = createExecutionContext();
+		await worker.scheduled(
+			{
+				cron: '*/2 * * * *',
+				scheduledTime: Date.now(),
+			} as any,
+			goodEnv as any,
+			scheduledCtx,
+		);
+		await waitOnExecutionContext(scheduledCtx);
+
+		expect(
+			(globalThis.fetch as any).mock.calls.some(([input]) =>
+				String(input).includes('/12345/comments'),
+			),
+		).toBe(true);
+	});
+
+	it('clusters same-metro severe thunderstorm warnings into one post with comment updates instead of duplicate posts', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowIso = new Date().toISOString();
+		const expiresIso = new Date(Date.now() + 45 * 60 * 1000).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+		}));
+
+		const chicagoPrimary = {
+			id: 'svr-chicago-1',
+			properties: {
+				event: 'Severe Thunderstorm Warning',
+				severity: 'Severe',
+				areaDesc: 'Cook, IL; Will, IL',
+				senderName: 'NWS Chicago IL',
+				headline: 'Severe Thunderstorm Warning for Chicago metro',
+				description: 'At 9:53 AM CDT, severe thunderstorms were located over Chicago.\n\nHAZARD...80 mph wind gusts and quarter size hail.\n\nSOURCE...Radar indicated.\n\nIMPACT...Destructive winds will cause damage to roofs, siding, and trees.',
+				instruction: 'Move to an interior room on the lowest floor of a building.',
+				sent: nowIso,
+				updated: nowIso,
+				effective: nowIso,
+				expires: expiresIso,
+				geocode: {
+					UGC: ['ILC031', 'ILC197'],
+					SAME: ['17031', '17197'],
+				},
+				parameters: {
+					maxWindGust: ['80 mph'],
+					maxHailSize: ['1.00'],
+				},
+			},
+		};
+		const chicagoSibling = {
+			id: 'svr-chicago-2',
+			properties: {
+				event: 'Severe Thunderstorm Warning',
+				severity: 'Severe',
+				areaDesc: 'Lake, IN',
+				senderName: 'NWS Chicago IL',
+				headline: 'Severe Thunderstorm Warning for northwest Indiana',
+				description: 'At 9:58 AM CDT, severe thunderstorms were moving into northwest Indiana.\n\nHAZARD...70 mph wind gusts and quarter size hail.\n\nSOURCE...Radar indicated.\n\nIMPACT...Damaging winds will knock down trees and power lines.',
+				instruction: 'Move to an interior room on the lowest floor of a building.',
+				sent: nowIso,
+				updated: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
+				effective: nowIso,
+				expires: expiresIso,
+				geocode: {
+					UGC: ['INC089'],
+					SAME: ['18089'],
+				},
+				parameters: {
+					maxWindGust: ['70 mph'],
+					maxHailSize: ['1.00'],
+				},
+			},
+		};
+
+		await __testing.autoPostFacebookAlerts(
+			goodEnv as any,
+			{
+				'svr-chicago-1': chicagoPrimary,
+				'svr-chicago-2': chicagoSibling,
+			},
+			[
+				{
+					alertId: 'svr-chicago-1',
+					stateCodes: ['IL'],
+					countyCodes: ['031', '197'],
+					event: 'Severe Thunderstorm Warning',
+					areaDesc: 'Cook, IL; Will, IL',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Severe',
+				},
+				{
+					alertId: 'svr-chicago-2',
+					stateCodes: ['IN'],
+					countyCodes: ['089'],
+					event: 'Severe Thunderstorm Warning',
+					areaDesc: 'Lake, IN',
+					changedAt: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
+					changeType: 'new',
+					severity: 'Severe',
+				},
+			],
+		);
+
+		const postCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/feed') || String(input).includes('/photos'),
+		);
+		const commentCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/12345/comments'),
+		);
+		expect(postCalls.length).toBe(1);
+		expect(commentCalls.length).toBe(1);
+
+		const metroThreadRaw = await goodEnv.WEATHER_KV.get('thread-cluster:severe_thunderstorm:metro:chicago');
+		expect(metroThreadRaw).toBeTruthy();
+		expect(JSON.parse(metroThreadRaw || '{}').updateCount).toBe(1);
+	});
+
 	it('saves the facebook auto-post mode and renders it selected on admin refresh', async () => {
 		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
 		const loginResp = await worker.fetch(
@@ -2574,6 +2966,259 @@ describe('Live Weather Admin worker', () => {
 		]);
 
 		expect(overrides.size).toBe(0);
+	});
+
+	it('ranks facebook post candidates from highest-likelihood auto-posts to low-likelihood alerts', () => {
+		const nowIso = new Date().toISOString();
+		const futureIso = new Date(Date.now() + 45 * 60 * 1000).toISOString();
+
+		const rankings = __testing.buildAdminFacebookPostRankings([
+			{
+				id: 'tw-top',
+				properties: {
+					event: 'Tornado Warning',
+					areaDesc: 'Leslie County',
+					geocode: { UGC: ['KYC131'] },
+					sent: nowIso,
+					expires: futureIso,
+				},
+			},
+			{
+				id: 'flood-mid',
+				properties: {
+					event: 'Flood Warning',
+					areaDesc: 'Regional flood warning',
+					geocode: {
+						UGC: ['WYC001', 'WYC003', 'WYC005', 'WYC007', 'WYC009', 'WYC011', 'WYC013', 'WYC015', 'WYC017', 'WYC019'],
+					},
+					sent: nowIso,
+					expires: futureIso,
+				},
+			},
+			{
+				id: 'red-flag-low',
+				properties: {
+					event: 'Red Flag Warning',
+					areaDesc: 'Dry counties',
+					geocode: {
+						UGC: ['TXC111', 'TXC195', 'TXC205', 'TXC295', 'TXC341', 'TXC357', 'TXC421', 'OKC007', 'OKC025', 'OKC139'],
+					},
+					description: 'Dry and windy conditions continue, but no active incident impacts are reported.',
+					sent: nowIso,
+					expires: futureIso,
+				},
+			},
+		]);
+
+		expect(rankings[0].alertId).toBe('tw-top');
+		expect(rankings[0].bucket).toBe('post_now');
+		expect(rankings[1].alertId).toBe('flood-mid');
+		expect(rankings[2].alertId).toBe('red-flag-low');
+		expect(rankings[2].bucket).toBe('manual_review');
+	});
+
+	it('suppresses monitoring-only test alerts from website and admin surfaces', () => {
+		expect(__testing.shouldSuppressAlertFromUi({
+			id: 'test-msg-1',
+			properties: {
+				event: 'TEST MESSAGE',
+				areaDesc: 'Montgomery',
+				description: 'Monitoring message only. Please disregard.',
+				instruction: 'Monitoring message only. Please disregard.',
+				status: 'Actual',
+			},
+		})).toBe(true);
+
+		expect(__testing.shouldSuppressAlertFromUi({
+			id: 'real-alert-1',
+			properties: {
+				event: 'Flood Warning',
+				areaDesc: 'Jefferson County',
+				description: 'Flooding is ongoing.',
+				status: 'Actual',
+			},
+		})).toBe(false);
+	});
+
+	it('weights winter and land-based watch/advisory products above marine alerts in facebook rankings', () => {
+		const nowIso = new Date().toISOString();
+		const longFutureIso = new Date(Date.now() + 18 * 60 * 60 * 1000).toISOString();
+
+		const rankings = __testing.buildAdminFacebookPostRankings([
+			{
+				id: 'winter-watch',
+				properties: {
+					event: 'Winter Storm Watch',
+					areaDesc: 'Large inland winter watch',
+					geocode: {
+						UGC: ['WYC001', 'WYC003', 'WYC005', 'WYC007', 'WYC009', 'WYC011', 'WYC013', 'WYC015', 'WYC017', 'WYC019'],
+					},
+					description: 'Significant winter travel impacts are possible with hazardous roads and widespread snow.',
+					sent: nowIso,
+					expires: longFutureIso,
+				},
+			},
+			{
+				id: 'winter-advisory',
+				properties: {
+					event: 'Winter Weather Advisory',
+					areaDesc: 'One county winter advisory',
+					geocode: { UGC: ['KYC111'] },
+					description: 'Slippery roads are possible during the morning commute.',
+					sent: nowIso,
+					expires: longFutureIso,
+				},
+			},
+			{
+				id: 'rip-current',
+				properties: {
+					event: 'Rip Current Statement',
+					areaDesc: 'Miami-Dade County beaches',
+					geocode: { UGC: ['FLC086'] },
+					description: 'Dangerous surf and rip currents are expected at area beaches.',
+					sent: nowIso,
+					expires: longFutureIso,
+				},
+			},
+			{
+				id: 'gale-watch',
+				properties: {
+					event: 'Gale Watch',
+					areaDesc: 'Lake Superior open waters',
+					description: 'Offshore waters may see strong northwest winds.',
+					sent: nowIso,
+					expires: longFutureIso,
+				},
+			},
+			{
+				id: 'small-craft',
+				properties: {
+					event: 'Small Craft Advisory',
+					areaDesc: 'Atlantic coastal waters offshore',
+					description: 'Hazardous conditions for small craft across offshore waters.',
+					sent: nowIso,
+					expires: longFutureIso,
+				},
+			},
+		]);
+
+		const byId = new Map(rankings.map((item) => [item.alertId, item]));
+		expect(byId.get('winter-watch')?.score).toBeGreaterThanOrEqual(210);
+		expect(byId.get('winter-watch')?.bucket).toBe('manual_review');
+		expect(byId.get('winter-watch')?.score).toBeGreaterThan(byId.get('winter-advisory')?.score ?? 0);
+		expect(byId.get('winter-advisory')?.score).toBeGreaterThan(byId.get('small-craft')?.score ?? 0);
+		expect(byId.get('rip-current')?.score).toBeGreaterThan(byId.get('small-craft')?.score ?? 0);
+		expect(byId.get('gale-watch')?.score).toBeLessThan(180);
+		expect(byId.get('small-craft')?.score).toBeLessThan(170);
+	});
+
+	it('caps niche hazards and keeps wind advisory relevance above rip current and special weather statement', () => {
+		const nowIso = new Date().toISOString();
+		const futureIso = new Date(Date.now() + 18 * 60 * 60 * 1000).toISOString();
+
+		const rankings = __testing.buildAdminFacebookPostRankings([
+			{
+				id: 'wind-advisory-ne',
+				properties: {
+					event: 'Wind Advisory',
+					areaDesc: 'Seventeen Nebraska counties',
+					geocode: {
+						UGC: ['NEC001', 'NEC003', 'NEC005', 'NEC007', 'NEC009', 'NEC011', 'NEC013', 'NEC015', 'NEC017', 'NEC019', 'NEC021', 'NEC023', 'NEC025', 'NEC027', 'NEC029', 'NEC031', 'NEC033'],
+					},
+					description: 'Travel may be difficult for high-profile vehicles on open roads across the region.',
+					sent: nowIso,
+					expires: futureIso,
+				},
+			},
+			{
+				id: 'rip-current-pr',
+				properties: {
+					event: 'Rip Current Statement',
+					areaDesc: 'Northwest Puerto Rico beaches',
+					geocode: {
+						UGC: ['PRC001', 'PRC003', 'PRC005', 'PRC007', 'PRC009', 'PRC011', 'PRC013', 'PRC015', 'PRC017', 'PRC019', 'PRC021', 'PRC023', 'PRC025', 'PRC027', 'PRC029', 'PRC031', 'PRC033', 'PRC035', 'PRC037', 'PRC039', 'PRC041', 'PRC043', 'PRC045', 'PRC047', 'PRC049', 'PRC051', 'PRC053', 'PRC054', 'PRC055', 'PRC057', 'PRC059', 'PRC061', 'PRC063', 'PRC065', 'PRC067'],
+					},
+					description: 'Dangerous rip currents are expected along area beaches in Puerto Rico.',
+					sent: nowIso,
+					expires: futureIso,
+				},
+			},
+			{
+				id: 'special-statement',
+				properties: {
+					event: 'Special Weather Statement',
+					areaDesc: 'One Wisconsin county',
+					geocode: { UGC: ['WIC001'] },
+					description: 'Brief showers are possible in the area.',
+					sent: nowIso,
+					expires: futureIso,
+				},
+			},
+		]);
+
+		const byId = new Map(rankings.map((item) => [item.alertId, item]));
+		expect(byId.get('wind-advisory-ne')?.score).toBeLessThanOrEqual(180);
+		expect(byId.get('wind-advisory-ne')?.score).toBeGreaterThan(byId.get('rip-current-pr')?.score ?? 0);
+		expect(byId.get('rip-current-pr')?.score).toBeLessThanOrEqual(170);
+		expect(byId.get('rip-current-pr')?.score).toBeGreaterThan(byId.get('special-statement')?.score ?? 0);
+		expect(byId.get('special-statement')?.score).toBeLessThanOrEqual(160);
+		expect(byId.get('special-statement')?.score).toBeLessThan(150);
+	});
+
+	it('applies recency boosts and same-hazard noise suppression in the facebook rankings', () => {
+		const now = Date.now();
+		const freshIso = new Date(now).toISOString();
+		const twoHoursAgoIso = new Date(now - 2 * 60 * 60 * 1000).toISOString();
+		const fourHoursAgoIso = new Date(now - 4 * 60 * 60 * 1000).toISOString();
+		const futureIso = new Date(now + 18 * 60 * 60 * 1000).toISOString();
+
+		const rankings = __testing.buildAdminFacebookPostRankings([
+			{
+				id: 'statement-fresh',
+				properties: {
+					event: 'Special Weather Statement',
+					areaDesc: 'Fresh statement',
+					geocode: { UGC: ['WIC001'] },
+					description: 'Brief showers are possible in the area.',
+					sent: freshIso,
+					expires: futureIso,
+				},
+			},
+			{
+				id: 'statement-old',
+				properties: {
+					event: 'Special Weather Statement',
+					areaDesc: 'Old statement',
+					geocode: { UGC: ['WIC003'] },
+					description: 'Brief showers are possible in the area.',
+					sent: fourHoursAgoIso,
+					expires: futureIso,
+				},
+			},
+			...Array.from({ length: 7 }, (_value, index) => ({
+				id: `winter-cluster-${index + 1}`,
+				properties: {
+					event: 'Winter Weather Advisory',
+					areaDesc: `Kansas advisory ${index + 1}`,
+					geocode: { UGC: [`KSC${String(index + 1).padStart(3, '0')}`] },
+					description: 'Slippery roads are possible during the morning commute.',
+					sent: index < 4 ? freshIso : twoHoursAgoIso,
+					expires: futureIso,
+				},
+			})),
+		]);
+
+		const byId = new Map(rankings.map((item) => [item.alertId, item]));
+		expect(byId.get('statement-fresh')?.score).toBeGreaterThan(byId.get('statement-old')?.score ?? 0);
+
+		const winterScores = rankings
+			.filter((item) => item.alertId.startsWith('winter-cluster-'))
+			.map((item) => item.score)
+			.sort((a, b) => b - a);
+		expect(winterScores.slice(0, 4).every((score) => score === 180)).toBe(true);
+		expect(winterScores[4]).toBe(175);
+		expect(winterScores[5]).toBe(175);
+		expect(winterScores[6]).toBe(170);
 	});
 
 	it('subscribes with multi-scope prefs and writes state indexes', async () => {
