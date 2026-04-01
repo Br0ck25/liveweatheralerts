@@ -111,12 +111,26 @@ async function servePublicAppIndex(request: Request, env: Env): Promise<Response
 	if (!env.ASSETS) {
 		return renderMissingPublicAppResponse();
 	}
+	// Fetch the root path ('/') rather than '/index.html' — Cloudflare Workers Assets
+	// redirects direct requests for '/index.html' to '/' (canonical URL normalization),
+	// which would cause a 307 redirect loop for any non-root SPA routes like '/live'.
 	const assetUrl = new URL(request.url);
-	assetUrl.pathname = '/index.html';
+	assetUrl.pathname = '/';
 	assetUrl.search = '';
 	const response = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
 	if (response.status === 404) {
 		return renderMissingPublicAppResponse();
+	}
+	// Strip any Location / redirect headers so the browser stays on the original URL.
+	if (response.status >= 300 && response.status < 400) {
+		const body = await response.text();
+		return new Response(body || null, {
+			status: 200,
+			headers: {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'no-store',
+			},
+		});
 	}
 	return response;
 }

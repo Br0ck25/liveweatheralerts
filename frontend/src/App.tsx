@@ -993,7 +993,7 @@ function LiveAlertsPage() {
   const subtleText = isWhiteTheme ? 'text-slate-700' : 'text-white/70'
   const subtleSecondary = isWhiteTheme ? 'text-slate-500' : 'text-white/40'
   const inputBg = isWhiteTheme ? 'bg-slate-100 border-slate-300 text-slate-900 placeholder-slate-400' : 'bg-white/5 border-white/10 text-white placeholder-white/30'
-  const selectBg = isWhiteTheme ? 'bg-slate-100 border-slate-300 text-slate-900' : 'bg-white/5 border-white/10 text-white'
+  const selectBg = isWhiteTheme ? 'bg-slate-100 border-slate-300 text-slate-900 [&>option]:bg-white [&>option]:text-slate-900' : 'bg-[#1e293b] border-white/10 text-white [&>option]:bg-[#1e293b] [&>option]:text-white'
   const cardBgCls = isWhiteTheme ? 'bg-white border-slate-200' : tc.cardBg
 
   const [alerts, setAlerts] = useState<WorkerAlert[]>([])
