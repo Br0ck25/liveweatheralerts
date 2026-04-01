@@ -64,6 +64,16 @@ import {
 } from './facebook/auto-post';
 import { buildAdminFacebookPostRankings } from './facebook/ranking';
 import { handleTokenExchange, handleTokenConfig, handleAutoPostConfig } from './facebook/api';
+import {
+	buildDigestCandidates,
+	buildDigestSummary,
+	buildStartupSnapshotText,
+	readDigestThread,
+	readStandaloneCoveredAlerts,
+	markAlertStandaloneCovered,
+	isStartupMode,
+} from './facebook/digest';
+import { generateDigestCopy, validateLlmOutput } from './facebook/llm';
 import { isAuthenticated, parseRequestBody } from './admin/auth';
 import { shouldSuppressAlertFromUi, syncAlerts, recordInvalidSubscription, recordPushDeliveryFailure } from './nws';
 import { handleApiGeocode, handleApiLocation } from './weather/geocoding';
@@ -190,6 +200,16 @@ export const __testing = {
 	buildAdminFacebookPostRankings,
 	shouldSuppressAlertFromUi,
 	autoPostFacebookAlerts,
+	// Digest / coverage
+	buildDigestCandidates,
+	buildDigestSummary,
+	buildStartupSnapshotText,
+	readDigestThread,
+	readStandaloneCoveredAlerts,
+	markAlertStandaloneCovered,
+	isStartupMode,
+	generateDigestCopy,
+	validateLlmOutput,
 };
 
 // ---------------------------------------------------------------------------
@@ -297,6 +317,9 @@ export default {
 			return await servePublicAppIndex(request, env);
 		}
 		if (url.pathname === '/live-weather-alerts' && request.method === 'GET') {
+			return await servePublicAppIndex(request, env);
+		}
+		if ((url.pathname === '/live' || url.pathname === '/live/') && request.method === 'GET') {
 			return await servePublicAppIndex(request, env);
 		}
 

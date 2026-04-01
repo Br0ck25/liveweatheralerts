@@ -498,6 +498,15 @@ function getAlertIdFromLocation(): string | null {
   return null
 }
 
+function isLiveAlertsPage(): boolean {
+  try {
+    const { pathname } = new URL(window.location.href)
+    return pathname === '/live' || pathname === '/live/'
+  } catch {
+    return false
+  }
+}
+
 function buildAppUrl(options: {
   alertId?: string | null
   tab?: AppTab | null
@@ -936,6 +945,369 @@ function AlertDetailPage({ alertId }: { alertId: string }) {
                   onClick={() => navTo(tab.id)}
                   className={navButtonClass}
                 >
+                  <Icon className="h-4 w-4" />
+                  <span className="text-[11px] font-medium">{tab.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Live Alerts Page (/live) ─────────────────────────────────────────────────
+// Standalone public page listing all active US alerts with search + filters.
+
+const LIVE_US_STATES = [
+  { code: 'AL', name: 'Alabama' }, { code: 'AK', name: 'Alaska' }, { code: 'AZ', name: 'Arizona' },
+  { code: 'AR', name: 'Arkansas' }, { code: 'CA', name: 'California' }, { code: 'CO', name: 'Colorado' },
+  { code: 'CT', name: 'Connecticut' }, { code: 'DE', name: 'Delaware' }, { code: 'FL', name: 'Florida' },
+  { code: 'GA', name: 'Georgia' }, { code: 'HI', name: 'Hawaii' }, { code: 'ID', name: 'Idaho' },
+  { code: 'IL', name: 'Illinois' }, { code: 'IN', name: 'Indiana' }, { code: 'IA', name: 'Iowa' },
+  { code: 'KS', name: 'Kansas' }, { code: 'KY', name: 'Kentucky' }, { code: 'LA', name: 'Louisiana' },
+  { code: 'ME', name: 'Maine' }, { code: 'MD', name: 'Maryland' }, { code: 'MA', name: 'Massachusetts' },
+  { code: 'MI', name: 'Michigan' }, { code: 'MN', name: 'Minnesota' }, { code: 'MS', name: 'Mississippi' },
+  { code: 'MO', name: 'Missouri' }, { code: 'MT', name: 'Montana' }, { code: 'NE', name: 'Nebraska' },
+  { code: 'NV', name: 'Nevada' }, { code: 'NH', name: 'New Hampshire' }, { code: 'NJ', name: 'New Jersey' },
+  { code: 'NM', name: 'New Mexico' }, { code: 'NY', name: 'New York' }, { code: 'NC', name: 'North Carolina' },
+  { code: 'ND', name: 'North Dakota' }, { code: 'OH', name: 'Ohio' }, { code: 'OK', name: 'Oklahoma' },
+  { code: 'OR', name: 'Oregon' }, { code: 'PA', name: 'Pennsylvania' }, { code: 'RI', name: 'Rhode Island' },
+  { code: 'SC', name: 'South Carolina' }, { code: 'SD', name: 'South Dakota' }, { code: 'TN', name: 'Tennessee' },
+  { code: 'TX', name: 'Texas' }, { code: 'UT', name: 'Utah' }, { code: 'VT', name: 'Vermont' },
+  { code: 'VA', name: 'Virginia' }, { code: 'WA', name: 'Washington' }, { code: 'WV', name: 'West Virginia' },
+  { code: 'WI', name: 'Wisconsin' }, { code: 'WY', name: 'Wyoming' }, { code: 'DC', name: 'Washington D.C.' },
+] as const
+
+type LiveTypeFilter = 'all' | 'warning' | 'watch' | 'advisory' | 'statement'
+
+function LiveAlertsPage() {
+  const theme = window.localStorage.getItem('lwa_theme_v1') || 'blue'
+  const tc = THEMES[theme] || THEMES.blue
+  const pageBg = THEME_BG[theme] || '#091320'
+  const navBg = NAV_BG[theme] || '#0c1b30'
+  const isWhiteTheme = theme === 'white'
+  const rootText = isWhiteTheme ? 'text-slate-900' : 'text-white'
+  const subtleText = isWhiteTheme ? 'text-slate-700' : 'text-white/70'
+  const subtleSecondary = isWhiteTheme ? 'text-slate-500' : 'text-white/40'
+  const inputBg = isWhiteTheme ? 'bg-slate-100 border-slate-300 text-slate-900 placeholder-slate-400' : 'bg-white/5 border-white/10 text-white placeholder-white/30'
+  const selectBg = isWhiteTheme ? 'bg-slate-100 border-slate-300 text-slate-900' : 'bg-white/5 border-white/10 text-white'
+  const cardBgCls = isWhiteTheme ? 'bg-white border-slate-200' : tc.cardBg
+
+  const [alerts, setAlerts] = useState<WorkerAlert[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<string>('')
+  const [search, setSearch] = useState('')
+  const [stateFilter, setStateFilter] = useState('')
+  const [typeFilter, setTypeFilter] = useState<LiveTypeFilter>('all')
+  const [expandedAlertId, setExpandedAlertId] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function load(background = false) {
+      if (!background) setLoading(true)
+      setError(null)
+      try {
+        const json = await fetchJson<WorkerAlertsResponse>('/api/alerts')
+        if (!cancelled) {
+          const raw = (json.alerts ?? []).filter((a) => {
+            const text = `${String(a?.event || '')} ${String(a?.headline || a?.summary || '')} ${String(a?.description || '')}`.toLowerCase()
+            return !text.includes('test')
+          })
+          setAlerts(raw)
+          const meta = json.meta as Record<string, unknown> | undefined
+          setLastUpdated(typeof meta?.generatedAt === 'string' ? meta.generatedAt : '')
+        }
+      } catch (err) {
+        if (!cancelled && !background) setError(err instanceof Error ? err.message : 'Failed to load alerts.')
+      } finally {
+        if (!cancelled && !background) setLoading(false)
+      }
+    }
+
+    void load(false)
+    const interval = setInterval(() => void load(true), DATA_POLL_INTERVAL_MS)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [])
+
+  const filteredAlerts = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return alerts
+      .filter((alert) => {
+        if (typeFilter !== 'all') {
+          const cat = String(alert?.category || alert?.event || '').toLowerCase()
+          if (!cat.includes(typeFilter)) return false
+        }
+        if (stateFilter) {
+          const sc = String(alert?.stateCode || '').toUpperCase()
+          const scs = Array.isArray(alert?.stateCodes) ? (alert.stateCodes as string[]).map((s) => String(s).toUpperCase()) : []
+          if (sc !== stateFilter && !scs.includes(stateFilter)) return false
+        }
+        if (q) {
+          const blob = `${alert?.event || ''} ${alert?.areaDesc || ''} ${alert?.headline || ''} ${alert?.summary || ''} ${alert?.description || ''}`.toLowerCase()
+          if (!blob.includes(q)) return false
+        }
+        return true
+      })
+      .sort((a, b) => {
+        const ta = Date.parse(String(a?.updated || a?.sent || '0')) || 0
+        const tb = Date.parse(String(b?.updated || b?.sent || '0')) || 0
+        return tb - ta
+      })
+  }, [alerts, search, stateFilter, typeFilter])
+
+  const navTo = (tab: string) => {
+    if (isAppTab(tab)) {
+      window.localStorage.setItem('lwa_active_tab_v1', tab)
+      window.location.assign(buildAppUrl({ tab }))
+      return
+    }
+    window.location.assign(buildAppUrl())
+  }
+
+  const warningCount = filteredAlerts.filter((a) => String(a?.category || a?.event || '').toLowerCase().includes('warning')).length
+  const watchCount = filteredAlerts.filter((a) => String(a?.category || a?.event || '').toLowerCase().includes('watch')).length
+  const advisoryCount = filteredAlerts.filter((a) => {
+    const t = String(a?.category || a?.event || '').toLowerCase()
+    return t.includes('advisory')
+  }).length
+
+  const panelButton = isWhiteTheme
+    ? 'border-slate-300 bg-white/10 text-slate-800 hover:bg-white/20'
+    : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10'
+
+  return (
+    <div className={`min-h-screen ${rootText}`} style={{ backgroundColor: pageBg }}>
+      <div className="mx-auto w-full max-w-md px-4 pb-32 pt-6">
+        {/* Header */}
+        <div className="mb-5 flex items-center justify-between">
+          <div>
+            <div className={`text-xs font-semibold tracking-wide ${tc.t300} opacity-80`}>LIVE WEATHER ALERTS</div>
+            <div className="mt-0.5 text-xl font-bold">All Active Alerts</div>
+            {lastUpdated ? (
+              <div className={`mt-0.5 text-xs ${subtleSecondary}`}>Updated {formatDateTime(lastUpdated)}</div>
+            ) : null}
+          </div>
+          <button
+            onClick={() => navTo('alerts')}
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs transition-colors ${panelButton}`}
+          >
+            Open App <ChevronRight className="h-3 w-3" />
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="relative mb-3">
+          <Search className={`pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 ${subtleSecondary}`} />
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search alerts…"
+            className={`w-full rounded-xl border py-2.5 pl-9 pr-4 text-sm outline-none ${inputBg}`}
+          />
+          {search ? (
+            <button
+              onClick={() => setSearch('')}
+              className={`absolute right-3 top-1/2 -translate-y-1/2 ${subtleSecondary} hover:opacity-80`}
+              aria-label="Clear search"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          ) : null}
+        </div>
+
+        {/* State selector */}
+        <div className="mb-3">
+          <select
+            value={stateFilter}
+            onChange={(e) => setStateFilter(e.target.value)}
+            className={`w-full rounded-xl border px-3 py-2.5 text-sm outline-none ${selectBg}`}
+          >
+            <option value="">All States</option>
+            {LIVE_US_STATES.map((s) => (
+              <option key={s.code} value={s.code}>{s.name}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Alert type filter pills */}
+        <div className="mb-4 grid grid-cols-5 gap-1.5">
+          {([
+            { value: 'all', label: 'All' },
+            { value: 'warning', label: 'Warn' },
+            { value: 'watch', label: 'Watch' },
+            { value: 'advisory', label: 'Advis' },
+            { value: 'statement', label: 'Stmt' },
+          ] as const).map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setTypeFilter(opt.value)}
+              className={`rounded-full py-1.5 text-xs font-medium transition-colors ${
+                typeFilter === opt.value
+                  ? `${tc.bg500} text-white`
+                  : isWhiteTheme ? 'bg-slate-200 text-slate-700 hover:bg-slate-300' : 'bg-white/10 text-white/60 hover:bg-white/15'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Summary counts */}
+        {!loading && alerts.length > 0 && (
+          <div className="mb-4 grid grid-cols-3 gap-2">
+            <div className={`rounded-xl border ${isWhiteTheme ? 'border-slate-200 bg-white' : 'border-white/10 bg-white/5'} p-3 text-center`}>
+              <div className={`text-xs uppercase tracking-wide ${subtleSecondary}`}>Warnings</div>
+              <div className="mt-0.5 text-xl font-bold text-red-400">{warningCount}</div>
+            </div>
+            <div className={`rounded-xl border ${isWhiteTheme ? 'border-slate-200 bg-white' : 'border-white/10 bg-white/5'} p-3 text-center`}>
+              <div className={`text-xs uppercase tracking-wide ${subtleSecondary}`}>Watches</div>
+              <div className="mt-0.5 text-xl font-bold text-yellow-300">{watchCount}</div>
+            </div>
+            <div className={`rounded-xl border ${isWhiteTheme ? 'border-slate-200 bg-white' : 'border-white/10 bg-white/5'} p-3 text-center`}>
+              <div className={`text-xs uppercase tracking-wide ${subtleSecondary}`}>Advisories</div>
+              <div className="mt-0.5 text-xl font-bold text-yellow-200">{advisoryCount}</div>
+            </div>
+          </div>
+        )}
+
+        {/* Result count */}
+        {!loading && (
+          <div className={`mb-3 text-xs ${subtleSecondary}`}>
+            {filteredAlerts.length === alerts.length
+              ? `${alerts.length} active alert${alerts.length !== 1 ? 's' : ''} nationwide`
+              : `${filteredAlerts.length} of ${alerts.length} alerts match`}
+          </div>
+        )}
+
+        {/* Alert list */}
+        <div className="space-y-3">
+          {loading ? (
+            <div className={`rounded-2xl border border-white/10 ${tc.cardBg} p-5 text-sm ${subtleText}`}>
+              <div className="flex items-center gap-3">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading nationwide alerts…
+              </div>
+            </div>
+          ) : error ? (
+            <div className="rounded-xl border border-red-500/30 bg-red-900/20 p-5 text-sm text-red-300">
+              {error}
+            </div>
+          ) : filteredAlerts.length === 0 ? (
+            <div className="rounded-2xl border border-emerald-400/25 bg-emerald-950/30 p-5 text-sm text-emerald-100">
+              {alerts.length === 0
+                ? 'No active alerts are in effect nationwide right now.'
+                : 'No alerts match your current filters.'}
+            </div>
+          ) : (
+            filteredAlerts.map((alert, idx) => {
+              const styles = alertBorderClass(String(alert?.event || ''), String(alert?.severity || ''))
+              const alertId = String(alert.id || idx)
+              const isExpanded = expandedAlertId === alertId
+              return (
+                <div
+                  key={alertId}
+                  onClick={() => setExpandedAlertId(isExpanded ? null : alertId)}
+                  className={`cursor-pointer rounded-xl border-l-4 ${cardBgCls} p-4 ${styles.border}`}
+                >
+                  <div className={`mb-1 text-xs font-semibold ${styles.label}`}>
+                    {String(alert.event || 'ALERT').toUpperCase()}
+                  </div>
+                  <div className="text-base font-semibold">
+                    {(alert.event as string) || 'Weather Alert'}
+                  </div>
+                  {(alert.areaDesc as string) ? (
+                    <div className={`mt-0.5 text-sm ${subtleText}`}>
+                      {alert.areaDesc as string}
+                    </div>
+                  ) : null}
+                  <div className={`mt-1 text-sm ${subtleText}`}>
+                    {(alert.summary as string) || (alert.headline as string) || ''}
+                  </div>
+                  {isExpanded && (
+                    <div className="mt-3 space-y-3 border-t border-white/10 pt-3">
+                      {(alert.description as string) ? (
+                        <div>
+                          <div className={`mb-1 text-xs font-medium uppercase tracking-wide ${subtleSecondary}`}>Description</div>
+                          <div className={`whitespace-pre-wrap text-sm leading-relaxed ${subtleText}`}>{formatAlertDescription(alert.description as string)}</div>
+                        </div>
+                      ) : null}
+                      {(alert.instruction as string) ? (
+                        <div>
+                          <div className={`mb-1 text-xs font-medium uppercase tracking-wide ${subtleSecondary}`}>Instructions</div>
+                          <div className={`whitespace-pre-wrap text-sm leading-relaxed ${isWhiteTheme ? 'text-yellow-700/80' : 'text-yellow-200/80'}`}>{formatAlertDescription(alert.instruction as string)}</div>
+                        </div>
+                      ) : null}
+                      {(alert.expires as string) ? (
+                        <div className={`text-xs ${subtleSecondary}`}>
+                          Expires {formatDateTime(alert.expires as string)}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                  <div className="mt-3 flex items-center justify-between">
+                    <div className={`text-xs ${subtleSecondary}`}>
+                      Issued {formatDateTime((alert.sent as string) || (alert.updated as string))}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {(alert.nwsUrl as string) ? (
+                        <a
+                          href={alert.nwsUrl as string}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className={`${subtleSecondary} hover:opacity-80 transition-opacity`}
+                          aria-label="View on NWS"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                        </a>
+                      ) : null}
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation()
+                          const detailUrl = (alert.detailUrl as string) || buildAppUrl({ alertId })
+                          if (navigator.share) {
+                            try { await navigator.share({ title: String(alert.event || 'Weather Alert'), url: detailUrl }) } catch { /* cancelled */ }
+                          } else {
+                            await navigator.clipboard.writeText(detailUrl).catch(() => {})
+                          }
+                        }}
+                        className={`${subtleSecondary} hover:opacity-80 transition-opacity`}
+                        aria-label="Share"
+                      >
+                        <Share2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </div>
+      </div>
+
+      {/* Nav bar */}
+      <div className="fixed bottom-0 left-1/2 w-full max-w-md -translate-x-1/2 px-4 pb-4">
+        <div className="rounded-2xl border border-white/10 p-2 shadow-2xl backdrop-blur" style={{ backgroundColor: navBg }}>
+          <div className="grid grid-cols-5 gap-1">
+            {([
+              { id: 'home',     label: 'Home',     icon: House },
+              { id: 'forecast', label: 'Forecast', icon: CloudSun },
+              { id: 'radar',    label: 'Radar',    icon: Radar },
+              { id: 'alerts',   label: 'Alerts',   icon: TriangleAlert },
+              { id: 'more',     label: 'More',     icon: MoreHorizontal },
+            ] as { id: string; label: string; icon: React.ElementType }[]).map((tab) => {
+              const Icon = tab.icon
+              const btnCls = isWhiteTheme
+                ? 'flex flex-col items-center gap-1 rounded-xl px-2 py-2.5 text-slate-700/80 transition hover:bg-slate-100/30 hover:text-slate-900'
+                : 'flex flex-col items-center gap-1 rounded-xl px-2 py-2.5 text-white/45 transition hover:bg-white/5 hover:text-white/80'
+              return (
+                <button key={tab.id} onClick={() => navTo(tab.id)} className={btnCls}>
                   <Icon className="h-4 w-4" />
                   <span className="text-[11px] font-medium">{tab.label}</span>
                 </button>
@@ -2919,6 +3291,7 @@ function AppInner() {
 }
 
 export default function App() {
+  if (isLiveAlertsPage()) return <LiveAlertsPage />
   const alertIdParam = getAlertIdFromLocation()
   if (alertIdParam) return <AlertDetailPage alertId={alertIdParam} />
   return <AppInner />

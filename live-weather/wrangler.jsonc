@@ -23,6 +23,9 @@
 		"directory": "./public-assets",
 		"binding": "ASSETS"
 	},
+	"ai": {
+		"binding": "AI"
+	},
 	"routes": [
 		{
 			"pattern": "liveweatheralerts.com/*",

@@ -3596,4 +3596,441 @@ describe('Live Weather Admin worker', () => {
 		expect(json.results[0].status).toBe('posted');
 		expect((globalThis.fetch as any).mock.calls.some(([input]) => String(input).includes('/images/florida/special-weather-statement-florida.jpg'))).toBe(true);
 	});
-});
+
+	// ---------------------------------------------------------------------------
+	// Digest coverage — unit tests
+	// ---------------------------------------------------------------------------
+
+	it('normalizeFbAutoPostConfig handles new digest/llm/startup fields', () => {
+		const { normalizeFbAutoPostConfig } = __testing;
+
+		const base = normalizeFbAutoPostConfig(null);
+		expect(base.digestCoverageEnabled).toBe(false);
+		expect(base.llmCopyEnabled).toBe(false);
+		expect(base.startupCatchupEnabled).toBe(false);
+
+		const full = normalizeFbAutoPostConfig({
+			mode: 'smart_high_impact',
+			updatedAt: '2026-04-01T00:00:00.000Z',
+			digestCoverageEnabled: true,
+			llmCopyEnabled: true,
+			startupCatchupEnabled: true,
+		});
+		expect(full.mode).toBe('smart_high_impact');
+		expect(full.digestCoverageEnabled).toBe(true);
+		expect(full.llmCopyEnabled).toBe(true);
+		expect(full.startupCatchupEnabled).toBe(true);
+
+		// Legacy boolean format still works and defaults new fields to false
+		const legacy = normalizeFbAutoPostConfig(true);
+		expect(legacy.mode).toBe('tornado_only');
+		expect(legacy.digestCoverageEnabled).toBe(false);
+	});
+
+	it('buildDigestCandidates filters out Tier 1 alerts and covered alerts', () => {
+		const { buildDigestCandidates } = __testing;
+
+		const alertMap = {
+			'tornado-1': {
+				id: 'tornado-1',
+				properties: {
+					event: 'Tornado Warning',
+					severity: 'Extreme',
+					areaDesc: 'Test County, KY',
+					geocode: { UGC: ['KYC001'] },
+					status: 'Actual',
+					headline: 'Tornado Warning in effect',
+					description: 'A tornado warning is in effect.',
+					urgency: 'Immediate',
+					certainty: 'Observed',
+				},
+			},
+			'flood-1': {
+				id: 'flood-1',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Moderate',
+					areaDesc: 'Clinton County, OH',
+					geocode: { UGC: ['OHC027'] },
+					status: 'Actual',
+					headline: 'Flood warning in effect',
+					description: 'Flooding is occurring.',
+					urgency: 'Expected',
+					certainty: 'Likely',
+				},
+			},
+			'winter-1': {
+				id: 'winter-1',
+				properties: {
+					event: 'Winter Storm Watch',
+					severity: 'Moderate',
+					areaDesc: 'Lake County, IL',
+					geocode: { UGC: ['ILC097'] },
+					status: 'Actual',
+					headline: 'Winter storm watch in effect',
+					description: 'Winter storm conditions possible.',
+					urgency: 'Future',
+					certainty: 'Possible',
+				},
+			},
+			'test-1': {
+				id: 'test-1',
+				properties: {
+					event: 'Test Message',
+					severity: 'Unknown',
+					areaDesc: 'Test County',
+					geocode: { UGC: ['KYC001'] },
+					status: 'Test',
+					description: '',
+					urgency: 'Unknown',
+					certainty: 'Unknown',
+				},
+			},
+		};
+
+		// No covered alerts — tornado excluded (Tier 1), test excluded, flood and winter included
+		const candidates = buildDigestCandidates(alertMap as any, new Set<string>());
+		const alertIds = candidates.map((c) => c.alertId);
+		expect(alertIds).not.toContain('tornado-1');
+		expect(alertIds).not.toContain('test-1');
+		expect(alertIds).toContain('flood-1');
+		expect(alertIds).toContain('winter-1');
+
+		// If flood-1 is covered by standalone, it should be excluded
+		const candidatesWithCovered = buildDigestCandidates(alertMap as any, new Set(['flood-1']));
+		const coveredIds = candidatesWithCovered.map((c) => c.alertId);
+		expect(coveredIds).not.toContain('flood-1');
+		expect(coveredIds).toContain('winter-1');
+	});
+
+	it('buildDigestCandidates correctly classifies hazard families', () => {
+		const { buildDigestCandidates } = __testing;
+
+		const alertMap = {
+			'flood-w': {
+				id: 'flood-w',
+				properties: {
+					event: 'Flood Watch',
+					severity: 'Moderate',
+					areaDesc: 'Test County, OH',
+					geocode: { UGC: ['OHC027'] },
+					status: 'Actual',
+					headline: 'Flooding possible',
+					description: 'Flooding conditions are possible.',
+					urgency: 'Future',
+					certainty: 'Possible',
+				},
+			},
+			'wind-a': {
+				id: 'wind-a',
+				properties: {
+					event: 'Wind Advisory',
+					severity: 'Minor',
+					areaDesc: 'Test County, CO',
+					geocode: { UGC: ['COC001'] },
+					status: 'Actual',
+					headline: 'Wind advisory in effect',
+					description: 'Strong winds expected.',
+					urgency: 'Expected',
+					certainty: 'Likely',
+				},
+			},
+			'rfr': {
+				id: 'rfr',
+				properties: {
+					event: 'Red Flag Warning',
+					severity: 'Moderate',
+					areaDesc: 'Test County, CA',
+					geocode: { UGC: ['CAC001'] },
+					status: 'Actual',
+					headline: 'Red flag warning in effect',
+					description: 'Critical fire weather conditions.',
+					urgency: 'Expected',
+					certainty: 'Likely',
+				},
+			},
+		};
+
+		const candidates = buildDigestCandidates(alertMap as any, new Set<string>());
+		const byId = Object.fromEntries(candidates.map((c) => [c.alertId, c]));
+		expect(byId['flood-w']?.hazardFamily).toBe('flood');
+		expect(byId['wind-a']?.hazardFamily).toBe('wind');
+		expect(byId['rfr']?.hazardFamily).toBe('fire');
+	});
+
+	it('buildDigestCandidates marks marine alerts correctly', () => {
+		const { buildDigestCandidates } = __testing;
+
+		const alertMap = {
+			'marine-1': {
+				id: 'marine-1',
+				properties: {
+					event: 'Gale Warning',
+					severity: 'Moderate',
+					areaDesc: 'Coastal Waters of NC',
+					geocode: { UGC: ['ANZ331'] },
+					status: 'Actual',
+					headline: 'Gale warning in effect',
+					description: 'Gale conditions expected.',
+					urgency: 'Expected',
+					certainty: 'Likely',
+				},
+			},
+			'land-1': {
+				id: 'land-1',
+				properties: {
+					event: 'High Wind Warning',
+					severity: 'Moderate',
+					areaDesc: 'Denver County, CO',
+					geocode: { UGC: ['COC031'] },
+					status: 'Actual',
+					headline: 'High wind warning',
+					description: 'High winds expected.',
+					urgency: 'Expected',
+					certainty: 'Likely',
+				},
+			},
+		};
+
+		const candidates = buildDigestCandidates(alertMap as any, new Set<string>());
+		const marine = candidates.find((c) => c.alertId === 'marine-1');
+		const land = candidates.find((c) => c.alertId === 'land-1');
+		expect(marine?.isMarineOrCoastal).toBe(true);
+		expect(land?.isMarineOrCoastal).toBe(false);
+	});
+
+	it('buildDigestSummary correctly classifies mode and urgency', () => {
+		const { buildDigestCandidates, buildDigestSummary } = __testing;
+
+		const alertMap: Record<string, any> = {};
+		// Create 8 states worth of flood warnings to trigger incident mode
+		const states = ['OH', 'IN', 'IL', 'MO', 'KY', 'TN', 'WV', 'VA'];
+		for (const [i, state] of states.entries()) {
+			alertMap[`flood-${i}`] = {
+				id: `flood-${i}`,
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Moderate',
+					areaDesc: `Test County, ${state}`,
+					geocode: { UGC: [`${state}C001`] },
+					status: 'Actual',
+					headline: 'Flood warning',
+					description: 'Flooding occurring.',
+					urgency: 'Immediate',
+					certainty: 'Observed',
+				},
+			};
+		}
+
+		const candidates = buildDigestCandidates(alertMap, new Set<string>());
+		expect(candidates.length).toBeGreaterThan(0);
+
+		// Extract needed data for buildDigestSummary
+		const { buildHazardClusters: _buildHazardClusters } = __testing as any;
+		// Build a simplified call using the exported function
+		const summary = buildDigestSummary(
+			candidates,
+			[{ family: 'flood', states, score: 40, alertCount: 8, topAlertTypes: ['Flood Warning'] }],
+			states,
+			'incident',
+			null,
+		);
+		expect(summary.mode).toBe('incident');
+		expect(summary.postType).toBe('digest');
+		expect(summary.hazardFocus).toBe('flood');
+		expect(summary.states).toEqual(states);
+		expect(summary.hash).toBeTruthy();
+	});
+
+	it('buildStartupSnapshotText creates a readable snapshot with date', () => {
+		const { buildStartupSnapshotText } = __testing;
+
+		const clusters = [
+			{ family: 'flood', states: ['OH', 'IN', 'IL'], score: 15, alertCount: 5, topAlertTypes: ['Flood Warning'] },
+			{ family: 'winter', states: ['MN', 'WI'], score: 8, alertCount: 3, topAlertTypes: ['Winter Storm Watch'] },
+		];
+
+		const text = buildStartupSnapshotText(clusters as any, 8);
+		expect(text).toContain('CURRENT WEATHER SITUATION');
+		expect(text).toContain('8 active weather alerts');
+		expect(text).toContain('Flooding concerns');
+		expect(text).toContain('OH');
+		expect(text).toContain('Winter weather');
+		expect(text).toContain('liveweatheralerts.com');
+	});
+
+	it('buildStartupSnapshotText handles empty clusters gracefully', () => {
+		const { buildStartupSnapshotText } = __testing;
+		const text = buildStartupSnapshotText([], 0);
+		expect(text).toContain('CURRENT WEATHER SITUATION');
+		expect(text).toContain('No significant weather');
+	});
+
+	it('validateLlmOutput rejects empty output', () => {
+		const { validateLlmOutput } = __testing;
+		const payload = { states: ['OH', 'IN'], top_alert_types: ['Flood Warning'], hazard_focus: 'flood', mode: 'normal', post_type: 'digest', urgency: 'high', max_length: 450, style: '' } as any;
+		expect(validateLlmOutput('', payload).valid).toBe(false);
+		expect(validateLlmOutput('', payload).failureReason).toBe('empty_output');
+	});
+
+	it('validateLlmOutput rejects output that is too long', () => {
+		const { validateLlmOutput } = __testing;
+		const payload = { states: ['OH'], top_alert_types: [], hazard_focus: null, mode: 'normal', post_type: 'digest', urgency: 'low', max_length: 450, style: '' } as any;
+		const longText = 'Ohio ' + 'a'.repeat(600);
+		expect(validateLlmOutput(longText, payload).valid).toBe(false);
+		expect(validateLlmOutput(longText, payload).failureReason).toBe('too_long');
+	});
+
+	it('validateLlmOutput rejects output with no geography mention', () => {
+		const { validateLlmOutput } = __testing;
+		const payload = { states: ['TX'], top_alert_types: ['Flood Warning'], hazard_focus: 'flood', mode: 'normal', post_type: 'digest', urgency: 'high', max_length: 450, style: '' } as any;
+		const noGeo = 'Flooding conditions are active. Please monitor forecasts.';
+		expect(validateLlmOutput(noGeo, payload).valid).toBe(false);
+		expect(validateLlmOutput(noGeo, payload).failureReason).toBe('no_geography_mention');
+	});
+
+	it('validateLlmOutput rejects output with hashtags', () => {
+		const { validateLlmOutput } = __testing;
+		// Use state abbreviation so the geography check passes, then hashtag check should fire
+		const payload = { states: ['TX'], top_alert_types: [], hazard_focus: null, mode: 'normal', post_type: 'digest', urgency: 'low', max_length: 450, style: '' } as any;
+		const withHashtag = 'Flooding conditions in TX. #weather #wx';
+		expect(validateLlmOutput(withHashtag, payload).valid).toBe(false);
+		expect(validateLlmOutput(withHashtag, payload).failureReason).toBe('contains_hashtag');
+	});
+
+	it('validateLlmOutput accepts valid short text with state mention', () => {
+		const { validateLlmOutput } = __testing;
+		const payload = { states: ['OH', 'IN'], top_alert_types: ['Flood Warning'], hazard_focus: 'flood', mode: 'normal', post_type: 'digest', urgency: 'high', max_length: 450, style: '' } as any;
+		const good = 'Flooding concerns are active across Ohio and Indiana this afternoon. Monitor local forecasts and follow NWS guidance for your area.';
+		const result = validateLlmOutput(good, payload);
+		expect(result.valid).toBe(true);
+		expect(result.text).toBe(good.trim());
+	});
+
+	it('validateLlmOutput accepts national/regional geography markers without state codes', () => {
+		const { validateLlmOutput } = __testing;
+		const payload = { states: ['TX', 'OK'], top_alert_types: ['Red Flag Warning'], hazard_focus: 'fire', mode: 'incident', post_type: 'digest', urgency: 'high', max_length: 450, style: '' } as any;
+		const national = 'Critical fire weather conditions are widespread across the Southern Plains. High winds and low humidity continue to elevate fire risk.';
+		const result = validateLlmOutput(national, payload);
+		expect(result.valid).toBe(true);
+	});
+
+	it('generateDigestCopy falls back to template when AI is unavailable', async () => {
+		const { generateDigestCopy } = __testing;
+
+		const summary = {
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'flood',
+			states: ['OH', 'IN'],
+			topAlertTypes: ['Flood Warning', 'Flood Watch'],
+			urgency: 'high',
+			alertCount: 5,
+			hash: 'test-hash',
+		} as any;
+
+		// Env without AI binding
+		const result = await generateDigestCopy(env, summary);
+		expect(typeof result).toBe('string');
+		expect(result.length).toBeGreaterThan(10);
+		// Template fallback should mention flood and states
+		expect(result.toLowerCase()).toMatch(/flood/);
+	});
+
+	it('admin auto-post-config endpoint saves and returns new digest fields', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+
+		const ctx = createExecutionContext();
+		const configRequest = new IncomingRequest('https://live-weather.example/admin/auto-post-config', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Cookie: cookie },
+			body: JSON.stringify({
+				mode: 'smart_high_impact',
+				digestCoverageEnabled: true,
+				llmCopyEnabled: true,
+				startupCatchupEnabled: true,
+			}),
+		});
+		const response = await worker.fetch(configRequest, goodEnv as any, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+		const json = await response.json() as any;
+		expect(json.success).toBe(true);
+		expect(json.config.mode).toBe('smart_high_impact');
+		expect(json.config.digestCoverageEnabled).toBe(true);
+		expect(json.config.llmCopyEnabled).toBe(true);
+		expect(json.config.startupCatchupEnabled).toBe(true);
+
+		// Re-read from KV to confirm persistence
+		const stored = await goodEnv.WEATHER_KV.get('fb:auto-post-config');
+		expect(stored).not.toBeNull();
+		const parsed = JSON.parse(stored!);
+		expect(parsed.digestCoverageEnabled).toBe(true);
+		expect(parsed.llmCopyEnabled).toBe(true);
+		expect(parsed.startupCatchupEnabled).toBe(true);
+	});
+
+	it('admin page renders digest/llm/startup checkboxes', async () => {
+		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
+
+		// Pre-set config with all toggles on
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: new Date().toISOString(),
+			digestCoverageEnabled: true,
+			llmCopyEnabled: false,
+			startupCatchupEnabled: true,
+		}));
+
+		const loginResp = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin/login', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ password: 'testpassword' }).toString(),
+			}),
+			goodEnv as any,
+			createExecutionContext(),
+		);
+		const cookie = loginResp.headers.get('set-cookie') || '';
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new IncomingRequest('https://live-weather.example/admin', { headers: { Cookie: cookie } }),
+			goodEnv as any,
+			ctx,
+		);
+		await waitOnExecutionContext(ctx);
+		const body = await response.text();
+		expect(response.status).toBe(200);
+		expect(body).toContain('digestCoverageEnabled');
+		expect(body).toContain('llmCopyEnabled');
+		expect(body).toContain('startupCatchupEnabled');
+		expect(body).toContain('Digest coverage');
+		expect(body).toContain('AI-generated copy');
+		expect(body).toContain('Startup / catch-up mode');
+	});
+
+	it('markAlertStandaloneCovered and readStandaloneCoveredAlerts round-trip correctly', async () => {
+		const { markAlertStandaloneCovered, readStandaloneCoveredAlerts } = __testing;
+
+		const before = await readStandaloneCoveredAlerts(env);
+		expect(before.size).toBe(0);
+
+		await markAlertStandaloneCovered(env, 'alert-abc');
+		await markAlertStandaloneCovered(env, 'alert-def');
+
+		const after = await readStandaloneCoveredAlerts(env);
+		expect(after.has('alert-abc')).toBe(true);
+		expect(after.has('alert-def')).toBe(true);
+		expect(after.has('alert-xyz')).toBe(false);
+	});});

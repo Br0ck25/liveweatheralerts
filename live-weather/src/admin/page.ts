@@ -1390,16 +1390,29 @@ async function saveAutoPostMode() {
   setAutoPostStatus('Saving auto-post setting...', '');
 
   try {
+    const digestCheck = document.getElementById('digestCoverageEnabled');
+    const llmCheck = document.getElementById('llmCopyEnabled');
+    const startupCheck = document.getElementById('startupCatchupEnabled');
     const response = await fetch('/admin/auto-post-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: autoPostModeSelect.value }),
+      body: JSON.stringify({
+        mode: autoPostModeSelect.value,
+        digestCoverageEnabled: digestCheck ? digestCheck.checked : false,
+        llmCopyEnabled: llmCheck ? llmCheck.checked : false,
+        startupCatchupEnabled: startupCheck ? startupCheck.checked : false,
+      }),
     });
     const data = await response.json();
     if (!response.ok || !data.success) {
       throw new Error(data.error || 'Unable to save auto-post setting');
     }
     AUTO_POST_CONFIG.mode = data.config && data.config.mode ? data.config.mode : autoPostModeSelect.value;
+    if (data.config) {
+      AUTO_POST_CONFIG.digestCoverageEnabled = !!data.config.digestCoverageEnabled;
+      AUTO_POST_CONFIG.llmCopyEnabled = !!data.config.llmCopyEnabled;
+      AUTO_POST_CONFIG.startupCatchupEnabled = !!data.config.startupCatchupEnabled;
+    }
     syncAutoPostHelp();
     setAutoPostStatus(data.message || 'Auto-post setting saved.', 'ok');
   } catch (err) {
@@ -1417,6 +1430,12 @@ if (autoPostModeSelect) {
   syncAutoPostHelp();
   autoPostModeSelect.addEventListener('change', saveAutoPostMode);
 }
+
+// Wire digest/LLM/startup checkboxes — each change saves all settings together
+['digestCoverageEnabled', 'llmCopyEnabled', 'startupCatchupEnabled'].forEach(function(id) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', saveAutoPostMode);
+});
 
 const btnTokenExchange = document.getElementById('btnTokenExchange');
 if (btnTokenExchange) {
@@ -1542,6 +1561,21 @@ applyFilters();
 		'    </select>\n' +
 		'  </label>\n' +
 		'  <p id="autoPostHelp" class="toggle-help">' + safeHtml(fbAutoPostModeHelp(normalizedAutoPostConfig.mode)) + '</p>\n' +
+		'  <label class="toggle-row" for="digestCoverageEnabled">\n' +
+		'    <span>Digest coverage</span>\n' +
+		'    <input type="checkbox" id="digestCoverageEnabled"' + (normalizedAutoPostConfig.digestCoverageEnabled ? ' checked' : '') + ' />\n' +
+		'  </label>\n' +
+		'  <p class="toggle-help">When enabled (smart high-impact mode only), lower-priority alerts are grouped into digest posts every 30 minutes instead of spamming individual posts.</p>\n' +
+		'  <label class="toggle-row" for="llmCopyEnabled">\n' +
+		'    <span>AI-generated copy</span>\n' +
+		'    <input type="checkbox" id="llmCopyEnabled"' + (normalizedAutoPostConfig.llmCopyEnabled ? ' checked' : '') + ' />\n' +
+		'  </label>\n' +
+		'  <p class="toggle-help">When enabled, digest posts use Workers AI (Llama 3.3 70B) to write human-readable copy. Falls back to templates if AI is unavailable.</p>\n' +
+		'  <label class="toggle-row" for="startupCatchupEnabled">\n' +
+		'    <span>Startup / catch-up mode</span>\n' +
+		'    <input type="checkbox" id="startupCatchupEnabled"' + (normalizedAutoPostConfig.startupCatchupEnabled ? ' checked' : '') + ' />\n' +
+		'  </label>\n' +
+		'  <p class="toggle-help">When enabled, a cold start or 6-hour gap publishes a single national snapshot post and seeds the digest state, rather than replaying all historical alerts.</p>\n' +
 		'  <div id="autoPostStatus" class="auto-post-status">' + safeHtml(autoPostStatusText) + '</div>\n' +
 		'</div>\n' +
 		'\n<div class="token-exchange">\n' +
