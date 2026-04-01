@@ -82,7 +82,7 @@ function buildFallbackTemplate(summary: DigestSummary): string {
 	return [
 		`${hazardLine}${stateList}${alertTypeLine}.`,
 		'Monitor local forecasts and follow guidance from your local National Weather Service office.',
-		'Full details: liveweatheralerts.com',
+	'Full details: https://liveweatheralerts.com/live',
 	].join('\n\n');
 }
 
@@ -128,4 +128,15 @@ export async function generateDigestCopy(env: Env, summary: DigestSummary): Prom
 	}
 
 	return buildFallbackTemplate(summary);
+}
+
+/**
+ * Returns the appropriate copy function based on whether LLM copy is enabled.
+ * When disabled, always uses the deterministic template fallback.
+ */
+export function createDigestCopyFn(
+	llmEnabled: boolean,
+): (env: Env, summary: DigestSummary) => Promise<string> {
+	if (llmEnabled) return generateDigestCopy;
+	return async (_env: Env, summary: DigestSummary) => buildFallbackTemplate(summary);
 }

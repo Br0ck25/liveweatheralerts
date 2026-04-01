@@ -30,6 +30,7 @@ import {
 	FB_DIGEST_TOP_STATE_COUNT,
 	FB_DIGEST_ROTATION_STATE_COUNT,
 	FB_DIGEST_MAX_NORMAL_MULTISTATE,
+	PRIMARY_APP_ORIGIN,
 } from '../constants';
 import { deriveAlertImpactCategories, dedupeStrings } from '../utils';
 
@@ -527,9 +528,24 @@ async function canPostDigestComment(thread: DigestThreadRecord, nowMs: number): 
 // Facebook posting helpers for digest
 // ---------------------------------------------------------------------------
 
-async function postToFacebook(env: Env, message: string): Promise<string> {
+function getDigestImageUrl(env: Env): string {
+	const base = String(env.FB_IMAGE_BASE_URL || '').trim().replace(/\/$/, '') || PRIMARY_APP_ORIGIN;
+	return `${base}/images/weather-alerts.png`;
+}
+
+async function postToFacebook(env: Env, message: string, imageUrl?: string): Promise<string> {
 	if (!env.FB_PAGE_ID || !env.FB_PAGE_ACCESS_TOKEN) {
 		throw new Error('Facebook credentials not configured');
+	}
+	if (imageUrl) {
+		const photoUrl = `https://graph.facebook.com/v17.0/${encodeURIComponent(env.FB_PAGE_ID)}/photos`;
+		const photoBody = new URLSearchParams({ url: imageUrl, caption: message, access_token: env.FB_PAGE_ACCESS_TOKEN });
+		const photoRes = await fetch(photoUrl, { method: 'POST', body: photoBody, signal: AbortSignal.timeout(15_000) });
+		if (photoRes.ok) {
+			const photoData = await photoRes.json() as { id?: string };
+			if (photoData.id) return photoData.id;
+		}
+		console.warn('[fb-digest] photo post failed, falling back to text feed');
 	}
 	const url = `https://graph.facebook.com/v17.0/${encodeURIComponent(env.FB_PAGE_ID)}/feed`;
 	const body = new URLSearchParams({ message, access_token: env.FB_PAGE_ACCESS_TOKEN });
@@ -584,7 +600,7 @@ export function buildStartupSnapshotText(clusters: HazardClusterSummary[], total
 		}
 	}
 	lines.push('');
-	lines.push('Full alerts: liveweatheralerts.com');
+	lines.push('Full alerts: https://liveweatheralerts.com/live');
 	return lines.join('\n');
 }
 
@@ -648,7 +664,7 @@ export async function runDigestCoverage(
 		}
 		// Post new digest
 		const copy = await generateCopy(env, summary);
-		const postId = await postToFacebook(env, copy);
+		const postId = await postToFacebook(env, copy, getDigestImageUrl(env));
 		console.log(`[fb-digest] posted new digest post=${postId} mode=${mode} states=${selectedStates.join(',')}`);
 
 		const block: PublishedDigestBlockRecord = {
@@ -713,7 +729,7 @@ async function runStartupCoverage(
 	}
 
 	const snapshotText = buildStartupSnapshotText(clusters, candidates.length);
-	const postId = await postToFacebook(env, snapshotText);
+	const postId = await postToFacebook(env, snapshotText, getDigestImageUrl(env));
 	console.log(`[fb-digest] startup snapshot post=${postId}`);
 
 	await recordLastPostTimestamp(env, nowMs);

@@ -9,8 +9,8 @@ export const DEFAULT_WEATHER_LAT = 41.8781;
 export const DEFAULT_WEATHER_LON = -87.6298;
 export const PRIMARY_APP_ORIGIN = 'https://liveweatheralerts.com';
 export const WWW_APP_ORIGIN = 'https://www.liveweatheralerts.com';
-export const PUBLIC_ALERTS_PAGE_PATH = '/';
-export const PUBLIC_ALERTS_PAGE_URL = PRIMARY_APP_ORIGIN;
+export const PUBLIC_ALERTS_PAGE_PATH = '/live';
+export const PUBLIC_ALERTS_PAGE_URL = PRIMARY_APP_ORIGIN + '/live';
 
 // KV keys
 export const KV_ALERT_MAP  = 'alerts:map';       // JSON: Record<alertId, feature> — merged active alerts

@@ -33,7 +33,7 @@ import {
 import { publishFeatureToFacebook } from './api';
 import { parseTimeMs } from '../alert-lifecycle';
 import { markAlertStandaloneCovered, runDigestCoverage } from './digest';
-import { generateDigestCopy } from './llm';
+import { createDigestCopyFn } from './llm';
 
 export { normalizeFacebookPublishThreadAction };
 
@@ -556,7 +556,8 @@ export async function autoPostFacebookAlerts(
 	// Run digest coverage when smart_high_impact and digestCoverageEnabled
 	if (config.mode === 'smart_high_impact' && config.digestCoverageEnabled) {
 		try {
-			await runDigestCoverage(env, map, generateDigestCopy);
+			const copyFn = createDigestCopyFn(config.llmCopyEnabled === true);
+			await runDigestCoverage(env, map, copyFn);
 		} catch (err) {
 			console.error(`[fb-digest] digest coverage failed: ${String(err)}`);
 		}
