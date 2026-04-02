@@ -3601,30 +3601,1013 @@ describe('Live Weather Admin worker', () => {
 	// Digest coverage — unit tests
 	// ---------------------------------------------------------------------------
 
-	it('normalizeFbAutoPostConfig handles new digest/llm/startup fields', () => {
+	it('normalizeFbAutoPostConfig handles digest fields and multi-day SPC settings', () => {
 		const { normalizeFbAutoPostConfig } = __testing;
 
 		const base = normalizeFbAutoPostConfig(null);
 		expect(base.digestCoverageEnabled).toBe(false);
+		expect(base.digestCommentUpdatesEnabled).toBe(true);
+		expect(base.digestMaxCommentsPerThread).toBe(3);
+		expect(base.digestMinCommentGapMinutes).toBe(20);
 		expect(base.llmCopyEnabled).toBe(false);
 		expect(base.startupCatchupEnabled).toBe(false);
+		expect(base.spcCoverageEnabled).toBe(false);
+		expect(base.spcMinRiskLevel).toBe('slight');
+		expect(base.spcDay1CoverageEnabled).toBe(false);
+		expect(base.spcDay1MinRiskLevel).toBe('slight');
+		expect(base.spcDay2CoverageEnabled).toBe(false);
+		expect(base.spcDay2MinRiskLevel).toBe('enhanced');
+		expect(base.spcDay3CoverageEnabled).toBe(false);
+		expect(base.spcDay3MinRiskLevel).toBe('enhanced');
+		expect(base.spcHashtagsEnabled).toBe(true);
+		expect(base.spcLlmEnabled).toBe(false);
+		expect(base.spcTimingRefreshEnabled).toBe(true);
 
 		const full = normalizeFbAutoPostConfig({
 			mode: 'smart_high_impact',
 			updatedAt: '2026-04-01T00:00:00.000Z',
 			digestCoverageEnabled: true,
+			digestCommentUpdatesEnabled: false,
+			digestMaxCommentsPerThread: 2,
+			digestMinCommentGapMinutes: 25,
 			llmCopyEnabled: true,
 			startupCatchupEnabled: true,
+			spcDay1CoverageEnabled: true,
+			spcDay1MinRiskLevel: 'slight',
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'enhanced',
+			spcDay3CoverageEnabled: true,
+			spcDay3MinRiskLevel: 'moderate',
+			spcHashtagsEnabled: false,
+			spcLlmEnabled: true,
+			spcTimingRefreshEnabled: false,
 		});
 		expect(full.mode).toBe('smart_high_impact');
 		expect(full.digestCoverageEnabled).toBe(true);
+		expect(full.digestCommentUpdatesEnabled).toBe(false);
+		expect(full.digestMaxCommentsPerThread).toBe(2);
+		expect(full.digestMinCommentGapMinutes).toBe(25);
 		expect(full.llmCopyEnabled).toBe(true);
 		expect(full.startupCatchupEnabled).toBe(true);
+		expect(full.spcCoverageEnabled).toBe(true);
+		expect(full.spcMinRiskLevel).toBe('slight');
+		expect(full.spcDay1CoverageEnabled).toBe(true);
+		expect(full.spcDay1MinRiskLevel).toBe('slight');
+		expect(full.spcDay2CoverageEnabled).toBe(true);
+		expect(full.spcDay2MinRiskLevel).toBe('enhanced');
+		expect(full.spcDay3CoverageEnabled).toBe(true);
+		expect(full.spcDay3MinRiskLevel).toBe('moderate');
+		expect(full.spcHashtagsEnabled).toBe(false);
+		expect(full.spcLlmEnabled).toBe(true);
+		expect(full.spcTimingRefreshEnabled).toBe(false);
+
+		const legacyObject = normalizeFbAutoPostConfig({
+			mode: 'off',
+			spcCoverageEnabled: true,
+			spcMinRiskLevel: 'enhanced',
+		});
+		expect(legacyObject.spcCoverageEnabled).toBe(true);
+		expect(legacyObject.spcMinRiskLevel).toBe('enhanced');
+		expect(legacyObject.spcDay1CoverageEnabled).toBe(true);
+		expect(legacyObject.spcDay1MinRiskLevel).toBe('enhanced');
+		expect(legacyObject.spcDay2CoverageEnabled).toBe(false);
 
 		// Legacy boolean format still works and defaults new fields to false
 		const legacy = normalizeFbAutoPostConfig(true);
 		expect(legacy.mode).toBe('tornado_only');
 		expect(legacy.digestCoverageEnabled).toBe(false);
+		expect(legacy.digestCommentUpdatesEnabled).toBe(true);
+		expect(legacy.digestMaxCommentsPerThread).toBe(3);
+		expect(legacy.digestMinCommentGapMinutes).toBe(20);
+		expect(legacy.spcCoverageEnabled).toBe(false);
+		expect(legacy.spcDay2CoverageEnabled).toBe(false);
+		expect(legacy.spcDay3CoverageEnabled).toBe(false);
+	});
+
+	it('parseSpcDay1OutlookPage and buildSpcDay1OutlookSummary normalize a Day 1 severe setup', async () => {
+		const { parseSpcDay1OutlookPage, buildSpcDay1OutlookSummary } = __testing as any;
+		const html = [
+			'<html>',
+			'<head><title>Storm Prediction Center Apr 2, 2026 1300 UTC Day 1 Convective Outlook</title></head>',
+			"<body onload=\"changeOverlay(); updateCookies(); show_tab('otlk_1300')\">",
+			'<div>Updated:&nbsp;Thu Apr 2 12:56:18 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+			'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+			'<pre>' + [
+				'SPC AC 021256',
+				'',
+				'Day 1 Convective Outlook',
+				'NWS Storm Prediction Center Norman OK',
+				'0756 AM CDT Thu Apr 02 2026',
+				'',
+				'Valid 021300Z - 031200Z',
+				'',
+				'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS EASTERN IOWA...NORTHERN ILLINOIS...AND SOUTHERN WISCONSIN...',
+				'',
+				'...SUMMARY...',
+				'Severe thunderstorms capable of producing several tornadoes are expected across eastern Iowa, northern Illinois, and southern Wisconsin this afternoon.',
+				'',
+				'...Eastern IA/Northern IL/Southern WI...',
+				'Tornado potential will be the main concern, though damaging winds are also possible.',
+				'A few tornadoes may develop before storms grow into a line later today.',
+			].join('\n') + '</pre>',
+			'</body>',
+			'</html>',
+		].join('');
+
+		const page = parseSpcDay1OutlookPage(html, {
+			id: 'day1',
+			label: 'Day 1',
+			pageUrl: 'https://www.spc.noaa.gov/products/outlook/day1otlk.html',
+			imagePrefix: 'day1',
+		});
+		const summary = await buildSpcDay1OutlookSummary(page, {
+			type: 'FeatureCollection',
+			features: [
+				{
+					type: 'Feature',
+					properties: {
+						LABEL: 'TSTM',
+						VALID_ISO: '2026-04-02T13:00:00+00:00',
+						EXPIRE_ISO: '2026-04-03T12:00:00+00:00',
+						ISSUE_ISO: '2026-04-02T12:56:00+00:00',
+					},
+				},
+				{
+					type: 'Feature',
+					properties: {
+						LABEL: 'ENH',
+						VALID_ISO: '2026-04-02T13:00:00+00:00',
+						EXPIRE_ISO: '2026-04-03T12:00:00+00:00',
+						ISSUE_ISO: '2026-04-02T12:56:00+00:00',
+					},
+				},
+			],
+		});
+
+		expect(summary.highestRiskLevel).toBe('enhanced');
+		expect(summary.highestRiskNumber).toBe(3);
+		expect(summary.affectedStates).toEqual(['IA', 'IL', 'WI']);
+		expect(summary.stateFocusText).toBe('Eastern Iowa, Northern Illinois, and Southern Wisconsin');
+		expect(summary.primaryRegion).toBe('Midwest');
+		expect(summary.hazardFocus).toBe('tornado');
+		expect(summary.hazardList).toEqual(['tornadoes', 'damaging winds']);
+		expect(summary.stormMode).toBe('supercells');
+		expect(summary.timingText).toBe('this afternoon');
+		expect(summary.imageUrl).toBe('https://www.spc.noaa.gov/products/outlook/day1otlk_1300.png');
+		expect(summary.summaryHash).toHaveLength(64);
+	});
+
+	it('buildSpcPostDecision handles day-aware setup, upgrade, and timing refresh cases', () => {
+		const { buildSpcPostDecision } = __testing as any;
+		const config = {
+			spcDay1MinRiskLevel: 'slight',
+			spcDay2MinRiskLevel: 'enhanced',
+			spcDay3MinRiskLevel: 'enhanced',
+			spcTimingRefreshEnabled: true,
+		} as any;
+		const summary = {
+			issuedAt: '2026-04-02T12:56:00+00:00',
+			validFrom: '2026-04-02T13:00:00+00:00',
+			validTo: '2026-04-03T12:00:00+00:00',
+			outlookDay: 1,
+			highestRiskLevel: 'enhanced',
+			highestRiskNumber: 3,
+			affectedStates: ['IA', 'IL', 'WI'],
+			stateFocusText: 'Eastern Iowa, Northern Illinois, and Southern Wisconsin',
+			primaryRegion: 'Midwest',
+			hazardFocus: 'tornado',
+			hazardList: ['tornadoes', 'damaging winds'],
+			stormMode: 'fast-moving supercells',
+			notableText: 'storms may move quickly enough to limit warning time',
+			timingText: 'this afternoon',
+			summaryHash: 'hash-enhanced-1',
+		} as any;
+
+		expect(buildSpcPostDecision(summary, null, config, Date.parse('2026-04-02T14:00:00Z'))).toEqual({
+			shouldPost: true,
+			reason: 'new_slight_or_higher',
+			postType: 'main_setup',
+		});
+
+		expect(buildSpcPostDecision({
+			...summary,
+			outlookDay: 2,
+			issuedAt: '2026-04-02T06:00:00+00:00',
+			validFrom: '2026-04-03T12:00:00+00:00',
+			validTo: '2026-04-04T12:00:00+00:00',
+			primaryRegion: 'Mid-South',
+			affectedStates: ['AR', 'MS', 'TN'],
+			summaryHash: 'hash-day2-1',
+		}, null, config, Date.parse('2026-04-02T14:00:00Z'))).toEqual({
+			shouldPost: true,
+			reason: 'new_slight_or_higher',
+			postType: 'day2_lookahead',
+		});
+
+		expect(buildSpcPostDecision(summary, {
+			issuedAt: '2026-04-02T12:56:00+00:00',
+			validFrom: '2026-04-02T13:00:00+00:00',
+			validTo: '2026-04-03T12:00:00+00:00',
+			postedAt: '2026-04-02T14:00:00+00:00',
+			summaryHash: 'hash-slight-1',
+			postId: 'post-1',
+			outputMode: 'post',
+			highestRiskLevel: 'slight',
+			highestRiskNumber: 2,
+			affectedStates: ['IA', 'IL', 'WI'],
+			primaryRegion: 'Midwest',
+			hazardFocus: 'tornado',
+			tornadoProbability: null,
+			windProbability: null,
+			hailProbability: null,
+			timingText: 'this afternoon',
+			postType: 'main_setup',
+			reason: 'new_slight_or_higher',
+		}, config, Date.parse('2026-04-02T17:00:00Z'))).toEqual({
+			shouldPost: true,
+			reason: 'risk_upgrade',
+			postType: 'upgrade',
+		});
+
+		expect(buildSpcPostDecision(summary, {
+			issuedAt: '2026-04-02T12:56:00+00:00',
+			validFrom: '2026-04-02T13:00:00+00:00',
+			validTo: '2026-04-03T12:00:00+00:00',
+			postedAt: '2026-04-02T14:00:00+00:00',
+			summaryHash: 'hash-enhanced-1',
+			postId: 'post-1',
+			outputMode: 'post',
+			highestRiskLevel: 'enhanced',
+			highestRiskNumber: 3,
+			affectedStates: ['IA', 'IL', 'WI'],
+			primaryRegion: 'Midwest',
+			hazardFocus: 'tornado',
+			tornadoProbability: null,
+			windProbability: null,
+			hailProbability: null,
+			timingText: 'this afternoon',
+			postType: 'main_setup',
+			reason: 'new_slight_or_higher',
+		}, config, Date.parse('2026-04-02T19:30:00Z'))).toEqual({
+			shouldPost: true,
+			reason: 'timing_refresh',
+			postType: 'timing_refresh',
+		});
+	});
+
+	it('evaluateSpcPostingSchedule enforces default windows but allows upgrade overrides', () => {
+		const { evaluateSpcPostingSchedule } = __testing as any;
+		const summary = {
+			issuedAt: '2026-04-02T12:56:00+00:00',
+			validFrom: '2026-04-02T13:00:00+00:00',
+			validTo: '2026-04-03T12:00:00+00:00',
+			outlookDay: 2,
+			highestRiskLevel: 'enhanced',
+			highestRiskNumber: 3,
+			affectedStates: ['IA', 'MO'],
+			stateFocusText: 'Southern Iowa and Northern Missouri',
+			primaryRegion: 'Midwest',
+			hazardFocus: 'wind',
+			hazardList: ['widespread damaging winds', 'tornadoes'],
+			stormMode: 'a large squall line',
+			timingText: 'late afternoon into evening',
+			summaryHash: 'day2-window-hash',
+		} as any;
+
+		expect(evaluateSpcPostingSchedule(summary, {
+			shouldPost: true,
+			reason: 'new_slight_or_higher',
+			postType: 'day2_lookahead',
+		}, null, Date.parse('2026-04-02T14:00:00Z'))).toEqual({
+			allowed: false,
+			reason: 'outside_window',
+			windowLabel: 'day2_midday',
+		});
+
+		expect(evaluateSpcPostingSchedule(summary, {
+			shouldPost: true,
+			reason: 'new_slight_or_higher',
+			postType: 'day2_lookahead',
+		}, null, Date.parse('2026-04-02T18:00:00Z'))).toEqual({
+			allowed: true,
+			reason: 'within_window',
+			windowLabel: 'day2_midday',
+		});
+
+		expect(evaluateSpcPostingSchedule(summary, {
+			shouldPost: true,
+			reason: 'risk_upgrade',
+			postType: 'upgrade',
+		}, {
+			outlookDay: 2,
+			issuedAt: '2026-04-02T06:00:00+00:00',
+			validFrom: '2026-04-03T12:00:00+00:00',
+			validTo: '2026-04-04T12:00:00+00:00',
+			postedAt: '2026-04-02T17:00:00+00:00',
+			summaryHash: 'prev-day2-hash',
+			postId: 'day2-post-1',
+			outputMode: 'post',
+			highestRiskLevel: 'slight',
+			highestRiskNumber: 2,
+			affectedStates: ['IA', 'MO'],
+			stateFocusText: 'Southern Iowa and Northern Missouri',
+			primaryRegion: 'Midwest',
+			hazardFocus: 'wind',
+			hazardList: ['damaging winds'],
+			stormMode: 'storm clusters',
+			notableText: null,
+			tornadoProbability: null,
+			windProbability: null,
+			hailProbability: null,
+			timingText: 'late afternoon into evening',
+			postType: 'day2_lookahead',
+			reason: 'new_slight_or_higher',
+		} as any, Date.parse('2026-04-02T14:00:00Z'))).toEqual({
+			allowed: true,
+			reason: 'override',
+			windowLabel: 'day2_midday',
+		});
+	});
+
+	it('buildSpcPostText varies openings, supports comment mode, and adds optional hashtags', () => {
+		const { buildSpcCommentChangeHint, buildSpcPostText } = __testing as any;
+		const summary = {
+			issuedAt: '2026-04-02T12:56:00+00:00',
+			validFrom: '2026-04-02T13:00:00+00:00',
+			validTo: '2026-04-03T12:00:00+00:00',
+			outlookDay: 1,
+			highestRiskLevel: 'enhanced',
+			highestRiskNumber: 3,
+			affectedStates: ['IA', 'IL', 'WI'],
+			primaryRegion: 'Midwest',
+			hazardFocus: 'tornado',
+			timingText: 'this afternoon',
+			summaryHash: 'hash-enhanced-1',
+		} as any;
+		const previousSummary = {
+			...summary,
+			highestRiskLevel: 'slight',
+			highestRiskNumber: 2,
+			affectedStates: ['IA', 'IL'],
+			summaryHash: 'hash-slight-1',
+		} as any;
+
+		const text = buildSpcPostText(summary, {
+			shouldPost: true,
+			reason: 'new_slight_or_higher',
+			postType: 'main_setup',
+		}, ['This afternoon to watch across the Midwest.'], true);
+
+		expect(text.startsWith('This afternoon to watch across the Midwest.')).toBe(false);
+		expect(text).toContain('Level 3 Enhanced Risk');
+		expect(text).toContain('centered on Eastern Iowa, Northern Illinois, and Southern Wisconsin');
+		expect(text).toContain('Expect fast-moving supercells capable of producing tornadoes and damaging winds.');
+		expect(text).toContain('Storms will develop this afternoon.');
+		expect(text).toContain('#IAwx #ILwx #WIwx');
+
+		const changeHint = buildSpcCommentChangeHint(previousSummary, summary);
+		expect(changeHint).toContain('risk upgraded');
+		expect(changeHint).toContain('new states added');
+
+		const commentText = buildSpcPostText(summary, {
+			shouldPost: true,
+			reason: 'risk_upgrade',
+			postType: 'upgrade',
+		}, [], true, 'comment', changeHint);
+		expect(commentText.startsWith('UPDATE:')).toBe(true);
+		expect(commentText).toContain('SPC continues a Level 3 Enhanced Risk centered on Eastern Iowa, Northern Illinois, and Southern Wisconsin.');
+		expect(commentText).not.toContain('#IAwx');
+	});
+
+	it('buildSpcPostText keeps Day 2 copy centered on the SPC core with squall-line messaging', () => {
+		const { buildSpcPostText } = __testing as any;
+		const summary = {
+			issuedAt: '2026-04-02T06:02:00+00:00',
+			validFrom: '2026-04-03T12:00:00+00:00',
+			validTo: '2026-04-04T12:00:00+00:00',
+			outlookDay: 2,
+			highestRiskLevel: 'enhanced',
+			highestRiskNumber: 3,
+			affectedStates: ['IA', 'MO'],
+			stateFocusText: 'Southern Iowa and Northern Missouri',
+			primaryRegion: 'Midwest',
+			hazardFocus: 'wind',
+			hazardList: ['widespread damaging winds', 'tornadoes'],
+			stormMode: 'a large squall line',
+			notableText: 'a few discrete storms may form early before the line organizes',
+			timingText: 'late afternoon into evening',
+			summaryHash: 'hash-day2-core',
+		} as any;
+
+		const text = buildSpcPostText(summary, {
+			shouldPost: true,
+			reason: 'new_slight_or_higher',
+			postType: 'day2_lookahead',
+		}, [], true);
+
+		expect(text).toContain('SPC has issued a Level 3 Enhanced Risk centered on Southern Iowa and Northern Missouri.');
+		expect(text).toContain('A developing system may produce a large squall line, with widespread damaging winds and tornadoes as the main threats during the late afternoon into evening window.');
+		expect(text).toContain('A few discrete storms may form early before the line organizes.');
+		expect(text).toContain('#IAwx #MOwx');
+		expect(text).not.toContain('Mississippi');
+	});
+
+	it('validateSpcLlmOutput rejects states outside the SPC core area', () => {
+		const { buildSpcLlmPayload, validateSpcLlmOutput } = __testing as any;
+		const payload = buildSpcLlmPayload({
+			outputMode: 'post',
+			outlookDay: 2,
+			postType: 'day2_lookahead',
+			riskLevel: 'enhanced',
+			riskNumber: 3,
+			primaryRegion: 'Midwest',
+			states: ['IA', 'MO'],
+			stateFocusText: 'Southern Iowa and Northern Missouri',
+			hazardFocus: 'wind',
+			hazardList: ['widespread damaging winds', 'tornadoes'],
+			hazardLine: 'widespread damaging winds and tornadoes',
+			stormMode: 'a large squall line',
+			timingWindow: 'late afternoon into evening',
+			notableText: 'a few discrete storms may form early before the line organizes',
+			trend: 'developing',
+			recentOpenings: [],
+			hashtagsEnabled: true,
+		});
+
+		expect(validateSpcLlmOutput(
+			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa, northern Missouri, and Mississippi.',
+			payload,
+		).failureReason).toBe('mentions_out_of_scope_state');
+
+		expect(validateSpcLlmOutput(
+			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa and northern Missouri. A developing system may produce a large squall line, with widespread damaging winds and tornadoes as the main threats late afternoon into the evening.',
+			payload,
+		).valid).toBe(true);
+	});
+
+	it('validateSpcLlmOutput rejects narrowed cores and timing drift, but accepts the stronger desk-style copy', () => {
+		const { buildSpcLlmPayload, buildSpcUserPrompt, validateSpcLlmOutput } = __testing as any;
+		const day1Payload = buildSpcLlmPayload({
+			outputMode: 'post',
+			outlookDay: 1,
+			postType: 'main_setup',
+			riskLevel: 'enhanced',
+			riskNumber: 3,
+			primaryRegion: 'Midwest',
+			states: ['IA', 'IL', 'WI'],
+			stateFocusText: 'Eastern Iowa, Northern Illinois, and Southern Wisconsin',
+			hazardFocus: 'tornado',
+			hazardList: ['tornadoes', 'damaging winds'],
+			hazardLine: 'tornadoes and damaging winds',
+			stormMode: 'fast-moving supercells',
+			timingWindow: 'this afternoon',
+			notableText: 'storms will race northeast quickly, which may limit warning time',
+			trend: 'developing',
+			recentOpenings: ['This afternoon to watch across the Midwest.'],
+			hashtagsEnabled: true,
+		});
+
+		expect(buildSpcUserPrompt(day1Payload)).toContain('Do not narrow this multi-state corridor down to a single state.');
+		expect(validateSpcLlmOutput(
+			"Today's severe weather threat is focused on the Midwest, particularly southern Wisconsin, where a Level 3 enhanced risk is in place. Fast-moving supercells are expected to develop this afternoon and evening, bringing tornadoes and damaging winds, with storms moving quickly enough to limit warning time.",
+			day1Payload,
+		).failureReason).toBe('missing_core_state_cluster');
+
+		expect(validateSpcLlmOutput(
+			'This afternoon to watch across the Midwest. SPC has issued a Level 3 Enhanced Risk for severe storms centered on eastern Iowa, northern Illinois, and southern Wisconsin. Fast-moving supercells are expected to develop this afternoon and evening, bringing tornado potential and damaging winds. Storms will race northeast quickly, which may limit warning time.',
+			day1Payload,
+		).valid).toBe(true);
+
+		const day2Payload = buildSpcLlmPayload({
+			outputMode: 'post',
+			outlookDay: 2,
+			postType: 'day2_lookahead',
+			riskLevel: 'enhanced',
+			riskNumber: 3,
+			primaryRegion: 'Midwest',
+			states: ['IA', 'MO'],
+			stateFocusText: 'Southern Iowa and Northern Missouri',
+			hazardFocus: 'wind',
+			hazardList: ['damaging winds', 'tornadoes', 'large hail'],
+			hazardLine: 'damaging winds, tornadoes, and large hail',
+			stormMode: 'a squall line',
+			timingWindow: 'late afternoon into evening',
+			notableText: 'the line should move east overnight after it organizes',
+			trend: 'developing',
+			recentOpenings: ['Watching tomorrow closely across the Midwest.'],
+			hashtagsEnabled: true,
+		});
+
+		expect(validateSpcLlmOutput(
+			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa and northern Missouri. A developing storm system will evolve into a squall line overnight, bringing tornadoes, large hail, and damaging winds to the region, with the threat shifting into place by morning.',
+			day2Payload,
+		).failureReason).toBe('timing_not_aligned');
+
+		expect(validateSpcLlmOutput(
+			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa and northern Missouri. A developing storm system is expected to organize into a squall line late Friday afternoon into the evening, bringing damaging winds and tornado potential as it moves east.',
+			day2Payload,
+		).valid).toBe(true);
+	});
+
+	it('runSpcDay1Coverage preserves the Day 1 wrapper while using the new SPC lane state', async () => {
+		const { runSpcDay1Coverage, readLastSpcDay1Post, readRecentSpcOpenings } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: 'page-1',
+			FB_PAGE_ACCESS_TOKEN: 'token-1',
+		} as any;
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'off',
+			updatedAt: '2026-04-02T12:00:00.000Z',
+			spcDay1CoverageEnabled: true,
+			spcDay1MinRiskLevel: 'slight',
+			spcDay2CoverageEnabled: false,
+			spcDay3CoverageEnabled: false,
+			spcHashtagsEnabled: true,
+			spcTimingRefreshEnabled: true,
+		}));
+
+		const spcHtml = [
+			'<html>',
+			'<head><title>Storm Prediction Center Apr 2, 2026 1300 UTC Day 1 Convective Outlook</title></head>',
+			"<body onload=\"show_tab('otlk_1300')\">",
+			'<div>Updated:&nbsp;Thu Apr 2 12:56:18 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+			'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+			'<pre>' + [
+				'SPC AC 021256',
+				'',
+				'Day 1 Convective Outlook',
+				'NWS Storm Prediction Center Norman OK',
+				'0756 AM CDT Thu Apr 02 2026',
+				'',
+				'Valid 021300Z - 031200Z',
+				'',
+				'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS EASTERN IOWA...NORTHERN ILLINOIS...AND SOUTHERN WISCONSIN...',
+				'',
+				'...SUMMARY...',
+				'Severe thunderstorms capable of producing several tornadoes are expected across eastern Iowa, northern Illinois, and southern Wisconsin this afternoon.',
+				'',
+				'...Eastern IA/Northern IL/Southern WI...',
+				'Tornado potential will be the main concern this afternoon.',
+			].join('\n') + '</pre>',
+			'</body>',
+			'</html>',
+		].join('');
+		const spcGeoJson = {
+			type: 'FeatureCollection',
+			features: [
+				{
+					type: 'Feature',
+					properties: {
+						LABEL: 'ENH',
+						VALID_ISO: '2026-04-02T13:00:00+00:00',
+						EXPIRE_ISO: '2026-04-03T12:00:00+00:00',
+						ISSUE_ISO: '2026-04-02T12:56:00+00:00',
+					},
+				},
+			],
+		};
+
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day1otlk.html') {
+				return new Response(spcHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson') {
+				return new Response(JSON.stringify(spcGeoJson), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com') && url.includes('/photos')) {
+				return new Response(JSON.stringify({ id: 'spc-post-1' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com') && url.includes('/feed')) {
+				return new Response(JSON.stringify({ id: 'spc-post-1' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		await runSpcDay1Coverage(goodEnv, Date.parse('2026-04-02T14:00:00Z'));
+		await runSpcDay1Coverage(goodEnv, Date.parse('2026-04-02T14:10:00Z'));
+
+		const storedPost = await readLastSpcDay1Post(goodEnv);
+		expect(storedPost?.highestRiskLevel).toBe('enhanced');
+		expect(storedPost?.postType).toBe('main_setup');
+		expect(storedPost?.postId).toBe('spc-post-1');
+
+		const openings = await readRecentSpcOpenings(goodEnv);
+		expect(openings.length).toBeGreaterThan(0);
+		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/photos')).length).toBe(1);
+	});
+
+	it('runSpcCoverage staggers Day 1 and Day 2 posts into their intended windows and records a debug snapshot', async () => {
+		const { runSpcCoverage, readLastSpcDay1Post, readLastSpcPost, readRecentSpcOpenings, readSpcDebugSnapshot } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: 'page-1',
+			FB_PAGE_ACCESS_TOKEN: 'token-1',
+		} as any;
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'off',
+			updatedAt: '2026-04-02T12:00:00.000Z',
+			spcDay1CoverageEnabled: true,
+			spcDay1MinRiskLevel: 'slight',
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'enhanced',
+			spcDay3CoverageEnabled: false,
+			spcDay3MinRiskLevel: 'enhanced',
+			spcHashtagsEnabled: true,
+			spcTimingRefreshEnabled: true,
+		}));
+
+		const pages = {
+			'https://www.spc.noaa.gov/products/outlook/day1otlk.html': [
+				'<html>',
+				'<head><title>Storm Prediction Center Apr 2, 2026 1300 UTC Day 1 Convective Outlook</title></head>',
+				"<body onload=\"show_tab('otlk_1300')\">",
+				'<div>Updated:&nbsp;Thu Apr 2 12:56:18 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+				'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+				'<pre>' + [
+					'SPC AC 021256',
+					'',
+					'Day 1 Convective Outlook',
+					'NWS Storm Prediction Center Norman OK',
+					'0756 AM CDT Thu Apr 02 2026',
+					'',
+					'Valid 021300Z - 031200Z',
+					'',
+					'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS EASTERN IOWA...NORTHERN ILLINOIS...AND SOUTHERN WISCONSIN...',
+					'',
+					'...SUMMARY...',
+					'Severe thunderstorms capable of producing several tornadoes are expected across eastern Iowa, northern Illinois, and southern Wisconsin this afternoon.',
+				].join('\n') + '</pre>',
+				'</body>',
+				'</html>',
+			].join(''),
+			'https://www.spc.noaa.gov/products/outlook/day2otlk.html': [
+				'<html>',
+				'<head><title>Storm Prediction Center Apr 2, 2026 0600 UTC Day 2 Convective Outlook</title></head>',
+				"<body onload=\"show_tab('otlk_0600')\">",
+				'<div>Updated:&nbsp;Thu Apr 2 06:02:03 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+				'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+				'<pre>' + [
+					'SPC AC 020602',
+					'',
+					'Day 2 Convective Outlook',
+					'NWS Storm Prediction Center Norman OK',
+					'0102 AM CDT Thu Apr 02 2026',
+					'',
+					'Valid 031200Z - 041200Z',
+					'',
+					'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS ACROSS PARTS OF ARKANSAS...MISSISSIPPI...AND TENNESSEE...',
+					'',
+					'...SUMMARY...',
+					'Severe thunderstorms are possible from Arkansas into Mississippi and Tennessee tomorrow afternoon into evening.',
+				].join('\n') + '</pre>',
+				'</body>',
+				'</html>',
+			].join(''),
+		} as Record<string, string>;
+		const geoJsonByUrl = {
+			'https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson': {
+				type: 'FeatureCollection',
+				features: [{ type: 'Feature', properties: { LABEL: 'ENH', VALID_ISO: '2026-04-02T13:00:00+00:00', EXPIRE_ISO: '2026-04-03T12:00:00+00:00', ISSUE_ISO: '2026-04-02T12:56:00+00:00' } }],
+			},
+			'https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson': {
+				type: 'FeatureCollection',
+				features: [{ type: 'Feature', properties: { LABEL: 'ENH', VALID_ISO: '2026-04-03T12:00:00+00:00', EXPIRE_ISO: '2026-04-04T12:00:00+00:00', ISSUE_ISO: '2026-04-02T06:02:00+00:00' } }],
+			},
+		} as Record<string, any>;
+		let postCounter = 0;
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (pages[url]) {
+				return new Response(pages[url], { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (geoJsonByUrl[url]) {
+				return new Response(JSON.stringify(geoJsonByUrl[url]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com') && (url.includes('/photos') || url.includes('/feed'))) {
+				postCounter += 1;
+				return new Response(JSON.stringify({ id: `spc-post-${postCounter}` }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		await runSpcCoverage(goodEnv, Date.parse('2026-04-02T14:00:00Z'));
+		await runSpcCoverage(goodEnv, Date.parse('2026-04-02T18:00:00Z'));
+
+		const day1Post = await readLastSpcDay1Post(goodEnv);
+		const day2Post = await readLastSpcPost(goodEnv, 2);
+		const snapshot = await readSpcDebugSnapshot(goodEnv);
+		const openings = await readRecentSpcOpenings(goodEnv);
+
+		expect(day1Post?.postType).toBe('main_setup');
+		expect(day2Post?.postType).toBe('day2_lookahead');
+		expect(day2Post?.postId).toBe('spc-post-2');
+		expect(snapshot?.entries).toHaveLength(3);
+		expect(snapshot?.entries.map((entry: any) => entry.outlookDay)).toEqual([1, 2, 3]);
+		expect(openings.length).toBeGreaterThanOrEqual(2);
+		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/photos')).length).toBe(2);
+	});
+
+	it('runSpcCoverageForDay keeps Day 2 upgrades as new posts instead of thread comments', async () => {
+		const { runSpcCoverageForDay, readLastSpcPost } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: 'page-1',
+			FB_PAGE_ACCESS_TOKEN: 'token-1',
+		} as any;
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'off',
+			updatedAt: '2026-04-02T12:00:00.000Z',
+			spcDay1CoverageEnabled: false,
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'slight',
+			spcDay3CoverageEnabled: false,
+			spcHashtagsEnabled: false,
+			spcTimingRefreshEnabled: true,
+		}));
+
+		let version: 'initial' | 'upgrade' = 'initial';
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk.html') {
+				const riskLine = version === 'initial'
+					? '...THERE IS A SLIGHT RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...AND NORTHERN MISSOURI...'
+					: '...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...NORTHERN MISSOURI...AND WEST-CENTRAL ILLINOIS...';
+				const summaryLine = version === 'initial'
+					? 'Severe thunderstorms are possible across southern Iowa and northern Missouri tomorrow afternoon into evening.'
+					: 'A more organized severe weather episode is expected across southern Iowa, northern Missouri, and west-central Illinois tomorrow late afternoon into evening.';
+				const detailLine = version === 'initial'
+					? 'Storm clusters may produce damaging winds.'
+					: 'A large squall line may develop with damaging winds and embedded tornado potential.';
+				return new Response([
+					'<html>',
+					'<head><title>Storm Prediction Center Apr 2, 2026 0600 UTC Day 2 Convective Outlook</title></head>',
+					"<body onload=\"show_tab('otlk_0600')\">",
+					'<div>Updated:&nbsp;Thu Apr 2 06:02:03 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					'<pre>' + [
+						'SPC AC 020602',
+						'',
+						'Day 2 Convective Outlook',
+						'NWS Storm Prediction Center Norman OK',
+						'0102 AM CDT Thu Apr 02 2026',
+						'',
+						'Valid 031200Z - 041200Z',
+						'',
+						riskLine,
+						'',
+						'...SUMMARY...',
+						summaryLine,
+						'',
+						'...Southern IA/Northern MO...',
+						detailLine,
+					].join('\n') + '</pre>',
+					'</body>',
+					'</html>',
+				].join(''), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson') {
+				const label = version === 'initial' ? 'SLGT' : 'ENH';
+				const issueIso = version === 'initial' ? '2026-04-02T06:02:00+00:00' : '2026-04-02T18:05:00+00:00';
+				return new Response(JSON.stringify({
+					type: 'FeatureCollection',
+					features: [{
+						type: 'Feature',
+						properties: {
+							LABEL: label,
+							VALID_ISO: '2026-04-03T12:00:00+00:00',
+							EXPIRE_ISO: '2026-04-04T12:00:00+00:00',
+							ISSUE_ISO: issueIso,
+						},
+					}],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com') && url.includes('/photos')) {
+				return new Response(JSON.stringify({ id: version === 'initial' ? 'spc-day2-post-1' : 'spc-day2-post-2' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com') && url.includes('/comments')) {
+				return new Response(JSON.stringify({ id: 'should-not-comment' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		const initialResult = await runSpcCoverageForDay(goodEnv, 2, Date.parse('2026-04-02T17:00:00Z'));
+		version = 'upgrade';
+		const updateResult = await runSpcCoverageForDay(goodEnv, 2, Date.parse('2026-04-02T20:10:00Z'));
+		const storedPost = await readLastSpcPost(goodEnv, 2);
+
+		expect(initialResult.plannedOutputMode).toBe('post');
+		expect(updateResult.plannedOutputMode).toBe('post');
+		expect(storedPost?.outputMode).toBe('post');
+		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/photos')).length).toBe(2);
+		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/comments')).length).toBe(0);
+	});
+
+	it('runSpcCoverageForDay enforces the 15-minute cross-lane SPC post gap', async () => {
+		const { runSpcCoverageForDay } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: 'page-1',
+			FB_PAGE_ACCESS_TOKEN: 'token-1',
+		} as any;
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'off',
+			updatedAt: '2026-04-02T12:00:00.000Z',
+			spcDay1CoverageEnabled: true,
+			spcDay1MinRiskLevel: 'slight',
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'enhanced',
+			spcDay3CoverageEnabled: false,
+			spcHashtagsEnabled: false,
+			spcTimingRefreshEnabled: true,
+		}));
+
+		await goodEnv.WEATHER_KV.put('fb:spc:day1:last-post', JSON.stringify({
+			outlookDay: 1,
+			issuedAt: '2026-04-02T12:56:00+00:00',
+			validFrom: '2026-04-02T13:00:00+00:00',
+			validTo: '2026-04-03T12:00:00+00:00',
+			postedAt: '2026-04-02T17:55:00.000Z',
+			summaryHash: 'recent-day1-post',
+			postId: 'recent-day1-post',
+			outputMode: 'post',
+			highestRiskLevel: 'enhanced',
+			highestRiskNumber: 3,
+			affectedStates: ['IA', 'IL', 'WI'],
+			stateFocusText: 'Eastern Iowa, Northern Illinois, and Southern Wisconsin',
+			primaryRegion: 'Midwest',
+			hazardFocus: 'tornado',
+			hazardList: ['tornadoes', 'damaging winds'],
+			stormMode: 'fast-moving supercells',
+			notableText: 'storms may move quickly enough to limit warning time',
+			tornadoProbability: 10,
+			windProbability: 30,
+			hailProbability: null,
+			timingText: 'this afternoon',
+			postType: 'main_setup',
+			reason: 'new_slight_or_higher',
+		}));
+
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk.html') {
+				return new Response([
+					'<html>',
+					'<head><title>Storm Prediction Center Apr 2, 2026 0600 UTC Day 2 Convective Outlook</title></head>',
+					"<body onload=\"show_tab('otlk_0600')\">",
+					'<div>Updated:&nbsp;Thu Apr 2 06:02:03 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					'<pre>' + [
+						'SPC AC 020602',
+						'',
+						'Day 2 Convective Outlook',
+						'NWS Storm Prediction Center Norman OK',
+						'0102 AM CDT Thu Apr 02 2026',
+						'',
+						'Valid 031200Z - 041200Z',
+						'',
+						'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...AND NORTHERN MISSOURI...',
+						'',
+						'...SUMMARY...',
+						'Severe thunderstorms are expected across southern Iowa and northern Missouri tomorrow afternoon into evening.',
+					].join('\n') + '</pre>',
+					'</body>',
+					'</html>',
+				].join(''), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson') {
+				return new Response(JSON.stringify({
+					type: 'FeatureCollection',
+					features: [{ type: 'Feature', properties: { LABEL: 'ENH', VALID_ISO: '2026-04-03T12:00:00+00:00', EXPIRE_ISO: '2026-04-04T12:00:00+00:00', ISSUE_ISO: '2026-04-02T06:02:00+00:00' } }],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com')) {
+				return new Response(JSON.stringify({ id: 'should-not-post' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		const result = await runSpcCoverageForDay(goodEnv, 2, Date.parse('2026-04-02T18:05:00Z'));
+
+		expect(result.error).toBe('recent_spc_post_gap');
+		expect(result.plannedOutputMode).toBeNull();
+		expect(fetchMock.mock.calls.some(([input]) => String(input).includes('graph.facebook.com'))).toBe(false);
+	});
+
+	it('runSpcCoverageForDay uses Facebook comments for same-thread SPC upgrades', async () => {
+		const { runSpcCoverageForDay, readLastSpcDay1Post } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: 'page-1',
+			FB_PAGE_ACCESS_TOKEN: 'token-1',
+		} as any;
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'off',
+			updatedAt: '2026-04-02T12:00:00.000Z',
+			spcDay1CoverageEnabled: true,
+			spcDay1MinRiskLevel: 'slight',
+			spcDay2CoverageEnabled: false,
+			spcDay3CoverageEnabled: false,
+			spcHashtagsEnabled: false,
+			spcTimingRefreshEnabled: true,
+		}));
+
+		let version: 'initial' | 'upgrade' = 'initial';
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day1otlk.html') {
+				const riskLine = version === 'initial'
+					? '...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS EASTERN IOWA...NORTHERN ILLINOIS...AND SOUTHERN WISCONSIN...'
+					: '...THERE IS A MODERATE RISK OF SEVERE THUNDERSTORMS EASTERN IOWA...NORTHERN ILLINOIS...SOUTHERN WISCONSIN...AND NORTHWEST INDIANA...';
+				const summaryLine = version === 'initial'
+					? 'Severe thunderstorms capable of producing several tornadoes are expected across eastern Iowa, northern Illinois, and southern Wisconsin this afternoon.'
+					: 'Severe thunderstorms capable of producing strong tornadoes are expected across eastern Iowa, northern Illinois, southern Wisconsin, and northwest Indiana this afternoon.';
+				return new Response([
+					'<html>',
+					'<head><title>Storm Prediction Center Apr 2, 2026 1300 UTC Day 1 Convective Outlook</title></head>',
+					"<body onload=\"show_tab('otlk_1300')\">",
+					'<div>Updated:&nbsp;Thu Apr 2 12:56:18 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					'<pre>' + [
+						'SPC AC 021256',
+						'',
+						'Day 1 Convective Outlook',
+						'NWS Storm Prediction Center Norman OK',
+						'0756 AM CDT Thu Apr 02 2026',
+						'',
+						'Valid 021300Z - 031200Z',
+						'',
+						riskLine,
+						'',
+						'...SUMMARY...',
+						summaryLine,
+					].join('\n') + '</pre>',
+					'</body>',
+					'</html>',
+				].join(''), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson') {
+				const label = version === 'initial' ? 'ENH' : 'MDT';
+				const issueIso = version === 'initial' ? '2026-04-02T12:56:00+00:00' : '2026-04-02T14:30:00+00:00';
+				return new Response(JSON.stringify({
+					type: 'FeatureCollection',
+					features: [{
+						type: 'Feature',
+						properties: {
+							LABEL: label,
+							VALID_ISO: '2026-04-02T13:00:00+00:00',
+							EXPIRE_ISO: '2026-04-03T12:00:00+00:00',
+							ISSUE_ISO: issueIso,
+						},
+					}],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com') && url.includes('/photos')) {
+				return new Response(JSON.stringify({ id: 'spc-post-thread-1' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com') && url.includes('/comments')) {
+				return new Response(JSON.stringify({ id: 'spc-comment-1' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		const initialResult = await runSpcCoverageForDay(goodEnv, 1, Date.parse('2026-04-02T14:00:00Z'));
+		version = 'upgrade';
+		const updateResult = await runSpcCoverageForDay(goodEnv, 1, Date.parse('2026-04-02T16:10:00Z'));
+		const storedPost = await readLastSpcDay1Post(goodEnv);
+
+		expect(initialResult.plannedOutputMode).toBe('post');
+		expect(updateResult.plannedOutputMode).toBe('comment');
+		expect(storedPost?.outputMode).toBe('comment');
+		expect(storedPost?.commentId).toBe('spc-comment-1');
+		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/photos')).length).toBe(1);
+		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/comments')).length).toBe(1);
 	});
 
 	it('buildDigestCandidates filters out Tier 1 alerts and covered alerts', () => {
@@ -3842,6 +4825,195 @@ describe('Live Weather Admin worker', () => {
 		expect(summary.hash).toBeTruthy();
 	});
 
+	it('buildHazardClusters ranks the strongest hazard family ahead of weaker flood coverage', () => {
+		const { buildDigestCandidates, buildHazardClusters, buildDigestSummary } = __testing as any;
+
+		const alertMap: Record<string, any> = {};
+		const winterStates = ['MN', 'WI', 'SD', 'ND', 'MT'];
+		const floodStates = ['NY', 'PA', 'OH', 'WV', 'VA', 'MD'];
+
+		for (const [i, state] of winterStates.entries()) {
+			alertMap[`winter-${i}`] = {
+				id: `winter-${i}`,
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					areaDesc: `Test County, ${state}`,
+					geocode: { UGC: [`${state}C001`] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+					urgency: 'Immediate',
+					certainty: 'Likely',
+				},
+			};
+		}
+
+		for (const [i, state] of floodStates.entries()) {
+			alertMap[`flood-${i}`] = {
+				id: `flood-${i}`,
+				properties: {
+					event: 'Flood Advisory',
+					severity: 'Moderate',
+					areaDesc: `Test County, ${state}`,
+					geocode: { UGC: [`${state}C001`] },
+					status: 'Actual',
+					headline: 'Flood advisory',
+					description: 'Minor flooding is possible.',
+					urgency: 'Expected',
+					certainty: 'Likely',
+				},
+			};
+		}
+
+		const candidates = buildDigestCandidates(alertMap, new Set<string>());
+		const clusters = buildHazardClusters(candidates);
+
+		expect(clusters.map((cluster: any) => cluster.family)).toEqual(['winter', 'flood']);
+		expect(clusters[0].warningCount).toBe(5);
+		expect(clusters[1].warningCount).toBe(0);
+
+		const summary = buildDigestSummary(
+			candidates,
+			clusters,
+			['MN', 'WI', 'SD', 'ND', 'MT', 'NY'],
+			'incident',
+			null,
+		);
+
+		expect(summary.hazardFocus).toBe('winter');
+		expect(summary.topAlertTypes).toContain('Winter Storm Warning');
+	});
+
+	it('selectDigestPrimaryCluster falls back to a different hazard family when the top one is cooling down', () => {
+		const { selectDigestPrimaryCluster } = __testing as any;
+		const nowMs = Date.UTC(2026, 3, 1, 13, 0, 0);
+		const fortyMinutesAgo = new Date(nowMs - 40 * 60 * 1000).toISOString();
+
+		const winterCluster = {
+			family: 'winter',
+			states: ['OH', 'NY', 'WI'],
+			score: 18,
+			alertCount: 5,
+			warningCount: 2,
+			topAlertTypes: ['Winter Weather Advisory'],
+		};
+		const floodCluster = {
+			family: 'flood',
+			states: ['TX', 'OK'],
+			score: 10,
+			alertCount: 4,
+			warningCount: 1,
+			topAlertTypes: ['Flood Warning'],
+		};
+
+		const selected = selectDigestPrimaryCluster(
+			[winterCluster, floodCluster],
+			null,
+			{
+				blockId: 'block-previous',
+				publishedAt: fortyMinutesAgo,
+				hash: 'winter-hash',
+				postId: 'post-1',
+				hazardFocus: 'winter',
+				lastPublishedAtByFocus: {
+					winter: fortyMinutesAgo,
+				},
+			},
+			nowMs,
+		);
+
+		expect(selected?.family).toBe('flood');
+	});
+
+	it('canPostNewDigest keeps the active thread during the hourly cooldown and enforces the two-post hourly cap', async () => {
+		const { canPostNewDigest } = __testing as any;
+		const startMs = Date.UTC(2026, 3, 1, 12, 0, 0);
+		const publishedAt = new Date(startMs).toISOString();
+		const blockId = `block-${Math.floor(startMs / (60 * 60 * 1000))}`;
+
+		await env.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId,
+			publishedAt,
+			hash: 'flood-hash',
+			postId: 'post-1',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: {
+				flood: publishedAt,
+			},
+		}));
+		await env.WEATHER_KV.put(`fb:digest-thread:${blockId}`, JSON.stringify({
+			postId: 'post-1',
+			blockId,
+			publishedAt,
+			hash: 'flood-hash',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				mode: 'normal',
+				postType: 'digest',
+				hazardFocus: 'flood',
+				states: ['OH'],
+				topAlertTypes: ['Flood Warning'],
+				urgency: 'moderate',
+				alertCount: 3,
+				warningCount: 1,
+				hash: 'flood-hash',
+			},
+		}));
+
+		const duringHour = await canPostNewDigest(env, startMs + 31 * 60 * 1000, 'winter');
+		expect(duringHour.allowed).toBe(false);
+		expect(duringHour.reason).toBe('same_block');
+		expect(duringHour.existingThread?.postId).toBe('post-1');
+
+		const secondPublishedAt = new Date(startMs + 20 * 60 * 1000).toISOString();
+		await env.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId,
+			publishedAt: secondPublishedAt,
+			hash: 'flood-hash-2',
+			postId: 'post-2',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: {
+				flood: secondPublishedAt,
+			},
+			recentPostTimestamps: [publishedAt, secondPublishedAt],
+		}));
+
+		const capped = await canPostNewDigest(env, startMs + 45 * 60 * 1000, 'winter');
+		expect(capped.allowed).toBe(false);
+		expect(capped.reason).toBe('hourly_post_cap');
+
+		const afterHour = await canPostNewDigest(env, startMs + 81 * 60 * 1000, 'flood');
+		expect(afterHour.allowed).toBe(true);
+		expect(afterHour.reason).toBeNull();
+	});
+
+	it('checkClusterBreakout only uses the flood override for actual flood warnings', () => {
+		const { checkClusterBreakout } = __testing as any;
+
+		const breakout = checkClusterBreakout([
+			{
+				family: 'flood',
+				states: ['NY', 'PA'],
+				score: 18,
+				alertCount: 10,
+				warningCount: 0,
+				topAlertTypes: ['Flood Advisory'],
+			},
+			{
+				family: 'winter',
+				states: ['MN', 'WI'],
+				score: 18,
+				alertCount: 6,
+				warningCount: 2,
+				topAlertTypes: ['Winter Weather Advisory'],
+			},
+		]);
+
+		expect(breakout).toBeNull();
+	});
+
 	it('buildStartupSnapshotText creates a readable snapshot with date', () => {
 		const { buildStartupSnapshotText } = __testing;
 
@@ -3851,19 +5023,18 @@ describe('Live Weather Admin worker', () => {
 		];
 
 		const text = buildStartupSnapshotText(clusters as any, 8);
-		expect(text).toContain('CURRENT WEATHER SITUATION');
-		expect(text).toContain('8 active weather alerts');
-		expect(text).toContain('Flooding concerns');
-		expect(text).toContain('OH');
-		expect(text).toContain('Winter weather');
+		expect(text).toContain('Flooding is the main weather story right now');
+		expect(text).toContain('Ohio, Indiana, and Illinois');
+		expect(text).toContain('Winter weather is also active');
+		expect(text).toContain('8 active weather alerts are posted nationwide');
 		expect(text).toContain('liveweatheralerts.com');
 	});
 
 	it('buildStartupSnapshotText handles empty clusters gracefully', () => {
 		const { buildStartupSnapshotText } = __testing;
 		const text = buildStartupSnapshotText([], 0);
-		expect(text).toContain('CURRENT WEATHER SITUATION');
-		expect(text).toContain('No significant weather');
+		expect(text).toContain('Quiet weather is the main story nationwide right now.');
+		expect(text).toContain('No significant weather alerts are active');
 	});
 
 	it('validateLlmOutput rejects empty output', () => {
@@ -3892,7 +5063,7 @@ describe('Live Weather Admin worker', () => {
 	it('validateLlmOutput rejects output with hashtags', () => {
 		const { validateLlmOutput } = __testing;
 		// Use state abbreviation so the geography check passes, then hashtag check should fire
-		const payload = { states: ['TX'], top_alert_types: [], hazard_focus: null, mode: 'normal', post_type: 'digest', urgency: 'low', max_length: 450, style: '' } as any;
+		const payload = { states: ['TX'], regional_focus: 'Plains', example_states: ['Texas'], trend: 'continuing', impact: ['wind'], top_alert_types: [], hazard_focus: null, mode: 'normal', post_type: 'digest', urgency: 'low', max_length: 450, style: '', recent_openings: [] } as any;
 		const withHashtag = 'Flooding conditions in TX. #weather #wx';
 		expect(validateLlmOutput(withHashtag, payload).valid).toBe(false);
 		expect(validateLlmOutput(withHashtag, payload).failureReason).toBe('contains_hashtag');
@@ -3900,7 +5071,7 @@ describe('Live Weather Admin worker', () => {
 
 	it('validateLlmOutput accepts valid short text with state mention', () => {
 		const { validateLlmOutput } = __testing;
-		const payload = { states: ['OH', 'IN'], top_alert_types: ['Flood Warning'], hazard_focus: 'flood', mode: 'normal', post_type: 'digest', urgency: 'high', max_length: 450, style: '' } as any;
+		const payload = { states: ['OH', 'IN'], regional_focus: 'Midwest', example_states: ['Ohio', 'Indiana'], trend: 'intensifying', impact: ['flooding', 'travel'], top_alert_types: ['Flood Warning'], hazard_focus: 'flood', mode: 'normal', post_type: 'digest', urgency: 'high', max_length: 450, style: '', recent_openings: [] } as any;
 		const good = 'Flooding concerns are active across Ohio and Indiana this afternoon. Monitor local forecasts and follow NWS guidance for your area.';
 		const result = validateLlmOutput(good, payload);
 		expect(result.valid).toBe(true);
@@ -3909,10 +5080,719 @@ describe('Live Weather Admin worker', () => {
 
 	it('validateLlmOutput accepts national/regional geography markers without state codes', () => {
 		const { validateLlmOutput } = __testing;
-		const payload = { states: ['TX', 'OK'], top_alert_types: ['Red Flag Warning'], hazard_focus: 'fire', mode: 'incident', post_type: 'digest', urgency: 'high', max_length: 450, style: '' } as any;
+		const payload = { states: ['TX', 'OK'], regional_focus: 'Plains', example_states: ['Texas', 'Oklahoma'], trend: 'expanding', impact: ['fire weather', 'wind'], top_alert_types: ['Red Flag Warning'], hazard_focus: 'fire', mode: 'incident', post_type: 'digest', urgency: 'high', max_length: 450, style: '', recent_openings: [] } as any;
 		const national = 'Critical fire weather conditions are widespread across the Southern Plains. High winds and low humidity continue to elevate fire risk.';
 		const result = validateLlmOutput(national, payload);
 		expect(result.valid).toBe(true);
+	});
+
+	it('buildLlmPayload derives regional focus, state names, trend, and impacts', () => {
+		const { buildLlmPayload } = __testing as any;
+		const payload = buildLlmPayload({
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'winter',
+			states: ['OH', 'NY', 'IN', 'MO'],
+			topAlertTypes: ['Winter Storm Warning', 'Wind Advisory'],
+			urgency: 'moderate',
+			alertCount: 8,
+			hash: 'winter-cluster',
+		}, ['Strong winds are affecting parts of the country.']);
+
+		expect(payload.regional_focus).toBe('Midwest and Northeast');
+		expect(payload.example_states).toEqual(['Ohio', 'New York', 'Indiana', 'Missouri']);
+		expect(payload.trend).toBe('expanding');
+		expect(payload.impact).toEqual(expect.arrayContaining(['snow', 'travel', 'wind']));
+		expect(payload.recent_openings).toEqual(['Strong winds are affecting parts of the country.']);
+	});
+
+	it('buildLlmPayload applies the flood-plus-Texas regional override', () => {
+		const { buildLlmPayload } = __testing as any;
+		const payload = buildLlmPayload({
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'flood',
+			states: ['TX', 'LA', 'MS'],
+			topAlertTypes: ['Flood Warning', 'Flash Flood Warning'],
+			urgency: 'high',
+			alertCount: 6,
+			hash: 'tx-flood',
+		}, []);
+
+		expect(payload.regional_focus).toBe('Gulf Coast and Southeast');
+	});
+
+	it('buildLlmPayload applies the coastal regional override when coastal impacts lead', () => {
+		const { buildLlmPayload } = __testing as any;
+		const payload = buildLlmPayload({
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'other',
+			states: ['FL', 'SC'],
+			topAlertTypes: ['Coastal Flood Advisory', 'High Surf Advisory'],
+			urgency: 'moderate',
+			alertCount: 4,
+			hash: 'coastal-focus',
+		}, []);
+
+		expect(payload.impact).toContain('coastal conditions');
+		expect(payload.regional_focus).toBe('Coastal areas');
+	});
+
+	it('buildLlmPayload applies the fire-plus-southwest regional override', () => {
+		const { buildLlmPayload } = __testing as any;
+		const payload = buildLlmPayload({
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'fire',
+			states: ['TX', 'OK'],
+			topAlertTypes: ['Red Flag Warning', 'Fire Weather Watch'],
+			urgency: 'high',
+			alertCount: 5,
+			hash: 'fire-sw',
+		}, []);
+
+		expect(payload.regional_focus).toBe('Southwest');
+	});
+
+	it('buildUserPrompt uses regional context and anti-repetition guidance', () => {
+		const { buildUserPrompt } = __testing as any;
+		const prompt = buildUserPrompt({
+			mode: 'incident',
+			post_type: 'cluster',
+			hazard_focus: 'flood',
+			states: ['OH', 'NY', 'IN', 'MO'],
+			regional_focus: 'Midwest and Northeast',
+			example_states: ['Ohio', 'New York', 'Indiana', 'Missouri'],
+			trend: 'intensifying',
+			change_hint: 'intensity increased; impact shifting from Midwest toward Northeast',
+			impact: ['flooding', 'travel'],
+			top_alert_types: ['Flood Warning', 'Flood Watch'],
+			urgency: 'high',
+			max_length: 450,
+			style: 'live national weather desk update, clear, concise, distinct, no hype',
+			recent_openings: [
+				'A high-volume flood alert surge...',
+				'Strong winds are affecting...',
+			],
+		});
+
+		expect(prompt).toContain('Regional focus: Midwest and Northeast.');
+		expect(prompt).toContain('Example states: Ohio, New York, Indiana, Missouri.');
+		expect(prompt).toContain('Trend: intensifying.');
+		expect(prompt).toContain('Change hint: intensity increased; impact shifting from Midwest toward Northeast.');
+		expect(prompt).toContain('Lead with what changed since the last digest update, not a static list of current alerts.');
+		expect(prompt).toContain('Tell readers what changed since the last digest instead of summarizing the full alert board from scratch.');
+		expect(prompt).toContain('Impact: flooding, travel.');
+		expect(prompt).toContain('Avoid repeating these structures or phrasing:');
+		expect(prompt).not.toContain('Affected states:');
+		expect(prompt).not.toContain('High-volume national alert surge.');
+	});
+
+	it('buildUserPrompt adds update-comment framing for digest comments', () => {
+		const { buildUserPrompt } = __testing as any;
+		const prompt = buildUserPrompt({
+			mode: 'incident',
+			post_type: 'cluster',
+			output_mode: 'comment',
+			hazard_focus: 'flood',
+			states: ['OH', 'IN'],
+			regional_focus: 'Midwest',
+			example_states: ['Ohio', 'Indiana'],
+			trend: 'expanding',
+			change_hint: 'new states added: Indiana; intensity increased',
+			impact: ['flooding', 'travel'],
+			top_alert_types: ['Flood Warning'],
+			urgency: 'high',
+			max_length: 450,
+			style: 'live national weather desk update comment, brief, direct, change-focused, no hype',
+			recent_openings: ['Flooding is building across Ohio tonight.'],
+		});
+
+		expect(prompt).toContain('Format: this is an UPDATE comment on an existing Facebook post.');
+		expect(prompt).toContain('Start with "UPDATE:".');
+		expect(prompt).toContain('You MUST describe what changed since the last post.');
+		expect(prompt).toContain('Keep the update centered on flooding in Midwest.');
+		expect(prompt).toContain('Do not pivot to a different primary hazard or a different lead region.');
+		expect(prompt).toContain('DO NOT restate the full situation.');
+		expect(prompt).toContain('Assume the reader already saw the previous post.');
+		expect(prompt).toContain('Change hint: new states added: Indiana; intensity increased.');
+		expect(prompt).toContain('Do not restart with a broad national summary.');
+	});
+
+	it('buildCommentChangeHint summarizes what shifted since the last digest update', () => {
+		const { buildCommentChangeHint } = __testing as any;
+		const changeHint = buildCommentChangeHint({
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'flood',
+			states: ['OH'],
+			topAlertTypes: ['Flood Watch'],
+			urgency: 'moderate',
+			alertCount: 3,
+			hash: 'prev',
+		}, {
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'flood',
+			states: ['OH', 'IN'],
+			topAlertTypes: ['Flood Warning'],
+			urgency: 'high',
+			alertCount: 5,
+			hash: 'next',
+		});
+
+		expect(changeHint).toBe('new states added: Indiana; intensity increased; alerts now led by Flood Warning');
+	});
+
+	it('buildCommentChangeHint uses regional overrides when comparing digest shifts', () => {
+		const { buildCommentChangeHint } = __testing as any;
+		const changeHint = buildCommentChangeHint({
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'flood',
+			states: ['TX'],
+			topAlertTypes: ['Flood Watch'],
+			urgency: 'moderate',
+			alertCount: 2,
+			hash: 'prev-tx-flood',
+		}, {
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'flood',
+			states: ['TX', 'LA'],
+			topAlertTypes: ['Flood Warning'],
+			urgency: 'high',
+			alertCount: 4,
+			hash: 'next-tx-flood',
+		});
+
+		expect(changeHint).toBe('new states added: Louisiana; intensity increased; alerts now led by Flood Warning');
+		expect(changeHint).not.toContain('impact shifting from Plains');
+	});
+
+	it('evaluateDigestStoryContinuity rejects digest comment pivots into a different hazard story', () => {
+		const { evaluateDigestStoryContinuity } = __testing as any;
+		const result = evaluateDigestStoryContinuity({
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'flood',
+			states: ['OH', 'NY'],
+			topAlertTypes: ['Flood Warning'],
+			urgency: 'high',
+			alertCount: 5,
+			hash: 'prev-flood-story',
+		}, {
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'wind',
+			states: ['CA', 'NV', 'WY', 'IN'],
+			topAlertTypes: ['High Wind Warning'],
+			urgency: 'high',
+			alertCount: 6,
+			hash: 'next-wind-story',
+		});
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toBe('hazard_focus_changed');
+		expect(result.previousRegionalFocus).toBe('Midwest and Northeast');
+		expect(result.currentRegionalFocus).toBe('West and Midwest');
+	});
+
+	it('evaluateDigestStoryContinuity rejects same-hazard digest updates that jump to a different region', () => {
+		const { evaluateDigestStoryContinuity } = __testing as any;
+		const result = evaluateDigestStoryContinuity({
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'wind',
+			states: ['KS', 'OK', 'TX'],
+			topAlertTypes: ['Wind Advisory'],
+			urgency: 'moderate',
+			alertCount: 4,
+			hash: 'prev-plains-wind',
+		}, {
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'wind',
+			states: ['AZ', 'CA', 'NV'],
+			topAlertTypes: ['High Wind Warning'],
+			urgency: 'high',
+			alertCount: 5,
+			hash: 'next-west-wind',
+		});
+
+		expect(result.allowed).toBe(false);
+		expect(result.reason).toBe('regional_focus_changed');
+		expect(result.previousRegionalFocus).toBe('Plains');
+		expect(result.currentRegionalFocus).toBe('West and Southwest');
+	});
+
+	it('evaluateDigestChangeThresholds distinguishes routine updates from override-worthy digest changes', () => {
+		const { evaluateDigestChangeThresholds } = __testing as any;
+		const previousSummary = {
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'flood',
+			states: ['OH'],
+			topAlertTypes: ['Flood Watch'],
+			urgency: 'moderate',
+			alertCount: 3,
+			warningCount: 1,
+			hash: 'prev-digest',
+		} as any;
+
+		const routine = evaluateDigestChangeThresholds(previousSummary, {
+			...previousSummary,
+			alertCount: 4,
+			warningCount: 1,
+			hash: 'routine-digest',
+		});
+		expect(routine.meaningfulPostChange).toBe(false);
+		expect(routine.meaningfulCommentChange).toBe(false);
+		expect(routine.overrideNewPost).toBe(false);
+
+		const override = evaluateDigestChangeThresholds(previousSummary, {
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'flood',
+			states: ['OH', 'IN'],
+			topAlertTypes: ['Flood Warning'],
+			urgency: 'high',
+			alertCount: 8,
+			warningCount: 4,
+			hash: 'override-digest',
+		});
+		expect(override.addedStates).toEqual(['IN']);
+		expect(override.majorEscalation).toBe(true);
+		expect(override.outbreakBegan).toBe(true);
+		expect(override.meaningfulCommentChange).toBe(true);
+		expect(override.meaningfulPostChange).toBe(true);
+		expect(override.overrideNewPost).toBe(true);
+	});
+
+	it('getDigestImageUrl selects hazard-specific digest art', () => {
+		const { getDigestImageUrl } = __testing as any;
+		const imageEnv = {
+			FB_IMAGE_BASE_URL: 'https://cdn.example.com',
+		} as any;
+
+		expect(getDigestImageUrl(imageEnv, 'flood')).toBe('https://cdn.example.com/images/flooding-alerts.png');
+		expect(getDigestImageUrl(imageEnv, 'winter')).toBe('https://cdn.example.com/images/winter-storm-alerts.png');
+		expect(getDigestImageUrl(imageEnv, 'wind')).toBe('https://cdn.example.com/images/weather-alerts.png');
+	});
+
+	it('validateLlmOutput rejects banned stock phrases and accepts full state names', () => {
+		const { validateLlmOutput } = __testing;
+		const payload = {
+			states: ['PA', 'MO'],
+			regional_focus: 'Midwest and Northeast',
+			example_states: ['Pennsylvania', 'Missouri'],
+			trend: 'continuing',
+			impact: ['flooding'],
+			top_alert_types: ['Flood Warning'],
+			hazard_focus: 'flood',
+			mode: 'normal',
+			post_type: 'digest',
+			urgency: 'moderate',
+			max_length: 450,
+			style: '',
+			recent_openings: [],
+		} as any;
+
+		expect(validateLlmOutput('Flooding is affecting several states including Pennsylvania and Missouri.', payload).failureReason)
+			.toBe('contains_banned_phrase_affecting_several_states');
+		expect(validateLlmOutput('Flooding is active across parts of the country, especially Pennsylvania.', payload).failureReason)
+			.toBe('contains_banned_phrase_parts_of_country');
+		expect(validateLlmOutput('Flood alerts are in effect across Pennsylvania this evening.', payload).failureReason)
+			.toBe('contains_banned_phrase_alerts_in_effect');
+		expect(validateLlmOutput('Flooding is intensifying in Pennsylvania this evening.', payload).failureReason)
+			.toBe('contains_formulaic_change_phrase_is_intensifying');
+		expect(validateLlmOutput('Flooding is expanding into Missouri tonight.', payload).failureReason)
+			.toBe('contains_formulaic_change_phrase_is_expanding');
+		expect(validateLlmOutput('Flooding continues in Pennsylvania and Missouri tonight with road impacts in low-lying areas.', payload).valid)
+			.toBe(true);
+	});
+
+	it('validateLlmOutput requires UPDATE prefix for digest comments', () => {
+		const { validateLlmOutput } = __testing;
+		const payload = {
+			states: ['OH'],
+			regional_focus: 'Midwest',
+			example_states: ['Ohio'],
+			trend: 'continuing',
+			impact: ['flooding'],
+			top_alert_types: ['Flood Warning'],
+			hazard_focus: 'flood',
+			mode: 'normal',
+			post_type: 'digest',
+			output_mode: 'comment',
+			urgency: 'moderate',
+			max_length: 450,
+			style: '',
+			recent_openings: [],
+		} as any;
+
+		expect(validateLlmOutput('Flooding continues in Ohio tonight with road impacts in low-lying areas.', payload).failureReason)
+			.toBe('missing_update_prefix');
+		expect(validateLlmOutput('UPDATE: Flooding continues in Ohio tonight with road impacts in low-lying areas.', payload).valid)
+			.toBe(true);
+	});
+
+	it('recordRecentDigestOpening keeps the newest distinct openings first', async () => {
+		const { recordRecentDigestOpening, readRecentDigestOpenings } = __testing as any;
+
+		await recordRecentDigestOpening(env, 'Flooding is building across Ohio tonight. Travel impacts are increasing.');
+		await recordRecentDigestOpening(env, 'Snow and wind are pushing through New York and Pennsylvania this evening.');
+		await recordRecentDigestOpening(env, 'Flooding is building across Ohio tonight. Travel impacts are increasing.');
+
+		const openings = await readRecentDigestOpenings(env);
+		expect(openings).toEqual([
+			'Flooding is building across Ohio tonight.',
+			'Snow and wind are pushing through New York and Pennsylvania this evening.',
+		]);
+	});
+
+	it('runDigestCoverage records startup snapshot openings without calling the digest writer', async () => {
+		const { runDigestCoverage, readRecentDigestOpenings } = __testing as any;
+		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const copyFn = vi.fn(async () => 'unused');
+		await goodEnv.WEATHER_KV.put('fb:digest:recent-openings', JSON.stringify({ openings: [], updatedAt: new Date().toISOString() }));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', '');
+
+		await runDigestCoverage(goodEnv, {
+			'alert-startup-1': {
+				id: 'alert-startup-1',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Ohio County',
+					geocode: { UGC: ['OHC001', 'INC001', 'ILC001'] },
+					status: 'Actual',
+					headline: 'Flood Warning remains in effect',
+					description: 'Flooding continues across the region.',
+				},
+			},
+		}, copyFn);
+
+		expect(copyFn).not.toHaveBeenCalled();
+		const openings = await readRecentDigestOpenings(goodEnv);
+		expect(openings.length).toBeGreaterThan(0);
+		expect(openings[0]).toMatch(/Flooding is the main weather story right now across/i);
+	});
+
+	it('runDigestCoverage uses comment-mode copy for same-block digest updates', async () => {
+		const { runDigestCoverage, readRecentDigestOpenings } = __testing as any;
+		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const nowMs = Date.now();
+		const publishedAt = new Date(nowMs - 5 * 60 * 1000).toISOString();
+		const blockId = `block-${Math.floor(nowMs / (30 * 60 * 1000))}`;
+		const copyFn = vi.fn(async (_env: any, _summary: any, outputMode = 'post') => (
+			outputMode === 'comment'
+				? 'UPDATE: Flooding is intensifying in Ohio and Indiana tonight with travel impacts building.'
+				: 'Flooding is the main weather story across Ohio and Indiana tonight.'
+		));
+
+		await goodEnv.WEATHER_KV.put('fb:digest:recent-openings', JSON.stringify({ openings: [], updatedAt: new Date().toISOString() }));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', publishedAt);
+		await goodEnv.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId,
+			publishedAt,
+			hash: 'existing-block-hash',
+			postId: '12345',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: { flood: publishedAt },
+		}));
+		await goodEnv.WEATHER_KV.put(`fb:digest-thread:${blockId}`, JSON.stringify({
+			postId: '12345',
+			blockId,
+			publishedAt,
+			hash: 'older-thread-hash',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				mode: 'normal',
+				postType: 'digest',
+				hazardFocus: 'flood',
+				states: ['OH'],
+				topAlertTypes: ['Flood Warning'],
+				urgency: 'moderate',
+				alertCount: 1,
+				warningCount: 1,
+				hash: 'older-thread-hash',
+			},
+		}));
+
+		await runDigestCoverage(goodEnv, {
+			'alert-comment-1': {
+				id: 'alert-comment-1',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Moderate',
+					urgency: 'Immediate',
+					areaDesc: 'Ohio and Indiana counties',
+					geocode: { UGC: ['OHC001', 'INC001'] },
+					status: 'Actual',
+					headline: 'Flood Warning remains in effect',
+					description: 'Flooding continues and is worsening in low-lying areas.',
+				},
+			},
+		}, copyFn);
+
+		expect(copyFn).toHaveBeenCalled();
+		expect(copyFn.mock.calls[0][2]).toBe('comment');
+		expect(copyFn.mock.calls[0][1].changeHint).toBe('new states added: Indiana');
+		const openings = await readRecentDigestOpenings(goodEnv);
+		expect(openings[0]).toBe('Flooding is intensifying in Ohio and Indiana tonight with travel impacts building.');
+	});
+
+	it('runDigestCoverage posts a new override digest within the hour when warnings spike sharply', async () => {
+		const { runDigestCoverage, readDigestThread } = __testing as any;
+		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const nowMs = Date.now();
+		const publishedAt = new Date(nowMs - 20 * 60 * 1000).toISOString();
+		const blockId = `block-${Math.floor(nowMs / (60 * 60 * 1000))}`;
+		const copyFn = vi.fn(async (_env: any, _summary: any, outputMode = 'post') => (
+			outputMode === 'comment'
+				? 'UPDATE: This should not be used for the override path.'
+				: 'Flooding continues to spread across Ohio and Indiana. Additional warnings are now coming into the story this hour.'
+		));
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: new Date().toISOString(),
+			digestCoverageEnabled: true,
+			digestCommentUpdatesEnabled: true,
+			digestMaxCommentsPerThread: 3,
+			digestMinCommentGapMinutes: 20,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', publishedAt);
+		await goodEnv.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId,
+			publishedAt,
+			hash: 'older-flood-hash',
+			postId: '12345',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: { flood: publishedAt },
+			recentPostTimestamps: [publishedAt],
+		}));
+		await goodEnv.WEATHER_KV.put(`fb:digest-thread:${blockId}`, JSON.stringify({
+			postId: '12345',
+			blockId,
+			publishedAt,
+			hash: 'older-flood-hash',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				mode: 'normal',
+				postType: 'digest',
+				hazardFocus: 'flood',
+				states: ['OH', 'IN'],
+				topAlertTypes: ['Flood Watch'],
+				urgency: 'moderate',
+				alertCount: 2,
+				warningCount: 1,
+				hash: 'older-flood-hash',
+			},
+		}));
+
+		await runDigestCoverage(goodEnv, {
+			'alert-override-1': {
+				id: 'alert-override-1',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Ohio and Indiana counties',
+					geocode: { UGC: ['OHC001', 'INC001'] },
+					status: 'Actual',
+					headline: 'Flood Warning remains in effect',
+					description: 'Flooding continues and warnings are increasing in coverage.',
+				},
+			},
+			'alert-override-2': {
+				id: 'alert-override-2',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Additional Ohio and Indiana counties',
+					geocode: { UGC: ['OHC003', 'INC003'] },
+					status: 'Actual',
+					headline: 'Additional Flood Warning posted',
+					description: 'Flooding continues in more low-lying areas.',
+				},
+			},
+			'alert-override-3': {
+				id: 'alert-override-3',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Even more Ohio and Indiana counties',
+					geocode: { UGC: ['OHC005', 'INC005'] },
+					status: 'Actual',
+					headline: 'Flood Warning expanded again',
+					description: 'Warnings continue to increase as flooding worsens.',
+				},
+			},
+			'alert-override-4': {
+				id: 'alert-override-4',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'New flood warning counties in Ohio and Indiana',
+					geocode: { UGC: ['OHC007', 'INC007'] },
+					status: 'Actual',
+					headline: 'Flood Warning expanded again',
+					description: 'Warnings continue to increase as flooding worsens.',
+				},
+			},
+		}, copyFn);
+
+		expect(copyFn).toHaveBeenCalled();
+		expect(copyFn.mock.calls[0][2]).toBe('post');
+		expect(copyFn.mock.calls[0][1].changeHint).toContain('intensity increased');
+		expect((globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) => String(input).includes('/comments')).length).toBe(0);
+
+		const storedThread = await readDigestThread(goodEnv, blockId);
+		expect(storedThread?.commentCount).toBe(0);
+		expect(storedThread?.summary?.topAlertTypes[0]).toBe('Flood Warning');
+		expect(storedThread?.summary?.warningCount).toBe(4);
+	});
+
+	it('runDigestCoverage skips an hourly digest post when the story has not changed meaningfully', async () => {
+		const { runDigestCoverage } = __testing as any;
+		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const nowMs = Date.now();
+		const previousPublishedAt = new Date(nowMs - 65 * 60 * 1000).toISOString();
+		const previousBlockId = `block-${Math.floor((nowMs - 65 * 60 * 1000) / (60 * 60 * 1000))}`;
+		const copyFn = vi.fn(async () => 'This should not post.');
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: new Date().toISOString(),
+			digestCoverageEnabled: true,
+			digestCommentUpdatesEnabled: true,
+			digestMaxCommentsPerThread: 3,
+			digestMinCommentGapMinutes: 20,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', previousPublishedAt);
+		await goodEnv.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId: previousBlockId,
+			publishedAt: previousPublishedAt,
+			hash: 'steady-flood-hash',
+			postId: 'steady-post',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: { flood: previousPublishedAt },
+			recentPostTimestamps: [previousPublishedAt],
+		}));
+		await goodEnv.WEATHER_KV.put(`fb:digest-thread:${previousBlockId}`, JSON.stringify({
+			postId: 'steady-post',
+			blockId: previousBlockId,
+			publishedAt: previousPublishedAt,
+			hash: 'steady-flood-hash',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				mode: 'normal',
+				postType: 'digest',
+				hazardFocus: 'flood',
+				states: ['OH'],
+				topAlertTypes: ['Flood Watch'],
+				urgency: 'moderate',
+				alertCount: 3,
+				warningCount: 1,
+				hash: 'steady-flood-hash',
+			},
+		}));
+		await goodEnv.WEATHER_KV.put('fb:digest:hash', 'steady-flood-hash');
+
+		await runDigestCoverage(goodEnv, {
+			'alert-steady-1': {
+				id: 'alert-steady-1',
+				properties: {
+					event: 'Flood Watch',
+					severity: 'Moderate',
+					urgency: 'Expected',
+					areaDesc: 'Ohio County',
+					geocode: { UGC: ['OHC001'] },
+					status: 'Actual',
+					headline: 'Flood Watch remains in effect',
+					description: 'Minor flooding concerns continue in the same area.',
+				},
+			},
+		}, copyFn);
+
+		expect(copyFn).not.toHaveBeenCalled();
+		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) => String(input).includes('/feed'))).toBe(false);
+		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) => String(input).includes('/comments'))).toBe(false);
+	});
+
+	it('runDigestCoverage skips same-block digest comments when the story pivots away from the parent thread', async () => {
+		const { runDigestCoverage, readDigestThread, readRecentDigestOpenings } = __testing as any;
+		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const nowMs = Date.now();
+		const publishedAt = new Date(nowMs - 5 * 60 * 1000).toISOString();
+		const blockId = `block-${Math.floor(nowMs / (30 * 60 * 1000))}`;
+		const copyFn = vi.fn(async () => 'UPDATE: This comment should never be posted.');
+
+		await goodEnv.WEATHER_KV.put('fb:digest:recent-openings', JSON.stringify({ openings: [], updatedAt: new Date().toISOString() }));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', publishedAt);
+		await goodEnv.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId,
+			publishedAt,
+			hash: 'existing-block-hash',
+			postId: '12345',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: { flood: publishedAt },
+		}));
+		await goodEnv.WEATHER_KV.put(`fb:digest-thread:${blockId}`, JSON.stringify({
+			postId: '12345',
+			blockId,
+			publishedAt,
+			hash: 'older-thread-hash',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				mode: 'incident',
+				postType: 'cluster',
+				hazardFocus: 'flood',
+				states: ['OH', 'NY'],
+				topAlertTypes: ['Flood Warning'],
+				urgency: 'high',
+				alertCount: 3,
+				hash: 'older-thread-hash',
+			},
+		}));
+
+		await runDigestCoverage(goodEnv, {
+			'alert-comment-shift': {
+				id: 'alert-comment-shift',
+				properties: {
+					event: 'High Wind Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'California, Nevada, Wyoming, and Indiana counties',
+					geocode: { UGC: ['CAC001', 'NVC001', 'WYC001', 'INC001'] },
+					status: 'Actual',
+					headline: 'High Wind Warning remains in effect',
+					description: 'Strong winds continue across the West and into parts of the Midwest.',
+				},
+			},
+		}, copyFn);
+
+		expect(copyFn).not.toHaveBeenCalled();
+		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) => String(input).includes('/comments'))).toBe(false);
+
+		const thread = await readDigestThread(goodEnv, blockId);
+		expect(thread?.commentCount).toBe(0);
+		expect(thread?.hash).toBe('older-thread-hash');
+		expect(thread?.summary?.hazardFocus).toBe('flood');
+
+		const openings = await readRecentDigestOpenings(goodEnv);
+		expect(openings).toEqual([]);
 	});
 
 	it('generateDigestCopy falls back to template when AI is unavailable', async () => {
@@ -3937,7 +5817,7 @@ describe('Live Weather Admin worker', () => {
 		expect(result.toLowerCase()).toMatch(/flood/);
 	});
 
-	it('admin auto-post-config endpoint saves and returns new digest fields', async () => {
+	it('admin auto-post-config endpoint saves and returns multi-day SPC settings', async () => {
 		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
 		const loginResp = await worker.fetch(
 			new IncomingRequest('https://live-weather.example/admin/login', {
@@ -3957,8 +5837,20 @@ describe('Live Weather Admin worker', () => {
 			body: JSON.stringify({
 				mode: 'smart_high_impact',
 				digestCoverageEnabled: true,
+				digestCommentUpdatesEnabled: true,
+				digestMaxCommentsPerThread: 2,
+				digestMinCommentGapMinutes: 25,
 				llmCopyEnabled: true,
 				startupCatchupEnabled: true,
+				spcDay1CoverageEnabled: true,
+				spcDay1MinRiskLevel: 'slight',
+				spcDay2CoverageEnabled: true,
+				spcDay2MinRiskLevel: 'enhanced',
+				spcDay3CoverageEnabled: true,
+				spcDay3MinRiskLevel: 'moderate',
+				spcHashtagsEnabled: false,
+				spcLlmEnabled: true,
+				spcTimingRefreshEnabled: false,
 			}),
 		});
 		const response = await worker.fetch(configRequest, goodEnv as any, ctx);
@@ -3968,19 +5860,47 @@ describe('Live Weather Admin worker', () => {
 		expect(json.success).toBe(true);
 		expect(json.config.mode).toBe('smart_high_impact');
 		expect(json.config.digestCoverageEnabled).toBe(true);
+		expect(json.config.digestCommentUpdatesEnabled).toBe(true);
+		expect(json.config.digestMaxCommentsPerThread).toBe(2);
+		expect(json.config.digestMinCommentGapMinutes).toBe(25);
 		expect(json.config.llmCopyEnabled).toBe(true);
 		expect(json.config.startupCatchupEnabled).toBe(true);
+		expect(json.config.spcCoverageEnabled).toBe(true);
+		expect(json.config.spcMinRiskLevel).toBe('slight');
+		expect(json.config.spcDay1CoverageEnabled).toBe(true);
+		expect(json.config.spcDay1MinRiskLevel).toBe('slight');
+		expect(json.config.spcDay2CoverageEnabled).toBe(true);
+		expect(json.config.spcDay2MinRiskLevel).toBe('enhanced');
+		expect(json.config.spcDay3CoverageEnabled).toBe(true);
+		expect(json.config.spcDay3MinRiskLevel).toBe('moderate');
+		expect(json.config.spcHashtagsEnabled).toBe(false);
+		expect(json.config.spcLlmEnabled).toBe(true);
+		expect(json.config.spcTimingRefreshEnabled).toBe(false);
 
 		// Re-read from KV to confirm persistence
 		const stored = await goodEnv.WEATHER_KV.get('fb:auto-post-config');
 		expect(stored).not.toBeNull();
 		const parsed = JSON.parse(stored!);
 		expect(parsed.digestCoverageEnabled).toBe(true);
+		expect(parsed.digestCommentUpdatesEnabled).toBe(true);
+		expect(parsed.digestMaxCommentsPerThread).toBe(2);
+		expect(parsed.digestMinCommentGapMinutes).toBe(25);
 		expect(parsed.llmCopyEnabled).toBe(true);
 		expect(parsed.startupCatchupEnabled).toBe(true);
+		expect(parsed.spcCoverageEnabled).toBe(true);
+		expect(parsed.spcMinRiskLevel).toBe('slight');
+		expect(parsed.spcDay1CoverageEnabled).toBe(true);
+		expect(parsed.spcDay1MinRiskLevel).toBe('slight');
+		expect(parsed.spcDay2CoverageEnabled).toBe(true);
+		expect(parsed.spcDay2MinRiskLevel).toBe('enhanced');
+		expect(parsed.spcDay3CoverageEnabled).toBe(true);
+		expect(parsed.spcDay3MinRiskLevel).toBe('moderate');
+		expect(parsed.spcHashtagsEnabled).toBe(false);
+		expect(parsed.spcLlmEnabled).toBe(true);
+		expect(parsed.spcTimingRefreshEnabled).toBe(false);
 	});
 
-	it('admin page renders digest/llm/startup checkboxes', async () => {
+	it('admin page renders digest and multi-day SPC lane controls', async () => {
 		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
 
 		// Pre-set config with all toggles on
@@ -3988,8 +5908,20 @@ describe('Live Weather Admin worker', () => {
 			mode: 'smart_high_impact',
 			updatedAt: new Date().toISOString(),
 			digestCoverageEnabled: true,
+			digestCommentUpdatesEnabled: true,
+			digestMaxCommentsPerThread: 3,
+			digestMinCommentGapMinutes: 20,
 			llmCopyEnabled: false,
 			startupCatchupEnabled: true,
+			spcDay1CoverageEnabled: true,
+			spcDay1MinRiskLevel: 'slight',
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'enhanced',
+			spcDay3CoverageEnabled: true,
+			spcDay3MinRiskLevel: 'moderate',
+			spcHashtagsEnabled: false,
+			spcLlmEnabled: true,
+			spcTimingRefreshEnabled: false,
 		}));
 
 		const loginResp = await worker.fetch(
@@ -4013,11 +5945,34 @@ describe('Live Weather Admin worker', () => {
 		const body = await response.text();
 		expect(response.status).toBe(200);
 		expect(body).toContain('digestCoverageEnabled');
+		expect(body).toContain('digestCommentUpdatesEnabled');
+		expect(body).toContain('digestMaxCommentsPerThread');
+		expect(body).toContain('digestMinCommentGapMinutes');
 		expect(body).toContain('llmCopyEnabled');
 		expect(body).toContain('startupCatchupEnabled');
+		expect(body).toContain('spcDay1CoverageEnabled');
+		expect(body).toContain('spcDay1MinRiskLevel');
+		expect(body).toContain('spcDay2CoverageEnabled');
+		expect(body).toContain('spcDay2MinRiskLevel');
+		expect(body).toContain('spcDay3CoverageEnabled');
+		expect(body).toContain('spcDay3MinRiskLevel');
+		expect(body).toContain('spcHashtagsEnabled');
+		expect(body).toContain('spcLlmEnabled');
+		expect(body).toContain('spcTimingRefreshEnabled');
 		expect(body).toContain('Digest coverage');
+		expect(body).toContain('Digest comment updates');
+		expect(body).toContain('Max digest comments per thread');
+		expect(body).toContain('Minutes between digest comments');
 		expect(body).toContain('AI-generated copy');
 		expect(body).toContain('Startup / catch-up mode');
+		expect(body).toContain('SPC Outlook Lane');
+		expect(body).toContain('SPC Day 1 coverage');
+		expect(body).toContain('SPC Day 2 coverage');
+		expect(body).toContain('SPC Day 3 coverage');
+		expect(body).toContain('Day 1 minimum risk');
+		expect(body).toContain('SPC AI polish (V1.5)');
+		expect(body).toContain('forecast-desk writing');
+		expect(body).not.toContain('Reserved for future V1.5 polish');
 	});
 
 	it('markAlertStandaloneCovered and readStandaloneCoveredAlerts round-trip correctly', async () => {

@@ -47,12 +47,178 @@ export interface FbAutoPostConfig {
 	mode: FbAutoPostMode;
 	updatedAt: string | null;
 	digestCoverageEnabled?: boolean;
+	digestCommentUpdatesEnabled?: boolean;
+	digestMaxCommentsPerThread?: number;
+	digestMinCommentGapMinutes?: number;
 	llmCopyEnabled?: boolean;
 	startupCatchupEnabled?: boolean;
+	spcCoverageEnabled?: boolean;
+	spcMinRiskLevel?: SpcRiskLevel;
+	spcDay1CoverageEnabled?: boolean;
+	spcDay1MinRiskLevel?: SpcRiskLevel;
+	spcDay2CoverageEnabled?: boolean;
+	spcDay2MinRiskLevel?: SpcRiskLevel;
+	spcDay3CoverageEnabled?: boolean;
+	spcDay3MinRiskLevel?: SpcRiskLevel;
+	spcHashtagsEnabled?: boolean;
+	spcLlmEnabled?: boolean;
+	spcTimingRefreshEnabled?: boolean;
 }
+
+export type SpcOutlookDay = 1 | 2 | 3;
+export type SpcRiskLevel = 'none' | 'marginal' | 'slight' | 'enhanced' | 'moderate' | 'high';
+export type SpcRiskNumber = 0 | 1 | 2 | 3 | 4 | 5;
+export type SpcHazardFocus = 'tornado' | 'wind' | 'hail' | 'mixed';
+export type SpcPostType = 'main_setup' | 'upgrade' | 'timing_refresh' | 'day2_lookahead' | 'day3_heads_up' | '';
+export type SpcPostReason =
+	| 'new_slight_or_higher'
+	| 'risk_upgrade'
+	| 'probability_shift'
+	| 'region_shift'
+	| 'hazard_change'
+	| 'timing_refresh'
+	| 'no_material_change'
+	| 'below_threshold';
+
+export type SpcOutlookSummary = {
+	issuedAt: string;
+	validFrom: string;
+	validTo: string;
+	outlookDay: SpcOutlookDay;
+	highestRiskLevel: SpcRiskLevel;
+	highestRiskNumber: SpcRiskNumber;
+	affectedStates: string[];
+	stateFocusText?: string | null;
+	primaryRegion: string;
+	hazardList?: string[];
+	stormMode?: string | null;
+	notableText?: string | null;
+	tornadoProbability?: number | null;
+	windProbability?: number | null;
+	hailProbability?: number | null;
+	probabilitySource?: 'geojson' | 'text' | 'none' | null;
+	riskAreas?: {
+		marginal: string[];
+		slight: string[];
+		enhanced: string[];
+		moderate: string[];
+		high: string[];
+	};
+	hazardFocus: SpcHazardFocus;
+	summaryHash: string;
+	timingText?: string | null;
+	summaryText?: string | null;
+	discussionText?: string | null;
+	imageUrl?: string | null;
+	sourceUrl?: string | null;
+	title?: string | null;
+	updatedAt?: string | null;
+};
+
+export type SpcDay1OutlookSummary = SpcOutlookSummary & {
+	outlookDay: 1;
+};
+
+export type SpcPostDecision = {
+	shouldPost: boolean;
+	reason: SpcPostReason;
+	postType: SpcPostType;
+};
+
+export type SpcOutputMode = 'post' | 'comment';
+
+export type PublishedSpcOutlookRecord = {
+	outlookDay: SpcOutlookDay;
+	issuedAt: string;
+	validFrom?: string;
+	validTo?: string;
+	postedAt: string;
+	summaryHash: string;
+	postId: string;
+	commentId?: string | null;
+	outputMode?: 'post' | 'comment';
+	highestRiskLevel: SpcRiskLevel;
+	highestRiskNumber: SpcRiskNumber;
+	affectedStates: string[];
+	stateFocusText?: string | null;
+	primaryRegion: string;
+	hazardFocus: SpcHazardFocus;
+	hazardList?: string[];
+	stormMode?: string | null;
+	notableText?: string | null;
+	tornadoProbability?: number | null;
+	windProbability?: number | null;
+	hailProbability?: number | null;
+	timingText?: string | null;
+	postType: Exclude<SpcPostType, ''>;
+	reason: Exclude<SpcPostReason, 'no_material_change' | 'below_threshold'>;
+};
+
+export type SpcThreadRecord = {
+	postId: string;
+	outlookDay: SpcOutlookDay;
+	issuedAt: string;
+	publishedAt: string;
+	hash: string;
+	commentCount: number;
+	lastCommentAt: string | null;
+	lastDecisionReason?: Exclude<SpcPostReason, 'no_material_change' | 'below_threshold'> | null;
+	summary?: SpcOutlookSummary;
+};
+
+export type SpcDebugEntry = {
+	outlookDay: SpcOutlookDay;
+	generatedAt: string;
+	decision: SpcPostDecision;
+	summary: SpcOutlookSummary | null;
+	lastPost: PublishedSpcOutlookRecord | null;
+	plannedOutputMode?: 'post' | 'comment' | null;
+	messagePreview?: string | null;
+	error?: string | null;
+};
+
+export type SpcDebugSnapshot = {
+	generatedAt: string;
+	entries: SpcDebugEntry[];
+};
+
+export type RecentSpcOpeningsRecord = {
+	openings: string[];
+	updatedAt: string;
+};
+
+export type SpcLlmPayload = {
+	output_mode: SpcOutputMode;
+	outlook_day: SpcOutlookDay;
+	post_type: Exclude<SpcPostType, ''>;
+	risk_level: SpcRiskLevel;
+	risk_number: SpcRiskNumber;
+	primary_region: string;
+	states: string[];
+	example_states: string[];
+	state_focus_text?: string | null;
+	hazard_focus: SpcHazardFocus;
+	hazard_list: string[];
+	hazard_line: string;
+	storm_mode?: string | null;
+	timing_window?: string | null;
+	notable_text?: string | null;
+	trend: 'developing' | 'building' | 'shifting' | 'approaching';
+	change_hint?: string | null;
+	recent_openings: string[];
+	max_length: number;
+	hashtags_enabled: boolean;
+};
+
+export type SpcLlmValidationResult = {
+	valid: boolean;
+	text: string;
+	failureReason?: string;
+};
 
 export type DigestHazardFamily = 'flood' | 'winter' | 'wind' | 'fire' | 'other';
 export type DigestAlertTier = 'warning' | 'watch' | 'advisory' | 'statement';
+export type DigestHazardCooldownKey = DigestHazardFamily | 'multi';
 
 export type DigestCandidate = {
 	alertId: string;
@@ -72,6 +238,7 @@ export type HazardClusterSummary = {
 	states: string[];
 	score: number;
 	alertCount: number;
+	warningCount?: number;
 	topAlertTypes: string[];
 };
 
@@ -83,8 +250,12 @@ export type DigestSummary = {
 	topAlertTypes: string[];
 	urgency: 'high' | 'moderate' | 'low';
 	alertCount: number;
+	warningCount: number;
 	hash: string;
+	changeHint?: string | null;
 };
+
+export type DigestCopyMode = 'post' | 'comment';
 
 export type DigestThreadRecord = {
 	postId: string;
@@ -93,17 +264,25 @@ export type DigestThreadRecord = {
 	hash: string;
 	commentCount: number;
 	lastCommentAt: string | null;
+	summary?: DigestSummary;
 };
 
 export type LlmPromptPayload = {
 	mode: 'normal' | 'incident';
 	post_type: 'digest' | 'cluster';
+	output_mode?: DigestCopyMode;
 	hazard_focus: string | null;
 	states: string[];
+	regional_focus: string;
+	example_states: string[];
+	trend: 'continuing' | 'expanding' | 'intensifying';
+	change_hint?: string | null;
+	impact: string[];
 	top_alert_types: string[];
 	urgency: string;
 	max_length: number;
 	style: string;
+	recent_openings: string[];
 };
 
 export type LlmPostValidationResult = {
@@ -112,11 +291,19 @@ export type LlmPostValidationResult = {
 	failureReason?: string;
 };
 
+export type RecentDigestOpeningsRecord = {
+	openings: string[];
+	updatedAt: string;
+};
+
 export type PublishedDigestBlockRecord = {
 	blockId: string;
 	publishedAt: string;
 	hash: string;
 	postId: string;
+	hazardFocus?: DigestHazardFamily | null;
+	lastPublishedAtByFocus?: Partial<Record<DigestHazardCooldownKey, string>>;
+	recentPostTimestamps?: string[];
 };
 
 export type StandaloneCoveredAlertRecord = {

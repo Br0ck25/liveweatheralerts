@@ -1,7 +1,37 @@
 import metroAllowlistSeed from '../metro-allowlist.json';
-import type { Env, FbAppConfig, FbAutoPostConfig, FbAutoPostMode, MetroAllowlistEntry, AlertChangeRecord } from '../types';
-import { KV_FB_APP_CONFIG, KV_FB_AUTO_POST_CONFIG } from '../constants';
+import type { Env, FbAppConfig, FbAutoPostConfig, FbAutoPostMode, MetroAllowlistEntry, AlertChangeRecord, SpcRiskLevel } from '../types';
+import {
+	KV_FB_APP_CONFIG,
+	KV_FB_AUTO_POST_CONFIG,
+	FB_DIGEST_DEFAULT_MAX_COMMENTS_PER_THREAD,
+	FB_DIGEST_DEFAULT_MIN_COMMENT_GAP_MINUTES,
+} from '../constants';
 import { dedupeStrings, formatLastSynced, extractFullCountyFipsCodes } from '../utils';
+
+function normalizeSpcRiskLevel(value: unknown): SpcRiskLevel {
+	const normalized = String(value || '').trim().toLowerCase();
+	if (normalized === 'marginal' || normalized === 'slight' || normalized === 'enhanced' || normalized === 'moderate' || normalized === 'high') {
+		return normalized as SpcRiskLevel;
+	}
+	return 'slight';
+}
+
+function normalizeSpcRiskLevelWithDefault(value: unknown, fallback: SpcRiskLevel): SpcRiskLevel {
+	const normalized = String(value || '').trim().toLowerCase();
+	if (normalized === 'marginal' || normalized === 'slight' || normalized === 'enhanced' || normalized === 'moderate' || normalized === 'high') {
+		return normalized as SpcRiskLevel;
+	}
+	return fallback;
+}
+
+function normalizePositiveInteger(value: unknown, fallback: number, min: number, max: number): number {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed)) return fallback;
+	const rounded = Math.round(parsed);
+	if (rounded < min) return min;
+	if (rounded > max) return max;
+	return rounded;
+}
 
 export async function readFbAppConfig(env: Env): Promise<FbAppConfig> {
 	try {
@@ -27,12 +57,28 @@ function normalizeFbAutoPostMode(value: unknown): FbAutoPostMode {
 
 export function normalizeFbAutoPostConfig(value: unknown): FbAutoPostConfig {
 	if (typeof value === 'boolean') {
+		const spcDay1CoverageEnabled = false;
+		const spcDay1MinRiskLevel: SpcRiskLevel = 'slight';
 		return {
 			mode: value ? 'tornado_only' : 'off',
 			updatedAt: null,
 			digestCoverageEnabled: false,
+			digestCommentUpdatesEnabled: true,
+			digestMaxCommentsPerThread: FB_DIGEST_DEFAULT_MAX_COMMENTS_PER_THREAD,
+			digestMinCommentGapMinutes: FB_DIGEST_DEFAULT_MIN_COMMENT_GAP_MINUTES,
 			llmCopyEnabled: false,
 			startupCatchupEnabled: false,
+			spcCoverageEnabled: spcDay1CoverageEnabled,
+			spcMinRiskLevel: spcDay1MinRiskLevel,
+			spcDay1CoverageEnabled,
+			spcDay1MinRiskLevel,
+			spcDay2CoverageEnabled: false,
+			spcDay2MinRiskLevel: 'enhanced',
+			spcDay3CoverageEnabled: false,
+			spcDay3MinRiskLevel: 'enhanced',
+			spcHashtagsEnabled: true,
+			spcLlmEnabled: false,
+			spcTimingRefreshEnabled: true,
 		};
 	}
 	const config = value as Record<string, unknown> | null;
@@ -44,12 +90,48 @@ export function normalizeFbAutoPostConfig(value: unknown): FbAutoPostConfig {
 		: legacyToggle
 			? 'tornado_only'
 			: 'off';
+	const legacySpcCoverageEnabled = config?.spcCoverageEnabled === true;
+	const legacySpcMinRiskLevel = normalizeSpcRiskLevel(config?.spcMinRiskLevel);
+	const spcDay1CoverageEnabled = config?.spcDay1CoverageEnabled != null
+		? config.spcDay1CoverageEnabled === true
+		: legacySpcCoverageEnabled;
+	const spcDay1MinRiskLevel = config?.spcDay1MinRiskLevel != null
+		? normalizeSpcRiskLevelWithDefault(config.spcDay1MinRiskLevel, 'slight')
+		: legacySpcMinRiskLevel;
+	const spcDay2CoverageEnabled = config?.spcDay2CoverageEnabled === true;
+	const spcDay2MinRiskLevel = normalizeSpcRiskLevelWithDefault(config?.spcDay2MinRiskLevel, 'enhanced');
+	const spcDay3CoverageEnabled = config?.spcDay3CoverageEnabled === true;
+	const spcDay3MinRiskLevel = normalizeSpcRiskLevelWithDefault(config?.spcDay3MinRiskLevel, 'enhanced');
 	return {
 		mode,
 		updatedAt: Number.isFinite(updatedAtMs) ? new Date(updatedAtMs).toISOString() : null,
 		digestCoverageEnabled: config?.digestCoverageEnabled === true,
+		digestCommentUpdatesEnabled: config?.digestCommentUpdatesEnabled !== false,
+		digestMaxCommentsPerThread: normalizePositiveInteger(
+			config?.digestMaxCommentsPerThread,
+			FB_DIGEST_DEFAULT_MAX_COMMENTS_PER_THREAD,
+			1,
+			5,
+		),
+		digestMinCommentGapMinutes: normalizePositiveInteger(
+			config?.digestMinCommentGapMinutes,
+			FB_DIGEST_DEFAULT_MIN_COMMENT_GAP_MINUTES,
+			10,
+			60,
+		),
 		llmCopyEnabled: config?.llmCopyEnabled === true,
 		startupCatchupEnabled: config?.startupCatchupEnabled === true,
+		spcCoverageEnabled: spcDay1CoverageEnabled,
+		spcMinRiskLevel: spcDay1MinRiskLevel,
+		spcDay1CoverageEnabled,
+		spcDay1MinRiskLevel,
+		spcDay2CoverageEnabled,
+		spcDay2MinRiskLevel,
+		spcDay3CoverageEnabled,
+		spcDay3MinRiskLevel,
+		spcHashtagsEnabled: config?.spcHashtagsEnabled !== false,
+		spcLlmEnabled: config?.spcLlmEnabled === true,
+		spcTimingRefreshEnabled: config?.spcTimingRefreshEnabled !== false,
 	};
 }
 
@@ -91,7 +173,12 @@ export function buildFbAutoPostStatusText(config?: FbAutoPostConfig | null): str
 	const savedText = normalized.updatedAt
 		? `Saved ${formatLastSynced(normalized.updatedAt)}.`
 		: 'Changes save immediately.';
-	return `Mode: ${fbAutoPostModeLabel(normalized.mode)}. ${savedText}`;
+	const digestCommentText = `Digest comments: ${normalized.digestCommentUpdatesEnabled !== false ? 'On' : 'Off'} (${normalizePositiveInteger(normalized.digestMaxCommentsPerThread, FB_DIGEST_DEFAULT_MAX_COMMENTS_PER_THREAD, 1, 5)} max, ${normalizePositiveInteger(normalized.digestMinCommentGapMinutes, FB_DIGEST_DEFAULT_MIN_COMMENT_GAP_MINUTES, 10, 60)}m gap).`;
+	const spcDay1Text = `D1 ${normalized.spcDay1CoverageEnabled ? 'On' : 'Off'} (${normalizeSpcRiskLevelWithDefault(normalized.spcDay1MinRiskLevel, 'slight')}+)`;
+	const spcDay2Text = `D2 ${normalized.spcDay2CoverageEnabled ? 'On' : 'Off'} (${normalizeSpcRiskLevelWithDefault(normalized.spcDay2MinRiskLevel, 'enhanced')}+)`;
+	const spcDay3Text = `D3 ${normalized.spcDay3CoverageEnabled ? 'On' : 'Off'} (${normalizeSpcRiskLevelWithDefault(normalized.spcDay3MinRiskLevel, 'enhanced')}+)`;
+	const spcAiText = `SPC AI: ${normalized.spcLlmEnabled ? 'On' : 'Off'}.`;
+	return `Mode: ${fbAutoPostModeLabel(normalized.mode)}. ${digestCommentText} SPC ${spcDay1Text}, ${spcDay2Text}, ${spcDay3Text}. ${spcAiText} ${savedText}`;
 }
 
 function normalizeMetroAllowlistEntry(value: unknown): MetroAllowlistEntry | null {

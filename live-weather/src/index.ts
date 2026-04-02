@@ -66,14 +66,59 @@ import { buildAdminFacebookPostRankings } from './facebook/ranking';
 import { handleTokenExchange, handleTokenConfig, handleAutoPostConfig } from './facebook/api';
 import {
 	buildDigestCandidates,
+	buildHazardClusters,
 	buildDigestSummary,
 	buildStartupSnapshotText,
+	checkClusterBreakout,
+	canPostNewDigest,
+	evaluateDigestChangeThresholds,
+	evaluateDigestStoryContinuity,
+	getDigestImageUrl,
 	readDigestThread,
 	readStandaloneCoveredAlerts,
 	markAlertStandaloneCovered,
 	isStartupMode,
+	runDigestCoverage,
+	selectDigestPrimaryCluster,
 } from './facebook/digest';
-import { generateDigestCopy, validateLlmOutput } from './facebook/llm';
+import {
+	buildLlmPayload,
+	buildCommentChangeHint,
+	buildUserPrompt,
+	generateDigestCopy,
+	readRecentDigestOpenings,
+	recordRecentDigestOpening,
+	validateLlmOutput,
+} from './facebook/llm';
+import {
+	buildSpcLlmPayload,
+	buildSpcUserPrompt,
+	validateSpcLlmOutput,
+} from './facebook/spc-llm';
+import {
+	buildSpcDay1OutlookSummary,
+	buildSpcCommentChangeHint as buildSpcCommentChangeHintHelper,
+	buildSpcHazardLine,
+	evaluateSpcPostingSchedule,
+	buildSpcOutlookSummary,
+	buildSpcPostDecision,
+	buildSpcPostText,
+	fetchLatestSpcOutlookSummary,
+	fetchLatestSpcDay1OutlookSummary,
+	parseSpcOutlookPage,
+	parseSpcDay1OutlookPage,
+	readLastSpcPost,
+	readLastSpcSummary,
+	readLastSpcDay1Post,
+	readLastSpcDay1Summary,
+	readRecentSpcOpenings,
+	recordRecentSpcOpening,
+	readSpcDebugSnapshot,
+	runSpcCoverage,
+	runSpcCoverageForDay,
+	runSpcDay1Coverage,
+	normalizeSpcMinRiskLevel,
+} from './facebook/spc';
 import { isAuthenticated, parseRequestBody } from './admin/auth';
 import { shouldSuppressAlertFromUi, syncAlerts, recordInvalidSubscription, recordPushDeliveryFailure } from './nws';
 import { handleApiGeocode, handleApiLocation } from './weather/geocoding';
@@ -175,6 +220,7 @@ async function handleScheduled(env: Env): Promise<void> {
 	const lifecycleDiff = await syncAlertLifecycleState(env, map);
 	await syncAlertHistoryDailySnapshots(env, map, lifecycleDiff.changes);
 	await autoPostFacebookAlerts(env, map, lifecycleDiff.changes);
+	await runSpcCoverage(env);
 	await dispatchStatePushNotifications(env, map, lifecycleDiff.changes, recordInvalidSubscription, recordPushDeliveryFailure);
 }
 
@@ -216,14 +262,52 @@ export const __testing = {
 	autoPostFacebookAlerts,
 	// Digest / coverage
 	buildDigestCandidates,
+	buildHazardClusters,
 	buildDigestSummary,
 	buildStartupSnapshotText,
+	checkClusterBreakout,
+	canPostNewDigest,
+	evaluateDigestChangeThresholds,
+	evaluateDigestStoryContinuity,
+	getDigestImageUrl,
 	readDigestThread,
 	readStandaloneCoveredAlerts,
 	markAlertStandaloneCovered,
 	isStartupMode,
+	runDigestCoverage,
+	selectDigestPrimaryCluster,
+	buildLlmPayload,
+	buildCommentChangeHint,
+	buildUserPrompt,
 	generateDigestCopy,
+	readRecentDigestOpenings,
+	recordRecentDigestOpening,
 	validateLlmOutput,
+	buildSpcDay1OutlookSummary,
+	buildSpcCommentChangeHint: buildSpcCommentChangeHintHelper,
+	buildSpcHazardLine,
+	buildSpcLlmPayload,
+	evaluateSpcPostingSchedule,
+	buildSpcOutlookSummary,
+	buildSpcPostDecision,
+	buildSpcPostText,
+	buildSpcUserPrompt,
+	fetchLatestSpcOutlookSummary,
+	fetchLatestSpcDay1OutlookSummary,
+	parseSpcOutlookPage,
+	parseSpcDay1OutlookPage,
+	readLastSpcPost,
+	readLastSpcSummary,
+	readLastSpcDay1Post,
+	readLastSpcDay1Summary,
+	readRecentSpcOpenings,
+	recordRecentSpcOpening,
+	readSpcDebugSnapshot,
+	runSpcCoverage,
+	runSpcCoverageForDay,
+	runSpcDay1Coverage,
+	normalizeSpcMinRiskLevel,
+	validateSpcLlmOutput,
 };
 
 // ---------------------------------------------------------------------------

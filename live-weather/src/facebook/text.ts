@@ -1,5 +1,4 @@
 import type { AlertPostedSnapshot } from '../types';
-import { PUBLIC_ALERTS_PAGE_PATH } from '../constants';
 import {
 	alertToText,
 	findProperty,
@@ -26,15 +25,7 @@ export function buildCommentText(text: string): string {
 	const filtered = lines.filter(line => {
 		const trimmed = line.trim();
 		if (trimmed.startsWith('#')) return false;
-		if (/^https?:\/\//i.test(trimmed)) {
-			try {
-				const url = new URL(trimmed);
-				const normalizedPath = url.pathname.replace(/\/+$/, '') || '/';
-				if (normalizedPath === PUBLIC_ALERTS_PAGE_PATH) return false;
-			} catch {
-				// Ignore malformed URLs and keep the line.
-			}
-		}
+		if (/^https?:\/\//i.test(trimmed)) return false;
 		return true;
 	});
 	while (filtered.length > 0 && filtered[filtered.length - 1].trim() === '') {

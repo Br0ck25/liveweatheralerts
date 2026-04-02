@@ -429,16 +429,84 @@ export async function handleAutoPostConfig(
 		const v = String(form.get(key) || '').trim().toLowerCase();
 		return v === 'true' || v === '1' || v === 'on';
 	}
+	function parseIntegerField(key: string, fallback: number, min: number, max: number): number {
+		const raw = String(form.get(key) || '').trim();
+		if (!raw) return fallback;
+		const value = Number(raw);
+		if (!Number.isFinite(value) || !Number.isInteger(value) || value < min || value > max) {
+			throw new Error(`${key} must be an integer between ${min} and ${max}`);
+		}
+		return value;
+	}
+	function parseSpcRiskLevelField(key: string) {
+		const value = String(form.get(key) || '').trim().toLowerCase();
+		if (!value) return 'slight';
+		if (value === 'marginal' || value === 'slight' || value === 'enhanced' || value === 'moderate' || value === 'high') {
+			return value;
+		}
+		throw new Error(`${key} must be marginal, slight, enhanced, moderate, or high`);
+	}
+	function hasField(key: string): boolean {
+		return form.has(key);
+	}
 	const digestCoverageEnabled = parseBoolField('digestCoverageEnabled');
+	const digestCommentUpdatesEnabled = hasField('digestCommentUpdatesEnabled')
+		? parseBoolField('digestCommentUpdatesEnabled')
+		: true;
+	let digestMaxCommentsPerThread = 3;
+	let digestMinCommentGapMinutes = 20;
 	const llmCopyEnabled = parseBoolField('llmCopyEnabled');
 	const startupCatchupEnabled = parseBoolField('startupCatchupEnabled');
+	const spcDay1CoverageEnabled = hasField('spcDay1CoverageEnabled')
+		? parseBoolField('spcDay1CoverageEnabled')
+		: parseBoolField('spcCoverageEnabled');
+	const spcDay2CoverageEnabled = parseBoolField('spcDay2CoverageEnabled');
+	const spcDay3CoverageEnabled = parseBoolField('spcDay3CoverageEnabled');
+	const spcHashtagsEnabled = parseBoolField('spcHashtagsEnabled');
+	const spcLlmEnabled = parseBoolField('spcLlmEnabled');
+	const spcTimingRefreshEnabled = parseBoolField('spcTimingRefreshEnabled');
+	let spcDay1MinRiskLevel: 'marginal' | 'slight' | 'enhanced' | 'moderate' | 'high' = 'slight';
+	let spcDay2MinRiskLevel: 'marginal' | 'slight' | 'enhanced' | 'moderate' | 'high' = 'enhanced';
+	let spcDay3MinRiskLevel: 'marginal' | 'slight' | 'enhanced' | 'moderate' | 'high' = 'enhanced';
+	try {
+		digestMaxCommentsPerThread = parseIntegerField('digestMaxCommentsPerThread', 3, 1, 5);
+		digestMinCommentGapMinutes = parseIntegerField('digestMinCommentGapMinutes', 20, 10, 60);
+		spcDay1MinRiskLevel = hasField('spcDay1MinRiskLevel')
+			? parseSpcRiskLevelField('spcDay1MinRiskLevel')
+			: parseSpcRiskLevelField('spcMinRiskLevel');
+		spcDay2MinRiskLevel = hasField('spcDay2MinRiskLevel')
+			? parseSpcRiskLevelField('spcDay2MinRiskLevel')
+			: 'enhanced';
+		spcDay3MinRiskLevel = hasField('spcDay3MinRiskLevel')
+			? parseSpcRiskLevelField('spcDay3MinRiskLevel')
+			: 'enhanced';
+	} catch (err) {
+		return new Response(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }), {
+			status: 400,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	}
 
 	const nextConfig: FbAutoPostConfig = {
 		mode,
 		updatedAt: new Date().toISOString(),
 		digestCoverageEnabled: digestCoverageEnabled,
+		digestCommentUpdatesEnabled,
+		digestMaxCommentsPerThread,
+		digestMinCommentGapMinutes,
 		llmCopyEnabled: llmCopyEnabled,
 		startupCatchupEnabled: startupCatchupEnabled,
+		spcCoverageEnabled: spcDay1CoverageEnabled,
+		spcMinRiskLevel: spcDay1MinRiskLevel,
+		spcDay1CoverageEnabled,
+		spcDay1MinRiskLevel,
+		spcDay2CoverageEnabled,
+		spcDay2MinRiskLevel,
+		spcDay3CoverageEnabled,
+		spcDay3MinRiskLevel,
+		spcHashtagsEnabled,
+		spcLlmEnabled,
+		spcTimingRefreshEnabled,
 	};
 	await writeFbAutoPostConfig(env, nextConfig);
 

@@ -46,10 +46,24 @@ export const KV_FB_DIGEST_ROTATION_CURSOR = 'fb:digest:rotation-cursor';
 export const KV_FB_COVERED_ALERTS = 'fb:covered-alerts';
 export const KV_FB_STARTUP_STATE = 'fb:startup-state';
 export const KV_FB_DIGEST_THREAD_PREFIX = 'fb:digest-thread:';
+export const KV_FB_DIGEST_RECENT_OPENINGS = 'fb:digest:recent-openings';
+export const KV_FB_SPC_LAST_SUMMARY_PREFIX = 'fb:spc:last-summary:';
+export const KV_FB_SPC_LAST_POST_PREFIX = 'fb:spc:last-post:';
+export const KV_FB_SPC_LAST_HASH_PREFIX = 'fb:spc:last-hash:';
+export const KV_FB_SPC_THREAD_PREFIX = 'fb:spc:thread:';
+export const KV_FB_SPC_DEBUG = 'fb:spc:debug';
+export const KV_FB_SPC_LAST_SUMMARY = 'fb:spc:day1:last-summary';
+export const KV_FB_SPC_LAST_POST = 'fb:spc:day1:last-post';
+export const KV_FB_SPC_LAST_HASH = 'fb:spc:day1:last-hash';
+export const KV_FB_SPC_RECENT_OPENINGS = 'fb:spc:recent-openings';
 
 // Digest timing constants
-export const FB_DIGEST_COOLDOWN_MS = 30 * 60 * 1000;
-export const FB_DIGEST_COMMENT_COOLDOWN_MS = 15 * 60 * 1000;
+export const FB_DIGEST_COOLDOWN_MS = 60 * 60 * 1000;
+export const FB_DIGEST_SAME_HAZARD_COOLDOWN_MS = 60 * 60 * 1000;
+export const FB_DIGEST_COMMENT_COOLDOWN_MS = 20 * 60 * 1000;
+export const FB_DIGEST_MAX_POSTS_PER_HOUR = 2;
+export const FB_DIGEST_DEFAULT_MAX_COMMENTS_PER_THREAD = 3;
+export const FB_DIGEST_DEFAULT_MIN_COMMENT_GAP_MINUTES = 20;
 export const FB_STARTUP_GAP_MS = 6 * 60 * 60 * 1000;
 
 // Incident mode thresholds
@@ -66,6 +80,8 @@ export const FB_CLUSTER_BREAKOUT_MIN_STATES = 3;
 export const FB_DIGEST_TOP_STATE_COUNT = 3;
 export const FB_DIGEST_ROTATION_STATE_COUNT = 3;
 export const FB_DIGEST_MAX_NORMAL_MULTISTATE = 6;
+export const FB_DIGEST_RECENT_OPENINGS_LIMIT = 3;
+export const FB_SPC_RECENT_OPENINGS_LIMIT = 3;
 
 // Push notification constants
 export const NOTIFICATION_ICON_PATH = '/icon-192.svg';
@@ -78,7 +94,7 @@ export const FB_TIMEOUT_MS = 15_000;
 export const ZIP_RE = /^\d{5}$/;
 
 // Admin forecast city configs
-import type { AdminForecastLocationConfig, AdminConvectiveOutlookConfig } from './types';
+import type { AdminForecastLocationConfig, AdminConvectiveOutlookConfig, SpcOutlookDay } from './types';
 export const ADMIN_FORECAST_LOCATIONS: AdminForecastLocationConfig[] = [
 	{ id: 'new_york_city', label: 'New York City', region: 'Northeast', zip: '10001', discussionOfficeCode: 'OKX', discussionOfficeLabel: 'New York NY' },
 	{ id: 'atlanta', label: 'Atlanta', region: 'Southeast', zip: '30303', discussionOfficeCode: 'FFC', discussionOfficeLabel: 'Peachtree City GA' },
@@ -92,3 +108,19 @@ export const ADMIN_CONVECTIVE_OUTLOOKS: AdminConvectiveOutlookConfig[] = [
 	{ id: 'day2', label: 'Day 2', pageUrl: 'https://www.spc.noaa.gov/products/outlook/day2otlk.html', imagePrefix: 'day2' },
 	{ id: 'day3', label: 'Day 3', pageUrl: 'https://www.spc.noaa.gov/products/outlook/day3otlk.html', imagePrefix: 'day3' },
 ];
+
+export function kvSpcLastSummaryKey(day: SpcOutlookDay): string {
+	return `${KV_FB_SPC_LAST_SUMMARY_PREFIX}${day}`;
+}
+
+export function kvSpcLastPostKey(day: SpcOutlookDay): string {
+	return `${KV_FB_SPC_LAST_POST_PREFIX}${day}`;
+}
+
+export function kvSpcLastHashKey(day: SpcOutlookDay): string {
+	return `${KV_FB_SPC_LAST_HASH_PREFIX}${day}`;
+}
+
+export function kvSpcThreadKey(day: SpcOutlookDay): string {
+	return `${KV_FB_SPC_THREAD_PREFIX}${day}`;
+}

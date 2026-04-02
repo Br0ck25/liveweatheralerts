@@ -1386,21 +1386,68 @@ function syncAutoPostHelp() {
 async function saveAutoPostMode() {
   if (!autoPostModeSelect) return;
   const previousMode = AUTO_POST_CONFIG.mode || 'off';
+  const previousDigestConfig = {
+    digestCoverageEnabled: !!AUTO_POST_CONFIG.digestCoverageEnabled,
+    digestCommentUpdatesEnabled: AUTO_POST_CONFIG.digestCommentUpdatesEnabled !== false,
+    digestMaxCommentsPerThread: Number(AUTO_POST_CONFIG.digestMaxCommentsPerThread || 3),
+    digestMinCommentGapMinutes: Number(AUTO_POST_CONFIG.digestMinCommentGapMinutes || 20),
+    llmCopyEnabled: !!AUTO_POST_CONFIG.llmCopyEnabled,
+    startupCatchupEnabled: !!AUTO_POST_CONFIG.startupCatchupEnabled,
+  };
+  const previousSpcConfig = {
+  spcCoverageEnabled: !!AUTO_POST_CONFIG.spcCoverageEnabled,
+  spcMinRiskLevel: AUTO_POST_CONFIG.spcMinRiskLevel || 'slight',
+  spcDay1CoverageEnabled: !!AUTO_POST_CONFIG.spcDay1CoverageEnabled,
+  spcDay1MinRiskLevel: AUTO_POST_CONFIG.spcDay1MinRiskLevel || 'slight',
+  spcDay2CoverageEnabled: !!AUTO_POST_CONFIG.spcDay2CoverageEnabled,
+  spcDay2MinRiskLevel: AUTO_POST_CONFIG.spcDay2MinRiskLevel || 'enhanced',
+  spcDay3CoverageEnabled: !!AUTO_POST_CONFIG.spcDay3CoverageEnabled,
+  spcDay3MinRiskLevel: AUTO_POST_CONFIG.spcDay3MinRiskLevel || 'enhanced',
+    spcHashtagsEnabled: AUTO_POST_CONFIG.spcHashtagsEnabled !== false,
+    spcLlmEnabled: !!AUTO_POST_CONFIG.spcLlmEnabled,
+    spcTimingRefreshEnabled: AUTO_POST_CONFIG.spcTimingRefreshEnabled !== false,
+  };
   autoPostModeSelect.disabled = true;
   setAutoPostStatus('Saving auto-post setting...', '');
 
   try {
     const digestCheck = document.getElementById('digestCoverageEnabled');
+    const digestCommentCheck = document.getElementById('digestCommentUpdatesEnabled');
+    const digestMaxCommentsInput = document.getElementById('digestMaxCommentsPerThread');
+    const digestCommentGapInput = document.getElementById('digestMinCommentGapMinutes');
     const llmCheck = document.getElementById('llmCopyEnabled');
     const startupCheck = document.getElementById('startupCatchupEnabled');
+  const spcDay1CoverageCheck = document.getElementById('spcDay1CoverageEnabled');
+  const spcDay1MinRiskSelect = document.getElementById('spcDay1MinRiskLevel');
+  const spcDay2CoverageCheck = document.getElementById('spcDay2CoverageEnabled');
+  const spcDay2MinRiskSelect = document.getElementById('spcDay2MinRiskLevel');
+  const spcDay3CoverageCheck = document.getElementById('spcDay3CoverageEnabled');
+  const spcDay3MinRiskSelect = document.getElementById('spcDay3MinRiskLevel');
+    const spcHashtagsCheck = document.getElementById('spcHashtagsEnabled');
+    const spcLlmCheck = document.getElementById('spcLlmEnabled');
+    const spcTimingCheck = document.getElementById('spcTimingRefreshEnabled');
     const response = await fetch('/admin/auto-post-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         mode: autoPostModeSelect.value,
         digestCoverageEnabled: digestCheck ? digestCheck.checked : false,
+        digestCommentUpdatesEnabled: digestCommentCheck ? digestCommentCheck.checked : true,
+        digestMaxCommentsPerThread: digestMaxCommentsInput ? digestMaxCommentsInput.value : '3',
+        digestMinCommentGapMinutes: digestCommentGapInput ? digestCommentGapInput.value : '20',
         llmCopyEnabled: llmCheck ? llmCheck.checked : false,
         startupCatchupEnabled: startupCheck ? startupCheck.checked : false,
+    spcCoverageEnabled: spcDay1CoverageCheck ? spcDay1CoverageCheck.checked : false,
+    spcMinRiskLevel: spcDay1MinRiskSelect ? spcDay1MinRiskSelect.value : 'slight',
+    spcDay1CoverageEnabled: spcDay1CoverageCheck ? spcDay1CoverageCheck.checked : false,
+    spcDay1MinRiskLevel: spcDay1MinRiskSelect ? spcDay1MinRiskSelect.value : 'slight',
+    spcDay2CoverageEnabled: spcDay2CoverageCheck ? spcDay2CoverageCheck.checked : false,
+    spcDay2MinRiskLevel: spcDay2MinRiskSelect ? spcDay2MinRiskSelect.value : 'enhanced',
+    spcDay3CoverageEnabled: spcDay3CoverageCheck ? spcDay3CoverageCheck.checked : false,
+    spcDay3MinRiskLevel: spcDay3MinRiskSelect ? spcDay3MinRiskSelect.value : 'enhanced',
+        spcHashtagsEnabled: spcHashtagsCheck ? spcHashtagsCheck.checked : true,
+        spcLlmEnabled: spcLlmCheck ? spcLlmCheck.checked : false,
+        spcTimingRefreshEnabled: spcTimingCheck ? spcTimingCheck.checked : true,
       }),
     });
     const data = await response.json();
@@ -1410,13 +1457,44 @@ async function saveAutoPostMode() {
     AUTO_POST_CONFIG.mode = data.config && data.config.mode ? data.config.mode : autoPostModeSelect.value;
     if (data.config) {
       AUTO_POST_CONFIG.digestCoverageEnabled = !!data.config.digestCoverageEnabled;
+      AUTO_POST_CONFIG.digestCommentUpdatesEnabled = data.config.digestCommentUpdatesEnabled !== false;
+      AUTO_POST_CONFIG.digestMaxCommentsPerThread = Number(data.config.digestMaxCommentsPerThread || 3);
+      AUTO_POST_CONFIG.digestMinCommentGapMinutes = Number(data.config.digestMinCommentGapMinutes || 20);
       AUTO_POST_CONFIG.llmCopyEnabled = !!data.config.llmCopyEnabled;
       AUTO_POST_CONFIG.startupCatchupEnabled = !!data.config.startupCatchupEnabled;
+    AUTO_POST_CONFIG.spcCoverageEnabled = !!(data.config.spcDay1CoverageEnabled ?? data.config.spcCoverageEnabled);
+    AUTO_POST_CONFIG.spcMinRiskLevel = data.config.spcDay1MinRiskLevel || data.config.spcMinRiskLevel || 'slight';
+    AUTO_POST_CONFIG.spcDay1CoverageEnabled = !!(data.config.spcDay1CoverageEnabled ?? data.config.spcCoverageEnabled);
+    AUTO_POST_CONFIG.spcDay1MinRiskLevel = data.config.spcDay1MinRiskLevel || data.config.spcMinRiskLevel || 'slight';
+    AUTO_POST_CONFIG.spcDay2CoverageEnabled = !!data.config.spcDay2CoverageEnabled;
+    AUTO_POST_CONFIG.spcDay2MinRiskLevel = data.config.spcDay2MinRiskLevel || 'enhanced';
+    AUTO_POST_CONFIG.spcDay3CoverageEnabled = !!data.config.spcDay3CoverageEnabled;
+    AUTO_POST_CONFIG.spcDay3MinRiskLevel = data.config.spcDay3MinRiskLevel || 'enhanced';
+      AUTO_POST_CONFIG.spcHashtagsEnabled = data.config.spcHashtagsEnabled !== false;
+      AUTO_POST_CONFIG.spcLlmEnabled = !!data.config.spcLlmEnabled;
+      AUTO_POST_CONFIG.spcTimingRefreshEnabled = data.config.spcTimingRefreshEnabled !== false;
     }
     syncAutoPostHelp();
     setAutoPostStatus(data.message || 'Auto-post setting saved.', 'ok');
   } catch (err) {
     autoPostModeSelect.value = previousMode;
+    AUTO_POST_CONFIG.digestCoverageEnabled = previousDigestConfig.digestCoverageEnabled;
+    AUTO_POST_CONFIG.digestCommentUpdatesEnabled = previousDigestConfig.digestCommentUpdatesEnabled;
+    AUTO_POST_CONFIG.digestMaxCommentsPerThread = previousDigestConfig.digestMaxCommentsPerThread;
+    AUTO_POST_CONFIG.digestMinCommentGapMinutes = previousDigestConfig.digestMinCommentGapMinutes;
+    AUTO_POST_CONFIG.llmCopyEnabled = previousDigestConfig.llmCopyEnabled;
+    AUTO_POST_CONFIG.startupCatchupEnabled = previousDigestConfig.startupCatchupEnabled;
+    AUTO_POST_CONFIG.spcCoverageEnabled = previousSpcConfig.spcCoverageEnabled;
+    AUTO_POST_CONFIG.spcMinRiskLevel = previousSpcConfig.spcMinRiskLevel;
+  AUTO_POST_CONFIG.spcDay1CoverageEnabled = previousSpcConfig.spcDay1CoverageEnabled;
+  AUTO_POST_CONFIG.spcDay1MinRiskLevel = previousSpcConfig.spcDay1MinRiskLevel;
+  AUTO_POST_CONFIG.spcDay2CoverageEnabled = previousSpcConfig.spcDay2CoverageEnabled;
+  AUTO_POST_CONFIG.spcDay2MinRiskLevel = previousSpcConfig.spcDay2MinRiskLevel;
+  AUTO_POST_CONFIG.spcDay3CoverageEnabled = previousSpcConfig.spcDay3CoverageEnabled;
+  AUTO_POST_CONFIG.spcDay3MinRiskLevel = previousSpcConfig.spcDay3MinRiskLevel;
+    AUTO_POST_CONFIG.spcHashtagsEnabled = previousSpcConfig.spcHashtagsEnabled;
+    AUTO_POST_CONFIG.spcLlmEnabled = previousSpcConfig.spcLlmEnabled;
+    AUTO_POST_CONFIG.spcTimingRefreshEnabled = previousSpcConfig.spcTimingRefreshEnabled;
     syncAutoPostHelp();
     const message = err instanceof Error ? err.message : String(err);
     setAutoPostStatus('Error saving auto-post setting: ' + message, 'err');
@@ -1431,8 +1509,8 @@ if (autoPostModeSelect) {
   autoPostModeSelect.addEventListener('change', saveAutoPostMode);
 }
 
-// Wire digest/LLM/startup checkboxes — each change saves all settings together
-['digestCoverageEnabled', 'llmCopyEnabled', 'startupCatchupEnabled'].forEach(function(id) {
+// Wire digest and SPC lane controls — each change saves the combined settings together.
+['digestCoverageEnabled', 'digestCommentUpdatesEnabled', 'digestMaxCommentsPerThread', 'digestMinCommentGapMinutes', 'llmCopyEnabled', 'startupCatchupEnabled', 'spcDay1CoverageEnabled', 'spcDay1MinRiskLevel', 'spcDay2CoverageEnabled', 'spcDay2MinRiskLevel', 'spcDay3CoverageEnabled', 'spcDay3MinRiskLevel', 'spcHashtagsEnabled', 'spcLlmEnabled', 'spcTimingRefreshEnabled'].forEach(function(id) {
   const el = document.getElementById(id);
   if (el) el.addEventListener('change', saveAutoPostMode);
 });
@@ -1565,7 +1643,21 @@ applyFilters();
 		'    <span>Digest coverage</span>\n' +
 		'    <input type="checkbox" id="digestCoverageEnabled"' + (normalizedAutoPostConfig.digestCoverageEnabled ? ' checked' : '') + ' />\n' +
 		'  </label>\n' +
-		'  <p class="toggle-help">When enabled (smart high-impact mode only), lower-priority alerts are grouped into digest posts every 30 minutes instead of spamming individual posts.</p>\n' +
+    '  <p class="toggle-help">When enabled (smart high-impact mode only), digest coverage shifts to hourly main posts with delta-based storytelling. Earlier posts only happen for major escalations, hazard swaps, or fresh outbreak-style changes, and the lane hard-caps itself at two digest posts per hour.</p>\n' +
+    '  <label class="toggle-row" for="digestCommentUpdatesEnabled">\n' +
+    '    <span>Digest comment updates</span>\n' +
+    '    <input type="checkbox" id="digestCommentUpdatesEnabled"' + (normalizedAutoPostConfig.digestCommentUpdatesEnabled !== false ? ' checked' : '') + ' />\n' +
+    '  </label>\n' +
+    '  <p class="toggle-help">Meaningful within-hour updates stay in the same thread as comments when the hazard and regional story still match. Routine or low-signal changes are skipped.</p>\n' +
+    '  <label class="toggle-row" for="digestMaxCommentsPerThread">\n' +
+    '    <span>Max digest comments per thread</span>\n' +
+    '    <input type="number" id="digestMaxCommentsPerThread" min="1" max="5" value="' + safeHtml(String(normalizedAutoPostConfig.digestMaxCommentsPerThread || 3)) + '" />\n' +
+    '  </label>\n' +
+    '  <label class="toggle-row" for="digestMinCommentGapMinutes">\n' +
+    '    <span>Minutes between digest comments</span>\n' +
+    '    <input type="number" id="digestMinCommentGapMinutes" min="10" max="60" step="5" value="' + safeHtml(String(normalizedAutoPostConfig.digestMinCommentGapMinutes || 20)) + '" />\n' +
+    '  </label>\n' +
+    '  <p class="toggle-help">Recommended pacing is up to 3 comments per thread with at least 20 minutes between them, so the thread stays useful instead of turning into comment confetti.</p>\n' +
 		'  <label class="toggle-row" for="llmCopyEnabled">\n' +
 		'    <span>AI-generated copy</span>\n' +
 		'    <input type="checkbox" id="llmCopyEnabled"' + (normalizedAutoPostConfig.llmCopyEnabled ? ' checked' : '') + ' />\n' +
@@ -1576,6 +1668,69 @@ applyFilters();
 		'    <input type="checkbox" id="startupCatchupEnabled"' + (normalizedAutoPostConfig.startupCatchupEnabled ? ' checked' : '') + ' />\n' +
 		'  </label>\n' +
 		'  <p class="toggle-help">When enabled, a cold start or 6-hour gap publishes a single national snapshot post and seeds the digest state, rather than replaying all historical alerts.</p>\n' +
+    '  <hr class="admin-divider" />\n' +
+    '  <h3>SPC Outlook Lane</h3>\n' +
+    '  <p>Forecast-led severe weather posts run separately from alerts and digests, with independent Day 1, Day 2, and Day 3 controls plus optional AI polish.</p>\n' +
+    '  <label class="toggle-row" for="spcDay1CoverageEnabled">\n' +
+    '    <span>SPC Day 1 coverage</span>\n' +
+    '    <input type="checkbox" id="spcDay1CoverageEnabled"' + (normalizedAutoPostConfig.spcDay1CoverageEnabled ? ' checked' : '') + ' />\n' +
+    '  </label>\n' +
+    '  <label class="toggle-row" for="spcDay1MinRiskLevel">\n' +
+    '    <span>Day 1 minimum risk</span>\n' +
+    '    <select id="spcDay1MinRiskLevel">\n' +
+    '      <option value="marginal"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
+    '      <option value="slight"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
+    '      <option value="enhanced"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
+    '      <option value="moderate"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
+    '      <option value="high"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
+    '    </select>\n' +
+    '  </label>\n' +
+    '  <p class="toggle-help">Same-day setup coverage. Stronger upgrades and late timing nudges can stay in the same Facebook thread as comments.</p>\n' +
+    '  <label class="toggle-row" for="spcDay2CoverageEnabled">\n' +
+    '    <span>SPC Day 2 coverage</span>\n' +
+    '    <input type="checkbox" id="spcDay2CoverageEnabled"' + (normalizedAutoPostConfig.spcDay2CoverageEnabled ? ' checked' : '') + ' />\n' +
+    '  </label>\n' +
+    '  <label class="toggle-row" for="spcDay2MinRiskLevel">\n' +
+    '    <span>Day 2 minimum risk</span>\n' +
+    '    <select id="spcDay2MinRiskLevel">\n' +
+    '      <option value="marginal"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
+    '      <option value="slight"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
+    '      <option value="enhanced"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
+    '      <option value="moderate"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
+    '      <option value="high"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
+    '    </select>\n' +
+    '  </label>\n' +
+    '  <p class="toggle-help">Tomorrow-focused lookahead posts. Enhanced+ is the default to avoid noisy early posts, but you can widen that if you want more heads-up coverage.</p>\n' +
+    '  <label class="toggle-row" for="spcDay3CoverageEnabled">\n' +
+    '    <span>SPC Day 3 coverage</span>\n' +
+    '    <input type="checkbox" id="spcDay3CoverageEnabled"' + (normalizedAutoPostConfig.spcDay3CoverageEnabled ? ' checked' : '') + ' />\n' +
+    '  </label>\n' +
+    '  <label class="toggle-row" for="spcDay3MinRiskLevel">\n' +
+    '    <span>Day 3 minimum risk</span>\n' +
+    '    <select id="spcDay3MinRiskLevel">\n' +
+    '      <option value="marginal"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
+    '      <option value="slight"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
+    '      <option value="enhanced"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
+    '      <option value="moderate"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
+    '      <option value="high"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
+    '    </select>\n' +
+    '  </label>\n' +
+    '  <p class="toggle-help">Early heads-up coverage for more distant setups. Leaving this tighter helps avoid posting on low-confidence noise.</p>\n' +
+    '  <label class="toggle-row" for="spcHashtagsEnabled">\n' +
+    '    <span>SPC hashtags</span>\n' +
+    '    <input type="checkbox" id="spcHashtagsEnabled"' + (normalizedAutoPostConfig.spcHashtagsEnabled !== false ? ' checked' : '') + ' />\n' +
+    '  </label>\n' +
+    '  <p class="toggle-help">Adds a light engagement footer like state weather tags plus #SevereWeather on SPC lane posts only.</p>\n' +
+    '  <label class="toggle-row" for="spcTimingRefreshEnabled">\n' +
+    '    <span>Late-day timing refresh</span>\n' +
+    '    <input type="checkbox" id="spcTimingRefreshEnabled"' + (normalizedAutoPostConfig.spcTimingRefreshEnabled !== false ? ' checked' : '') + ' />\n' +
+    '  </label>\n' +
+    '  <p class="toggle-help">Allows one additional late-day timing post on stronger setups when the outlook story is unchanged but the threat window is getting closer.</p>\n' +
+    '  <label class="toggle-row" for="spcLlmEnabled">\n' +
+    '    <span>SPC AI polish (V1.5)</span>\n' +
+    '    <input type="checkbox" id="spcLlmEnabled"' + (normalizedAutoPostConfig.spcLlmEnabled ? ' checked' : '') + ' />\n' +
+    '  </label>\n' +
+    '  <p class="toggle-help">When enabled, SPC posts and upgrade comments use Workers AI for forecast-desk writing, with geography validation and template fallback if the model output is not usable.</p>\n' +
 		'  <div id="autoPostStatus" class="auto-post-status">' + safeHtml(autoPostStatusText) + '</div>\n' +
 		'</div>\n' +
 		'\n<div class="token-exchange">\n' +
