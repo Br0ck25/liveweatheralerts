@@ -21,6 +21,7 @@ const SYSTEM_PROMPT = [
 	'Write Facebook posts that sound like a real-time weather desk update — not a generic summary.',
 	'',
 	'Your job is to clearly explain how the weather story is changing right now.',
+	'Each post must answer: what is the main weather story right now, and where is it happening?',
 	'',
 	'STYLE:',
 	'- concise',
@@ -37,6 +38,8 @@ const SYSTEM_PROMPT = [
 	'- no county lists',
 	'- no filler phrases',
 	'- no repetition of previous phrasing',
+	'- one main hazard story per post',
+	'- one dominant regional story per post',
 	'',
 	'DO NOT USE:',
 	'- "affecting several states"',
@@ -44,6 +47,14 @@ const SYSTEM_PROMPT = [
 	'- "parts of the country"',
 	'- "high-volume alert surge"',
 	'- repetitive phrasing like "is intensifying" or "is expanding"',
+	'',
+	'GEOGRAPHY RULES:',
+	'- focus on one dominant regional weather story',
+	'- keep the story centered on one primary region',
+	'- use only the core impact states for that story',
+	'- ignore weaker or distant outlier states outside the main regional cluster',
+	'- never stitch unrelated distant regions into one narrative',
+	'- representative states only, maximum 3–5',
 	'',
 	'WRITING RULES:',
 	'- start with the weather situation, not the alerts',
@@ -68,6 +79,7 @@ const COMMENT_SYSTEM_PROMPT = [
 	'- start with "UPDATE:"',
 	'- only comment when the change is meaningful',
 	'- you MUST describe what changed since the last post',
+	'- stay inside the same regional story even if other alerts exist elsewhere',
 	'- focus on what changed, expanded, intensified, or shifted',
 	'- stay anchored to the same main hazard story as the original post',
 	'- do not pivot to a different primary hazard or a completely different lead region',
@@ -348,16 +360,29 @@ function deriveImpact(summary: Pick<DigestSummary, 'hazardFocus' | 'topAlertType
 	return impacts.slice(0, 3);
 }
 
+function digestCoreStates(summary: Pick<DigestSummary, 'states' | 'storyStates'>): string[] {
+	const states = Array.isArray(summary.storyStates) && summary.storyStates.length > 0
+		? summary.storyStates
+		: summary.states;
+	return dedupeStrings(states.map((state) => String(state || '').trim().toUpperCase()));
+}
+
 export function buildDigestRegionalBuckets(
-	summary: Pick<DigestSummary, 'states' | 'hazardFocus' | 'topAlertTypes'>,
+	summary: Pick<DigestSummary, 'states' | 'storyStates' | 'hazardFocus' | 'topAlertTypes' | 'storyRegion'>,
 ): string[] {
-	return buildRegionalFocusParts(summary.states, summary.hazardFocus, deriveImpact(summary));
+	if (summary.storyRegion) {
+		return [summary.storyRegion];
+	}
+	return buildRegionalFocusParts(digestCoreStates(summary), summary.hazardFocus, deriveImpact(summary));
 }
 
 export function buildDigestRegionalFocus(
-	summary: Pick<DigestSummary, 'states' | 'hazardFocus' | 'topAlertTypes'>,
+	summary: Pick<DigestSummary, 'states' | 'storyStates' | 'hazardFocus' | 'topAlertTypes' | 'storyRegion'>,
 ): string {
-	return buildRegionalFocus(summary.states, summary.hazardFocus, deriveImpact(summary));
+	if (summary.storyRegion) {
+		return summary.storyRegion;
+	}
+	return buildRegionalFocus(digestCoreStates(summary), summary.hazardFocus, deriveImpact(summary));
 }
 
 export function buildCommentChangeHint(
@@ -366,8 +391,8 @@ export function buildCommentChangeHint(
 ): string | null {
 	if (!previousSummary) return null;
 
-	const currentStates = dedupeStrings(currentSummary.states.map((state) => state.toUpperCase()));
-	const previousStates = dedupeStrings(previousSummary.states.map((state) => state.toUpperCase()));
+	const currentStates = digestCoreStates(currentSummary);
+	const previousStates = digestCoreStates(previousSummary);
 	const currentStateSet = new Set(currentStates);
 	const previousStateSet = new Set(previousStates);
 	const addedStates = currentStates
@@ -493,6 +518,7 @@ export function buildUserPrompt(payload: LlmPromptPayload): string {
 	const impacts = payload.impact ?? [];
 	const recentOpenings = payload.recent_openings ?? [];
 	const alertTypes = payload.top_alert_types ?? [];
+	const suppressedOutliers = payload.suppressed_outliers ?? [];
 	const changeHint = payload.change_hint?.trim() || '';
 
 	const alertList = alertTypes.length > 0
@@ -535,7 +561,9 @@ export function buildUserPrompt(payload: LlmPromptPayload): string {
 	return [
 		formatSection,
 		`Regional focus: ${payload.regional_focus}.`,
+		'Stay with one coherent regional story. Do not turn this into a national alert roundup.',
 		exampleStates.length > 0 ? `Example states: ${exampleStates.join(', ')}.` : '',
+		suppressedOutliers.length > 0 ? `Ignore these weaker or distant outlier states for this post: ${suppressedOutliers.join(', ')}.` : '',
 		`Trend: ${payload.trend}.`,
 		changeHint ? `Change hint: ${changeHint}.` : '',
 		changeHint && outputMode === 'post' ? 'Tell readers what changed since the last digest instead of summarizing the full alert board from scratch.' : '',
@@ -555,15 +583,16 @@ export function buildLlmPayload(
 ): LlmPromptPayload {
 	const impacts = deriveImpact(summary);
 	const regionalFocus = buildDigestRegionalFocus(summary);
+	const coreStates = digestCoreStates(summary);
 
 	return {
 		mode: summary.mode,
 		post_type: summary.postType,
 		output_mode: outputMode,
 		hazard_focus: summary.hazardFocus,
-		states: summary.states,
+		states: coreStates,
 		regional_focus: regionalFocus,
-		example_states: buildExampleStates(summary.states),
+		example_states: buildExampleStates(coreStates),
 		trend: deriveTrend(summary),
 		change_hint: summary.changeHint ?? null,
 		impact: impacts,
@@ -574,6 +603,7 @@ export function buildLlmPayload(
 			? 'live national weather desk update comment, brief, direct, change-focused, no hype'
 			: 'live national weather desk update, clear, concise, distinct, no hype',
 		recent_openings: recentOpenings.slice(0, FB_DIGEST_RECENT_OPENINGS_LIMIT),
+		suppressed_outliers: buildExampleStates(summary.outlierStates ?? []),
 	};
 }
 
@@ -609,37 +639,50 @@ export function validateLlmOutput(text: string, payload: LlmPromptPayload): LlmP
 		}
 	}
 
+	for (const outlierState of payload.suppressed_outliers ?? []) {
+		if (trimmed.toLowerCase().includes(outlierState.toLowerCase())) {
+			return { valid: false, text: trimmed, failureReason: 'mentions_suppressed_outlier' };
+		}
+	}
+
 	return { valid: true, text: trimmed };
 }
 
 function buildDigestCoveragePhrase(summary: DigestSummary, evolving: boolean): string {
-	const locationText = summary.states.length > 0
-		? formatStateList(summary.states)
-		: `parts of the ${buildDigestRegionalFocus(summary)}`;
+	const regionalFocus = buildDigestRegionalFocus(summary);
+	const coreStates = digestCoreStates(summary);
+	const locationText = regionalFocus && regionalFocus !== 'National'
+		? `across the ${regionalFocus.toLowerCase()}`
+		: coreStates.length > 0
+			? `across ${formatStateList(coreStates)}`
+			: 'in the main impact zone';
+	const coreStateClause = regionalFocus && coreStates.length > 0
+		? `, with the core impacts centered in ${formatStateList(coreStates)}`
+		: '';
 
 	if (summary.hazardFocus === 'flood') {
 		return evolving
-			? `Flooding continues to spread across ${locationText}`
-			: `Flood concerns are building across ${locationText}`;
+			? `Flooding continues to spread ${locationText}${coreStateClause}`
+			: `Flooding is the main weather story right now ${locationText}${coreStateClause}`;
 	}
 	if (summary.hazardFocus === 'winter') {
 		return evolving
-			? `Winter weather continues to spread across ${locationText}`
-			: `Winter weather is building across ${locationText}`;
+			? `Winter weather continues to spread ${locationText}${coreStateClause}`
+			: `Winter weather is the main weather story right now ${locationText}${coreStateClause}`;
 	}
 	if (summary.hazardFocus === 'wind') {
 		return evolving
-			? `Wind impacts continue to spread across ${locationText}`
-			: `Wind impacts are building across ${locationText}`;
+			? `Wind impacts continue to spread ${locationText}${coreStateClause}`
+			: `Wind impacts are the main weather story right now ${locationText}${coreStateClause}`;
 	}
 	if (summary.hazardFocus === 'fire') {
 		return evolving
-			? `Fire weather concerns continue to spread across ${locationText}`
-			: `Fire weather concerns are building across ${locationText}`;
+			? `Fire weather concerns continue to spread ${locationText}${coreStateClause}`
+			: `Fire weather concerns are the main weather story right now ${locationText}${coreStateClause}`;
 	}
 	return evolving
-		? `Weather impacts continue to shift across ${locationText}`
-		: `Weather impacts are building across ${locationText}`;
+		? `Weather impacts continue to shift ${locationText}${coreStateClause}`
+		: `Weather impacts are the main weather story right now ${locationText}${coreStateClause}`;
 }
 
 function buildDigestChangeSentence(summary: DigestSummary): string {

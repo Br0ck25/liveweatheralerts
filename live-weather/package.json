@@ -18,6 +18,9 @@
 		"wrangler": "^4.76.0"
 	},
 	"dependencies": {
-		"@block65/webcrypto-web-push": "^1.0.2"
+		"@block65/webcrypto-web-push": "^1.0.2",
+		"@turf/boolean-intersects": "^7.3.4",
+		"topojson-client": "^3.1.0",
+		"us-atlas": "^3.0.1"
 	}
 }

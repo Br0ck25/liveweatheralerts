@@ -7,6 +7,8 @@ import {
 	formatDateTimeShort,
 } from '../utils';
 
+const FB_ALERT_SIGNIFICANT_EXPIRY_CHANGE_MS = 60 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // Anchor post text generation
 // ---------------------------------------------------------------------------
@@ -85,10 +87,104 @@ export function buildAlertPostedSnapshot(properties: any): AlertPostedSnapshot {
 	return {
 		areaDesc: String(properties.areaDesc || '').trim(),
 		expires: properties.expires ? formatDateTimeShort(properties.expires) : '',
+		expiresIso: String(properties.expires || '').trim() || null,
 		severity: String(properties.severity || '').trim(),
 		headline: String(headline || '').trim(),
 		description: String(description || '').trim(),
 		instruction: String(instruction || '').trim(),
+		senderName: String(properties.senderName || '').trim() || null,
+		ugcCodes: Array.isArray(properties.geocode?.UGC)
+			? properties.geocode.UGC.map((ugcCode: unknown) => String(ugcCode || '').trim().toUpperCase()).filter(Boolean)
+			: [],
+	};
+}
+
+function normalizeSnapshotUgcCodes(ugcCodes: string[] | null | undefined): string[] {
+	return Array.from(new Set(
+		(ugcCodes || [])
+			.map((ugcCode) => String(ugcCode || '').trim().toUpperCase())
+			.filter(Boolean),
+	)).sort();
+}
+
+function sameNormalizedCodeSet(left: string[], right: string[]): boolean {
+	if (left.length !== right.length) return false;
+	return left.every((value, index) => value === right[index]);
+}
+
+function parseSnapshotExpiryMs(snapshot: AlertPostedSnapshot | null, fallbackExpiresAtSeconds?: number | null): number | null {
+	const isoValue = String(snapshot?.expiresIso || '').trim();
+	const isoMs = Date.parse(isoValue);
+	if (Number.isFinite(isoMs)) return isoMs;
+	if (Number.isFinite(fallbackExpiresAtSeconds)) {
+		return Number(fallbackExpiresAtSeconds) * 1000;
+	}
+	return null;
+}
+
+export function assessAlertThreadUpdate(
+	properties: any,
+	previousSnapshot: AlertPostedSnapshot | null = null,
+	options: {
+		previousExpiresAtSeconds?: number | null;
+	} = {},
+): {
+	currentSnapshot: AlertPostedSnapshot;
+	sameOffice: boolean;
+	areaChanged: boolean;
+	severityChanged: boolean;
+	textChanged: boolean;
+	significantExpiryChange: boolean;
+	shouldSkip: boolean;
+} {
+	const currentSnapshot = buildAlertPostedSnapshot(properties);
+	if (!previousSnapshot) {
+		return {
+			currentSnapshot,
+			sameOffice: false,
+			areaChanged: false,
+			severityChanged: false,
+			textChanged: true,
+			significantExpiryChange: false,
+			shouldSkip: false,
+		};
+	}
+
+	const currentUgcCodes = normalizeSnapshotUgcCodes(currentSnapshot.ugcCodes);
+	const previousUgcCodes = normalizeSnapshotUgcCodes(previousSnapshot.ugcCodes);
+	const hasComparableUgcSets = currentUgcCodes.length > 0 && previousUgcCodes.length > 0;
+	const areaChanged = hasComparableUgcSets
+		? !sameNormalizedCodeSet(currentUgcCodes, previousUgcCodes)
+		: normalizeAlertComparisonText(currentSnapshot.areaDesc) !== normalizeAlertComparisonText(previousSnapshot.areaDesc);
+	const severityChanged = normalizeAlertComparisonText(currentSnapshot.severity) !== normalizeAlertComparisonText(previousSnapshot.severity);
+	const textChanged =
+		normalizeAlertComparisonText(currentSnapshot.description) !== normalizeAlertComparisonText(previousSnapshot.description)
+		|| normalizeAlertComparisonText(currentSnapshot.instruction) !== normalizeAlertComparisonText(previousSnapshot.instruction);
+
+	const currentOffice = normalizeAlertComparisonText(currentSnapshot.senderName || '');
+	const previousOffice = normalizeAlertComparisonText(previousSnapshot.senderName || '');
+	const sameOffice = !currentOffice || !previousOffice || currentOffice === previousOffice;
+
+	const currentExpiresMs = parseSnapshotExpiryMs(currentSnapshot);
+	const previousExpiresMs = parseSnapshotExpiryMs(previousSnapshot, options.previousExpiresAtSeconds);
+	const significantExpiryChange = currentExpiresMs != null
+		&& previousExpiresMs != null
+		&& Math.abs(currentExpiresMs - previousExpiresMs) >= FB_ALERT_SIGNIFICANT_EXPIRY_CHANGE_MS;
+
+	const shouldSkip = sameOffice
+		&& !areaChanged
+		&& !severityChanged
+		&& !textChanged
+		&& !significantExpiryChange;
+
+	return {
+		currentSnapshot,
+		sameOffice,
+		areaChanged,
+		severityChanged,
+		textChanged,
+		significantExpiryChange,
+		shouldSkip,
 	};
 }
 

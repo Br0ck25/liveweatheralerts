@@ -163,7 +163,7 @@ export function fbAutoPostModeHelp(mode: FbAutoPostMode): string {
 		return 'All active, timely Tornado Warnings auto-post and follow the existing Facebook thread/comment rules.';
 	}
 	if (mode === 'smart_high_impact') {
-		return 'All active, timely Tornado Warnings auto-post. Severe Thunderstorm Warnings and Watches are storm-clustered, so one main post is created per metro/region and same-storm follow-ups become comments instead of duplicate posts. Otherwise Severe Thunderstorm Warnings need metro or 10 counties plus destructive, 70 mph, 2-inch hail, or strong wording. Fire warnings need wildfire or public safety escalation. Flood and winter warnings must pass the base impact gate.';
+		return 'All active, timely Tornado Warnings and emergency-level alerts auto-post. Other standalone posts are limited to deterministic Tier 2 Severe Thunderstorm, Flood, Winter, and High Wind warnings that meet metro-or-10-county coverage plus explicit impact thresholds. Watches stay on SPC or digest coverage, same-story updates comment before creating new posts, and lower-tier standalone alerts are capped at 4 per hour.';
 	}
 	return 'Automatic Facebook posting is disabled.';
 }

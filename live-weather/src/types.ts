@@ -30,10 +30,13 @@ export interface AlertThread {
 export type AlertPostedSnapshot = {
 	areaDesc: string;
 	expires: string;
+	expiresIso?: string | null;
 	severity: string;
 	headline: string;
 	description: string;
 	instruction: string;
+	senderName?: string | null;
+	ugcCodes?: string[];
 };
 
 export interface FbAppConfig {
@@ -69,6 +72,7 @@ export type SpcOutlookDay = 1 | 2 | 3;
 export type SpcRiskLevel = 'none' | 'marginal' | 'slight' | 'enhanced' | 'moderate' | 'high';
 export type SpcRiskNumber = 0 | 1 | 2 | 3 | 4 | 5;
 export type SpcHazardFocus = 'tornado' | 'wind' | 'hail' | 'mixed';
+export type SpcAreaSource = 'geojson' | 'headline' | 'section' | 'summary' | 'discussion' | 'fallback';
 export type SpcPostType = 'main_setup' | 'upgrade' | 'timing_refresh' | 'day2_lookahead' | 'day3_heads_up' | '';
 export type SpcPostReason =
 	| 'new_slight_or_higher'
@@ -88,10 +92,18 @@ export type SpcOutlookSummary = {
 	highestRiskLevel: SpcRiskLevel;
 	highestRiskNumber: SpcRiskNumber;
 	affectedStates: string[];
+	secondaryStates?: string[];
 	stateFocusText?: string | null;
+	secondaryFocusText?: string | null;
+	primaryAreaSource?: SpcAreaSource | null;
 	primaryRegion: string;
 	hazardList?: string[];
+	primaryHazards?: string[];
+	secondaryHazards?: string[];
 	stormMode?: string | null;
+	stormEvolution?: boolean;
+	laterStormMode?: string | null;
+	stormEvolutionText?: string | null;
 	notableText?: string | null;
 	tornadoProbability?: number | null;
 	windProbability?: number | null;
@@ -140,11 +152,19 @@ export type PublishedSpcOutlookRecord = {
 	highestRiskLevel: SpcRiskLevel;
 	highestRiskNumber: SpcRiskNumber;
 	affectedStates: string[];
+	secondaryStates?: string[];
 	stateFocusText?: string | null;
+	secondaryFocusText?: string | null;
+	primaryAreaSource?: SpcAreaSource | null;
 	primaryRegion: string;
 	hazardFocus: SpcHazardFocus;
 	hazardList?: string[];
+	primaryHazards?: string[];
+	secondaryHazards?: string[];
 	stormMode?: string | null;
+	stormEvolution?: boolean;
+	laterStormMode?: string | null;
+	stormEvolutionText?: string | null;
 	notableText?: string | null;
 	tornadoProbability?: number | null;
 	windProbability?: number | null;
@@ -166,14 +186,41 @@ export type SpcThreadRecord = {
 	summary?: SpcOutlookSummary;
 };
 
+export type SpcAfdOfficeSelection = {
+	code: string;
+	label: string;
+	score: number;
+	matchedStateCodes: string[];
+	matchedFocusKeywords?: string[];
+};
+
+export type SpcAfdSignal = {
+	timingHints: string[];
+	stormModeHints: string[];
+	hazardEmphasis: string[];
+	uncertaintyHints: string[];
+	confidenceHints: string[];
+	notableBehaviorHints: string[];
+};
+
+export type SpcAfdEnrichment = SpcAfdSignal & {
+	selectedOffices: SpcAfdOfficeSelection[];
+	sourceProductIds: string[];
+	failedOfficeCodes?: string[];
+	fetchedAt: string;
+};
+
 export type SpcDebugEntry = {
 	outlookDay: SpcOutlookDay;
 	generatedAt: string;
 	decision: SpcPostDecision;
 	summary: SpcOutlookSummary | null;
+	afdEnrichment?: SpcAfdEnrichment | null;
 	lastPost: PublishedSpcOutlookRecord | null;
 	plannedOutputMode?: 'post' | 'comment' | null;
 	messagePreview?: string | null;
+	validationFailures?: string[];
+	debugMessages?: string[];
 	error?: string | null;
 };
 
@@ -193,16 +240,30 @@ export type SpcLlmPayload = {
 	post_type: Exclude<SpcPostType, ''>;
 	risk_level: SpcRiskLevel;
 	risk_number: SpcRiskNumber;
+	primary_states: string[];
+	region: string;
 	primary_region: string;
 	states: string[];
+	secondary_states?: string[];
 	example_states: string[];
 	state_focus_text?: string | null;
+	secondary_area_text?: string | null;
 	hazard_focus: SpcHazardFocus;
 	hazard_list: string[];
+	primary_hazards?: string[];
+	secondary_hazards?: string[];
 	hazard_line: string;
 	storm_mode?: string | null;
+	storm_evolution: boolean;
+	storm_evolution_text?: string | null;
 	timing_window?: string | null;
 	notable_text?: string | null;
+	afd_timing_hints?: string[];
+	afd_storm_mode_hints?: string[];
+	afd_hazard_emphasis?: string[];
+	afd_uncertainty_hints?: string[];
+	afd_confidence_hints?: string[];
+	afd_notable_behavior_hints?: string[];
 	trend: 'developing' | 'building' | 'shifting' | 'approaching';
 	change_hint?: string | null;
 	recent_openings: string[];
@@ -219,6 +280,15 @@ export type SpcLlmValidationResult = {
 export type DigestHazardFamily = 'flood' | 'winter' | 'wind' | 'fire' | 'other';
 export type DigestAlertTier = 'warning' | 'watch' | 'advisory' | 'statement';
 export type DigestHazardCooldownKey = DigestHazardFamily | 'multi';
+export type DigestRegionalCoherence = 'cohesive' | 'scattered';
+
+export type DigestRegionalStorySelection = {
+	storyRegion: string | null;
+	storyStates: string[];
+	outlierStates: string[];
+	regionalCoherence: DigestRegionalCoherence;
+	dominantStateShare: number;
+};
 
 export type DigestCandidate = {
 	alertId: string;
@@ -230,6 +300,7 @@ export type DigestCandidate = {
 	certainty: string;
 	hazardFamily: DigestHazardFamily;
 	alertTier: DigestAlertTier;
+	matchedMetroNames: string[];
 	isMarineOrCoastal: boolean;
 };
 
@@ -240,6 +311,11 @@ export type HazardClusterSummary = {
 	alertCount: number;
 	warningCount?: number;
 	topAlertTypes: string[];
+	storyRegion?: string | null;
+	storyStates?: string[];
+	outlierStates?: string[];
+	regionalCoherence?: DigestRegionalCoherence;
+	dominantStateShare?: number;
 };
 
 export type DigestSummary = {
@@ -247,11 +323,16 @@ export type DigestSummary = {
 	postType: 'digest' | 'cluster';
 	hazardFocus: DigestHazardFamily | null;
 	states: string[];
+	storyStates?: string[];
+	storyFingerprint?: string;
 	topAlertTypes: string[];
 	urgency: 'high' | 'moderate' | 'low';
 	alertCount: number;
 	warningCount: number;
 	hash: string;
+	storyRegion?: string | null;
+	outlierStates?: string[];
+	regionalCoherence?: DigestRegionalCoherence;
 	changeHint?: string | null;
 };
 
@@ -283,6 +364,7 @@ export type LlmPromptPayload = {
 	max_length: number;
 	style: string;
 	recent_openings: string[];
+	suppressed_outliers?: string[];
 };
 
 export type LlmPostValidationResult = {
@@ -360,16 +442,58 @@ export type FacebookPublishOptions = {
 	request?: Request | null;
 	customMessage?: string;
 	threadAction?: FacebookPublishThreadAction | string;
+	threadTarget?: AlertThread | null;
 	imageUrl?: string;
+	change?: AlertChangeRecord | null;
 };
 
 export type FacebookPublishResult = {
 	id: string;
-	status: 'posted' | 'commented';
+	status: 'posted' | 'commented' | 'skipped';
 	postId: string;
 	commentId?: string;
 	updateCount?: number;
 	chainBreak?: boolean;
+	skippedReason?: string;
+};
+
+export type FacebookCoverageLane = 'alerts' | 'digest' | 'spc_day1' | 'spc_day2' | 'spc_day3';
+
+export type FacebookCoverageAction = 'post' | 'comment' | 'multi_post';
+
+export type FacebookCoverageIntent = {
+	lane: FacebookCoverageLane;
+	action: FacebookCoverageAction;
+	priority: number;
+	reason: string;
+	summary: string;
+	storyKey?: string | null;
+	targetPostId?: string | null;
+};
+
+export type FacebookCoverageEvaluation = {
+	lane: FacebookCoverageLane;
+	intent: FacebookCoverageIntent | null;
+	blockedReason?: string | null;
+};
+
+export type FacebookCoordinatorLaneStatus = {
+	lane: FacebookCoverageLane;
+	intent: FacebookCoverageIntent | null;
+	status: 'selected' | 'suppressed' | 'blocked' | 'idle';
+	reason?: string | null;
+	detail?: string | null;
+};
+
+export type FacebookCoordinatorSnapshot = {
+	generatedAt: string;
+	statuses: FacebookCoordinatorLaneStatus[];
+	selectedLane: FacebookCoverageLane | null;
+	selectedAction: FacebookCoverageAction | null;
+	selectedReason: string | null;
+	selectedIntentReason?: string | null;
+	messages?: string[];
+	executionError?: string | null;
 };
 
 export interface AdminSessionRecord {

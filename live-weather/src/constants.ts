@@ -45,19 +45,24 @@ export const KV_FB_DIGEST_HASH = 'fb:digest:hash';
 export const KV_FB_DIGEST_ROTATION_CURSOR = 'fb:digest:rotation-cursor';
 export const KV_FB_COVERED_ALERTS = 'fb:covered-alerts';
 export const KV_FB_STARTUP_STATE = 'fb:startup-state';
+export const KV_FB_ALERT_STANDALONE_POST_HISTORY = 'fb:auto-post:standalone-history:v1';
 export const KV_FB_DIGEST_THREAD_PREFIX = 'fb:digest-thread:';
 export const KV_FB_DIGEST_RECENT_OPENINGS = 'fb:digest:recent-openings';
 export const KV_FB_SPC_LAST_SUMMARY_PREFIX = 'fb:spc:last-summary:';
 export const KV_FB_SPC_LAST_POST_PREFIX = 'fb:spc:last-post:';
 export const KV_FB_SPC_LAST_HASH_PREFIX = 'fb:spc:last-hash:';
 export const KV_FB_SPC_THREAD_PREFIX = 'fb:spc:thread:';
+export const KV_FB_SPC_DEFERRED_ANCHOR_PREFIX = 'fb:spc:deferred-anchor:';
 export const KV_FB_SPC_DEBUG = 'fb:spc:debug';
+export const KV_FB_COORDINATOR_DEBUG = 'fb:coordinator:debug';
 export const KV_FB_SPC_LAST_SUMMARY = 'fb:spc:day1:last-summary';
 export const KV_FB_SPC_LAST_POST = 'fb:spc:day1:last-post';
 export const KV_FB_SPC_LAST_HASH = 'fb:spc:day1:last-hash';
 export const KV_FB_SPC_RECENT_OPENINGS = 'fb:spc:recent-openings';
 
 // Digest timing constants
+export const FB_GLOBAL_POST_GAP_MS = 15 * 60 * 1000;
+export const FB_AUTO_POST_STANDALONE_MAX_POSTS_PER_HOUR = 4;
 export const FB_DIGEST_COOLDOWN_MS = 60 * 60 * 1000;
 export const FB_DIGEST_SAME_HAZARD_COOLDOWN_MS = 60 * 60 * 1000;
 export const FB_DIGEST_COMMENT_COOLDOWN_MS = 20 * 60 * 1000;
@@ -77,6 +82,7 @@ export const FB_CLUSTER_BREAKOUT_SCORE_THRESHOLD = 20;
 export const FB_CLUSTER_BREAKOUT_MIN_STATES = 3;
 
 // Digest layout constants
+export const FB_DIGEST_MAX_STORY_STATES = 5;
 export const FB_DIGEST_TOP_STATE_COUNT = 3;
 export const FB_DIGEST_ROTATION_STATE_COUNT = 3;
 export const FB_DIGEST_MAX_NORMAL_MULTISTATE = 6;
@@ -123,4 +129,8 @@ export function kvSpcLastHashKey(day: SpcOutlookDay): string {
 
 export function kvSpcThreadKey(day: SpcOutlookDay): string {
 	return `${KV_FB_SPC_THREAD_PREFIX}${day}`;
+}
+
+export function kvSpcDeferredAnchorKey(day: Exclude<SpcOutlookDay, 1>): string {
+	return `${KV_FB_SPC_DEFERRED_ANCHOR_PREFIX}${day}`;
 }

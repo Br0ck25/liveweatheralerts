@@ -146,6 +146,10 @@ describe('Live Weather Admin worker', () => {
 		expect(body).toContain('Live Weather Alerts Admin');
 		expect(body).toContain('Tornado Warning');
 		expect(body).toContain('autoPostMode');
+		expect(body).toContain('data-admin-panel-btn="facebook-auto-post"');
+		expect(body).toContain('data-admin-panel-btn="facebook-tokens"');
+		expect(body).toContain('data-admin-panel="facebook-auto-post"');
+		expect(body).toContain('data-admin-panel="facebook-tokens"');
 		expect(body).toContain('Facebook Post');
 		expect(body).toContain('Facebook Post Ranking');
 		expect(body).toContain('Priority is a relative ranking number');
@@ -154,6 +158,11 @@ describe('Live Weather Admin worker', () => {
 		expect(body).toContain('Convective Outlook');
 		expect(body).toContain('3-Day USA Summary');
 		expect(body).toContain('liveWeatherAdminFilters:v1');
+
+		const alertsPanelMatch = body.match(/<div class="admin-page-panel is-active" data-admin-panel="alerts">([\s\S]*?)<div class="admin-page-panel" data-admin-panel="facebook-auto-post">/);
+		expect(alertsPanelMatch?.[1]).toBeTruthy();
+		expect(alertsPanelMatch?.[1]).not.toContain('autoPostMode');
+		expect(alertsPanelMatch?.[1]).not.toContain('tokenAppId');
 	});
 
 	it('returns regional admin forecast data and a 3-day USA summary when authenticated', async () => {
@@ -2057,7 +2066,7 @@ describe('Live Weather Admin worker', () => {
 		expect((globalThis.fetch as any).mock.calls.some(([input]) => String(input).includes('/photos'))).toBe(true);
 	});
 
-	it('uses a change-only facebook comment when admin posts the default alert text into an existing thread', async () => {
+	it('skips duplicate admin reposts when an existing thread has no material changes', async () => {
 		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword', FB_PAGE_ID: '1097328350123101', FB_PAGE_ACCESS_TOKEN: 'dummy-token' };
 		const loginResp = await worker.fetch(
 			new IncomingRequest('https://live-weather.example/admin/login', {
@@ -2094,19 +2103,182 @@ describe('Live Weather Admin worker', () => {
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
+		const json = await response.json() as any;
+		expect(json.results[0].status).toBe('skipped');
+		expect(json.results[0].skippedReason).toBe('duplicate_minor_update');
+		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) =>
+			String(input).includes('graph.facebook.com'),
+		)).toBe(false);
+	});
+
+	it('autoPostFacebookAlerts skips older freeze-warning reissues when only a minor time tweak changed', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowMs = Date.now();
+		const nowIso = new Date(nowMs).toISOString();
+		const oldPostedAt = new Date(nowMs - (2 * 60 * 60 * 1000)).toISOString();
+		const oldExpiresIso = new Date(nowMs + (10 * 60 * 60 * 1000)).toISOString();
+		const minorExtensionIso = new Date(nowMs + (10 * 60 * 60 * 1000) + (15 * 60 * 1000)).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+		}));
+
+		const baseFreezeProperties = {
+			event: 'Freeze Warning',
+			severity: 'Moderate',
+			areaDesc: 'Tooele and Rush Valleys; Eastern Box Elder County; Northern Wasatch Front; Salt Lake Valley; Utah Valley; San Rafael Swell; Western Canyonlands',
+			senderName: 'NWS Salt Lake City UT',
+			headline: 'Freeze Warning issued April 3 at 8:44AM MDT until April 4 at 9:00AM MDT by NWS Salt Lake City UT',
+			description: 'Temperatures will drop below freezing again tonight. Frost and freeze conditions could kill crops and damage unprotected outdoor plumbing.',
+			instruction: 'Take steps now to protect tender plants from the cold.',
+			sent: nowIso,
+			updated: nowIso,
+			effective: nowIso,
+			expires: oldExpiresIso,
+			geocode: {
+				UGC: ['UTZ101', 'UTZ102', 'UTZ103', 'UTZ104', 'UTZ105', 'UTZ106', 'UTZ107'],
+			},
+		};
+		await goodEnv.WEATHER_KV.put('thread:UTZ101:freeze_warning', JSON.stringify({
+			postId: 'freeze-post-1',
+			nwsAlertId: 'freeze-old-1',
+			expiresAt: Math.floor(Date.parse(oldExpiresIso) / 1000),
+			county: baseFreezeProperties.areaDesc,
+			alertType: 'Freeze Warning',
+			updateCount: 0,
+			lastPostedAt: oldPostedAt,
+			lastPostedSnapshot: __testing.buildAlertPostedSnapshot(baseFreezeProperties),
+		}));
+
+		await __testing.autoPostFacebookAlerts(
+			goodEnv as any,
+			{
+				'freeze-reissue-1': {
+					id: 'freeze-reissue-1',
+					properties: {
+						...baseFreezeProperties,
+						headline: 'Freeze Warning issued April 3 at 10:44AM MDT until April 4 at 9:15AM MDT by NWS Salt Lake City UT',
+						expires: minorExtensionIso,
+						updated: new Date(nowMs + 5 * 60 * 1000).toISOString(),
+					},
+				},
+			},
+			[
+				{
+					alertId: 'freeze-reissue-1',
+					stateCodes: ['UT'],
+					countyCodes: ['001', '003', '005', '007', '009', '011', '013', '015', '017', '019'],
+					event: 'Freeze Warning',
+					areaDesc: baseFreezeProperties.areaDesc,
+					changedAt: nowIso,
+					changeType: 'updated',
+					severity: 'Moderate',
+				},
+			],
+		);
+
+		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) =>
+			String(input).includes('graph.facebook.com'),
+		)).toBe(false);
+		const threadRaw = await goodEnv.WEATHER_KV.get('thread:UTZ101:freeze_warning');
+		expect(threadRaw).toBeTruthy();
+		const thread = JSON.parse(threadRaw || '{}');
+		expect(thread.postId).toBe('freeze-post-1');
+		expect(thread.updateCount).toBe(0);
+	});
+
+	it('autoPostFacebookAlerts keeps freeze-warning extensions on the same thread as comments', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowMs = Date.now();
+		const nowIso = new Date(nowMs).toISOString();
+		const oldPostedAt = new Date(nowMs - (2 * 60 * 60 * 1000)).toISOString();
+		const oldExpiresIso = new Date(nowMs + (8 * 60 * 60 * 1000)).toISOString();
+		const significantExtensionIso = new Date(nowMs + (11 * 60 * 60 * 1000)).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+		}));
+
+		const baseFreezeProperties = {
+			event: 'Freeze Warning',
+			severity: 'Moderate',
+			areaDesc: 'Tooele and Rush Valleys; Eastern Box Elder County; Northern Wasatch Front; Salt Lake Valley; Utah Valley; San Rafael Swell; Western Canyonlands',
+			senderName: 'NWS Salt Lake City UT',
+			headline: 'Freeze Warning issued April 3 at 8:44AM MDT until April 4 at 6:00AM MDT by NWS Salt Lake City UT',
+			description: 'Temperatures will drop below freezing again tonight. Frost and freeze conditions could kill crops and damage unprotected outdoor plumbing.',
+			instruction: 'Take steps now to protect tender plants from the cold.',
+			sent: nowIso,
+			updated: nowIso,
+			effective: nowIso,
+			expires: oldExpiresIso,
+			geocode: {
+				UGC: ['UTZ101', 'UTZ102', 'UTZ103', 'UTZ104', 'UTZ105', 'UTZ106', 'UTZ107'],
+			},
+		};
+		await goodEnv.WEATHER_KV.put('thread:UTZ101:freeze_warning', JSON.stringify({
+			postId: 'freeze-post-2',
+			nwsAlertId: 'freeze-old-2',
+			expiresAt: Math.floor(Date.parse(oldExpiresIso) / 1000),
+			county: baseFreezeProperties.areaDesc,
+			alertType: 'Freeze Warning',
+			updateCount: 0,
+			lastPostedAt: oldPostedAt,
+			lastPostedSnapshot: __testing.buildAlertPostedSnapshot(baseFreezeProperties),
+		}));
+
+		await __testing.autoPostFacebookAlerts(
+			goodEnv as any,
+			{
+				'freeze-extension-1': {
+					id: 'freeze-extension-1',
+					properties: {
+						...baseFreezeProperties,
+						headline: 'Freeze Warning issued April 3 at 10:44AM MDT until April 4 at 9:00AM MDT by NWS Salt Lake City UT',
+						expires: significantExtensionIso,
+						updated: new Date(nowMs + 5 * 60 * 1000).toISOString(),
+					},
+				},
+			},
+			[
+				{
+					alertId: 'freeze-extension-1',
+					stateCodes: ['UT'],
+					countyCodes: ['001', '003', '005', '007', '009', '011', '013', '015', '017', '019'],
+					event: 'Freeze Warning',
+					areaDesc: baseFreezeProperties.areaDesc,
+					changedAt: nowIso,
+					changeType: 'extended',
+					severity: 'Moderate',
+				},
+			],
+		);
+
 		const commentCall = (globalThis.fetch as any).mock.calls.find(([input]: [RequestInfo]) =>
-			String(input).includes('/existing-post-1/comments'),
+			String(input).includes('/freeze-post-2/comments'),
 		);
 		expect(commentCall).toBeTruthy();
+		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) =>
+			String(input).includes('/feed') || String(input).includes('/photos'),
+		)).toBe(false);
 		const commentBody = commentCall?.[1]?.body;
 		const commentParams = commentBody instanceof URLSearchParams
 			? commentBody
 			: new URLSearchParams(String(commentBody || ''));
-		const message = String(commentParams.get('message') || '');
-		expect(message).toContain('🔄 UPDATE — Tornado Warning for Test County');
-		expect(message).toContain('NWS updated this alert with no major text changes.');
-		expect(message).not.toContain('https://liveweatheralerts.com');
-		expect(message).not.toContain('#weatheralert');
+		expect(String(commentParams.get('message') || '')).toContain('Expires:');
+
+		const threadRaw = await goodEnv.WEATHER_KV.get('thread:UTZ101:freeze_warning');
+		expect(threadRaw).toBeTruthy();
+		const thread = JSON.parse(threadRaw || '{}');
+		expect(thread.postId).toBe('freeze-post-2');
+		expect(thread.updateCount).toBe(1);
 	});
 
 	it('renders facebook post tab preview buttons with the same state and event metadata used for image lookup', async () => {
@@ -2313,6 +2485,688 @@ describe('Live Weather Admin worker', () => {
 		expect(JSON.parse(metroThreadRaw || '{}').updateCount).toBe(1);
 	});
 
+	it('maps only the intended hazard families for same-cycle alert clustering', () => {
+		const { autoPostHazardClusterFamilyForEvent } = __testing as any;
+
+		expect(autoPostHazardClusterFamilyForEvent('High Wind Warning')).toBe('wind');
+		expect(autoPostHazardClusterFamilyForEvent('Flood Advisory')).toBe('flood');
+		expect(autoPostHazardClusterFamilyForEvent('Winter Weather Advisory')).toBe('winter');
+		expect(autoPostHazardClusterFamilyForEvent('Red Flag Warning')).toBe('fire_weather');
+		expect(autoPostHazardClusterFamilyForEvent('Severe Thunderstorm Warning')).toBeNull();
+		expect(autoPostHazardClusterFamilyForEvent('Tornado Warning')).toBeNull();
+		expect(autoPostHazardClusterFamilyForEvent('Flash Flood Warning')).toBeNull();
+	});
+
+	it('clusters same-family alerts from the same office and state into one anchor post with comment updates', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowIso = new Date().toISOString();
+		const expiresIso = new Date(Date.now() + 90 * 60 * 1000).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+		}));
+
+		const strongerWarning = {
+			id: 'wind-cluster-anchor',
+			properties: {
+				event: 'High Wind Warning',
+				severity: 'Severe',
+				areaDesc: 'West Slope; Foothills; River Valley; Lake Basin',
+				senderName: 'NWS Reno NV',
+				headline: 'Destructive winds expected across the West Slope',
+				description: 'Damaging gusts may reach 80 mph with tree damage and scattered power outages likely.',
+				instruction: 'Avoid travel in exposed areas.',
+				sent: nowIso,
+				updated: nowIso,
+				effective: nowIso,
+				expires: expiresIso,
+				geocode: {
+					UGC: ['CAZ101', 'CAZ103', 'CAZ105', 'CAZ107', 'CAZ109', 'CAZ111', 'CAZ113', 'CAZ115', 'CAZ117', 'CAZ119', 'CAZ121', 'CAZ123'],
+				},
+				parameters: {
+					maxWindGust: ['80 mph'],
+				},
+			},
+		};
+		const secondaryWarning = {
+			id: 'wind-cluster-warning-2',
+			properties: {
+				event: 'High Wind Warning',
+				severity: 'Moderate',
+				areaDesc: 'Interior Basin; Canyon Rim',
+				senderName: 'NWS Reno NV',
+				headline: 'High Wind Warning expanded into the Interior Basin',
+				description: 'Wind gusts up to 60 mph are expected with difficult travel for high-profile vehicles.',
+				instruction: 'Use caution on open roads.',
+				sent: new Date(Date.now() + 60 * 1000).toISOString(),
+				updated: new Date(Date.now() + 60 * 1000).toISOString(),
+				effective: nowIso,
+				expires: expiresIso,
+				geocode: {
+					UGC: ['CAZ131', 'CAZ133', 'CAZ135', 'CAZ137', 'CAZ139', 'CAZ141', 'CAZ143', 'CAZ145', 'CAZ147', 'CAZ149'],
+				},
+				parameters: {
+					maxWindGust: ['60 mph'],
+				},
+			},
+		};
+		const advisorySupplement = {
+			id: 'wind-cluster-advisory',
+			properties: {
+				event: 'Wind Advisory',
+				severity: 'Moderate',
+				areaDesc: 'North Slope',
+				senderName: 'NWS Reno NV',
+				headline: 'Wind Advisory added for the North Slope',
+				description: 'Gusts up to 45 mph are expected across the advisory area.',
+				instruction: 'Secure loose outdoor objects.',
+				sent: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
+				updated: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
+				effective: nowIso,
+				expires: expiresIso,
+				geocode: {
+					UGC: ['CAZ201'],
+				},
+				parameters: {
+					maxWindGust: ['45 mph'],
+				},
+			},
+		};
+
+		await __testing.autoPostFacebookAlerts(
+			goodEnv as any,
+			{
+				'wind-cluster-anchor': strongerWarning,
+				'wind-cluster-warning-2': secondaryWarning,
+				'wind-cluster-advisory': advisorySupplement,
+			},
+			[
+				{
+					alertId: 'wind-cluster-anchor',
+					stateCodes: ['CA'],
+					countyCodes: ['001', '003', '005', '007', '009', '011', '013', '015', '017', '019', '021', '023'],
+					event: 'High Wind Warning',
+					areaDesc: 'West Slope; Foothills; River Valley; Lake Basin',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Severe',
+				},
+				{
+					alertId: 'wind-cluster-warning-2',
+					stateCodes: ['CA'],
+					countyCodes: ['031', '033', '035', '037', '039', '041', '043', '045', '047', '049'],
+					event: 'High Wind Warning',
+					areaDesc: 'Interior Basin; Canyon Rim',
+					changedAt: new Date(Date.now() + 60 * 1000).toISOString(),
+					changeType: 'new',
+					severity: 'Moderate',
+				},
+				{
+					alertId: 'wind-cluster-advisory',
+					stateCodes: ['CA'],
+					countyCodes: ['201'],
+					event: 'Wind Advisory',
+					areaDesc: 'North Slope',
+					changedAt: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
+					changeType: 'new',
+					severity: 'Moderate',
+				},
+			],
+		);
+
+		const postCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/feed') || String(input).includes('/photos'),
+		);
+		const commentCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/12345/comments'),
+		);
+		expect(postCalls.length).toBe(1);
+		expect(commentCalls.length).toBe(2);
+
+		const postBody = postCalls[0]?.[1]?.body;
+		const postParams = postBody instanceof URLSearchParams
+			? postBody
+			: new URLSearchParams(String(postBody || ''));
+		const anchorText = String(postParams.get('caption') || postParams.get('message') || '');
+		expect(anchorText).toContain('Destructive winds expected across the West Slope');
+
+		const commentMessages = commentCalls.map(([, init]: [RequestInfo, RequestInit]) => {
+			const body = init?.body;
+			const params = body instanceof URLSearchParams
+				? body
+				: new URLSearchParams(String(body || ''));
+			return String(params.get('message') || '');
+		});
+		expect(commentMessages.every((message) => message.startsWith('UPDATE:'))).toBe(true);
+		expect(commentMessages.some((message) => message.includes('60 mph'))).toBe(true);
+		expect(commentMessages.some((message) => message.includes('North Slope'))).toBe(true);
+		expect(commentMessages.every((message) => !message.includes('#weatheralert'))).toBe(true);
+
+		const advisoryThreadRaw = await goodEnv.WEATHER_KV.get('thread:CAZ201:wind_advisory');
+		expect(advisoryThreadRaw).toBeTruthy();
+		expect(JSON.parse(advisoryThreadRaw || '{}').postId).toBe('12345');
+		const advisoryClusterThreadRaw = await goodEnv.WEATHER_KV.get('thread-cluster:wind:sender:nws-reno-nv:states:CA');
+		expect(advisoryClusterThreadRaw).toBeTruthy();
+		expect(JSON.parse(advisoryClusterThreadRaw || '{}').postId).toBe('12345');
+	});
+
+	it('runCoordinatedFacebookCoverage prioritizes alert auto-posts over digest startup coverage', async () => {
+		const { runCoordinatedFacebookCoverage, readFacebookCoordinatorSnapshot } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowIso = new Date().toISOString();
+		const expiresIso = new Date(Date.now() + 90 * 60 * 1000).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+			digestCoverageEnabled: true,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', '');
+
+		await runCoordinatedFacebookCoverage(
+			goodEnv as any,
+			{
+				'wind-priority-alert': {
+					id: 'wind-priority-alert',
+					properties: {
+						event: 'High Wind Warning',
+						severity: 'Severe',
+						urgency: 'Immediate',
+						areaDesc: 'West Slope; Foothills; River Valley; Lake Basin',
+						senderName: 'NWS Reno NV',
+						headline: 'Destructive winds expected across the West Slope',
+						description: 'Damaging gusts may reach 80 mph with tree damage and scattered power outages likely.',
+						instruction: 'Avoid travel in exposed areas.',
+						sent: nowIso,
+						updated: nowIso,
+						effective: nowIso,
+						expires: expiresIso,
+						geocode: {
+							UGC: ['CAZ101', 'CAZ103', 'CAZ105', 'CAZ107', 'CAZ109', 'CAZ111', 'CAZ113', 'CAZ115', 'CAZ117', 'CAZ119', 'CAZ121', 'CAZ123'],
+						},
+						parameters: {
+							maxWindGust: ['80 mph'],
+						},
+					},
+				},
+			},
+			[
+				{
+					alertId: 'wind-priority-alert',
+					stateCodes: ['CA'],
+					countyCodes: ['001', '003', '005', '007', '009', '011', '013', '015', '017', '019', '021', '023'],
+					event: 'High Wind Warning',
+					areaDesc: 'West Slope; Foothills; River Valley; Lake Basin',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Severe',
+				},
+			],
+		);
+
+		const snapshot = await readFacebookCoordinatorSnapshot(goodEnv);
+		expect(snapshot?.selectedLane).toBe('alerts');
+		expect(snapshot?.selectedReason).toBe('coordinator_selected_alerts');
+		expect(snapshot?.selectedIntentReason).toBe('tier2_high_wind_warning');
+		expect(snapshot?.statuses.some((status: any) => status.lane === 'digest' && status.status === 'suppressed')).toBe(true);
+		expect(snapshot?.statuses.some((status: any) => (
+			status.lane === 'digest'
+			&& status.reason === 'coordinator_suppressed_digest_by_alerts'
+		))).toBe(true);
+		expect(await goodEnv.WEATHER_KV.get('fb:digest:block')).toBeNull();
+	});
+
+	it('does not cluster same-family alerts when the state differs', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowIso = new Date().toISOString();
+		const expiresIso = new Date(Date.now() + 90 * 60 * 1000).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+		}));
+
+		await __testing.autoPostFacebookAlerts(
+			goodEnv as any,
+			{
+				'wind-ca': {
+					id: 'wind-ca',
+					properties: {
+						event: 'High Wind Warning',
+						severity: 'Severe',
+						areaDesc: 'California wind corridor',
+						senderName: 'NWS Reno NV',
+						headline: 'California High Wind Warning',
+						description: 'Damaging gusts up to 75 mph are expected.',
+						sent: nowIso,
+						updated: nowIso,
+						effective: nowIso,
+						expires: expiresIso,
+						geocode: { UGC: ['CAZ301', 'CAZ303', 'CAZ305', 'CAZ307', 'CAZ309', 'CAZ311', 'CAZ313', 'CAZ315', 'CAZ317', 'CAZ319'] },
+						parameters: { maxWindGust: ['75 mph'] },
+					},
+				},
+				'wind-nv': {
+					id: 'wind-nv',
+					properties: {
+						event: 'High Wind Warning',
+						severity: 'Severe',
+						areaDesc: 'Nevada wind corridor',
+						senderName: 'NWS Reno NV',
+						headline: 'Nevada High Wind Warning',
+						description: 'Damaging gusts up to 70 mph are expected.',
+						sent: new Date(Date.now() + 60 * 1000).toISOString(),
+						updated: new Date(Date.now() + 60 * 1000).toISOString(),
+						effective: nowIso,
+						expires: expiresIso,
+						geocode: { UGC: ['NVZ301', 'NVZ303', 'NVZ305', 'NVZ307', 'NVZ309', 'NVZ311', 'NVZ313', 'NVZ315', 'NVZ317', 'NVZ319'] },
+						parameters: { maxWindGust: ['70 mph'] },
+					},
+				},
+			},
+			[
+				{
+					alertId: 'wind-ca',
+					stateCodes: ['CA'],
+					countyCodes: ['301', '303', '305', '307', '309', '311', '313', '315', '317', '319'],
+					event: 'High Wind Warning',
+					areaDesc: 'California wind corridor',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Severe',
+				},
+				{
+					alertId: 'wind-nv',
+					stateCodes: ['NV'],
+					countyCodes: ['301', '303', '305', '307', '309', '311', '313', '315', '317', '319'],
+					event: 'High Wind Warning',
+					areaDesc: 'Nevada wind corridor',
+					changedAt: new Date(Date.now() + 60 * 1000).toISOString(),
+					changeType: 'new',
+					severity: 'Severe',
+				},
+			],
+		);
+
+		const postCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/feed') || String(input).includes('/photos'),
+		);
+		const commentCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/comments'),
+		);
+		expect(postCalls.length).toBe(2);
+		expect(commentCalls.length).toBe(0);
+	});
+
+	it('routes overlapping tornado watches onto the current SPC Day 1 thread instead of creating a new alert post', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowMs = Date.now();
+		const nowIso = new Date(nowMs).toISOString();
+		const expiresIso = new Date(nowMs + 5 * 60 * 60 * 1000).toISOString();
+		const spcIssuedIso = new Date(nowMs - 3 * 60 * 60 * 1000).toISOString();
+		const spcPublishedIso = new Date(nowMs - 90 * 60 * 1000).toISOString();
+		const spcValidFromIso = new Date(nowMs - 2 * 60 * 60 * 1000).toISOString();
+		const spcValidToIso = new Date(nowMs + 10 * 60 * 60 * 1000).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:spc:thread:1', JSON.stringify({
+			postId: 'spc-day1-post-1',
+			outlookDay: 1,
+			issuedAt: spcIssuedIso,
+			publishedAt: spcPublishedIso,
+			hash: 'spc-day1-hash-1',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				issuedAt: spcIssuedIso,
+				validFrom: spcValidFromIso,
+				validTo: spcValidToIso,
+				outlookDay: 1,
+				highestRiskLevel: 'enhanced',
+				highestRiskNumber: 3,
+				affectedStates: ['IA', 'IL', 'WI'],
+				stateFocusText: 'Eastern Iowa, Northern Illinois, and Southern Wisconsin',
+				primaryRegion: 'Midwest',
+				hazardFocus: 'tornado',
+				hazardList: ['tornadoes', 'damaging winds'],
+				stormMode: 'supercells',
+				notableText: null,
+				tornadoProbability: 10,
+				windProbability: 30,
+				hailProbability: null,
+				timingText: 'this afternoon',
+				summaryHash: 'spc-day1-hash-1',
+			},
+		}));
+
+		await __testing.autoPostFacebookAlerts(
+			goodEnv as any,
+			{
+				'tw-ia-1': {
+					id: 'tw-ia-1',
+					properties: {
+						event: 'Tornado Watch',
+						severity: 'Moderate',
+						areaDesc: 'Polk; Story; Boone',
+						senderName: 'NWS Des Moines IA',
+						headline: 'Tornado Watch for central Iowa',
+						description: 'Tornadoes, large hail, and isolated damaging winds are possible.',
+						instruction: 'Be ready to act quickly if warnings are issued.',
+						sent: nowIso,
+						updated: nowIso,
+						effective: nowIso,
+						expires: expiresIso,
+						geocode: {
+							UGC: ['IAC015', 'IAC153', 'IAC169'],
+						},
+					},
+				},
+			},
+			[
+				{
+					alertId: 'tw-ia-1',
+					stateCodes: ['IA'],
+					countyCodes: ['015', '153', '169'],
+					event: 'Tornado Watch',
+					areaDesc: 'Polk; Story; Boone',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Moderate',
+				},
+			],
+		);
+
+		const postCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/feed') || String(input).includes('/photos'),
+		);
+		const spcCommentCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/spc-day1-post-1/comments'),
+		);
+		expect(postCalls.length).toBe(0);
+		expect(spcCommentCalls.length).toBe(1);
+
+		const commentBody = spcCommentCalls[0]?.[1]?.body;
+		const commentParams = commentBody instanceof URLSearchParams
+			? commentBody
+			: new URLSearchParams(String(commentBody || ''));
+		const commentMessage = String(commentParams.get('message') || '');
+		expect(commentMessage).toContain('UPDATE: A Tornado Watch is now in effect for parts of Iowa');
+		expect(commentMessage).toContain('Tornadoes and damaging winds will be the main concerns');
+		expect(commentMessage).not.toContain('Polk; Story; Boone');
+
+		const watchThreadRaw = await goodEnv.WEATHER_KV.get('thread:IAC015:tornado_watch');
+		expect(watchThreadRaw).toBeTruthy();
+		expect(JSON.parse(watchThreadRaw || '{}').postId).toBe('spc-day1-post-1');
+
+		const spcThreadRaw = await goodEnv.WEATHER_KV.get('fb:spc:thread:1');
+		expect(spcThreadRaw).toBeTruthy();
+		const spcThread = JSON.parse(spcThreadRaw || '{}');
+		expect(spcThread.commentCount).toBe(1);
+		expect(spcThread.lastCommentAt).toBeTruthy();
+	});
+
+	it('skips the SPC Day 1 watch reroute when a tornado warning is already driving coverage', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowMs = Date.now();
+		const nowIso = new Date(nowMs).toISOString();
+		const expiresIso = new Date(nowMs + 5 * 60 * 60 * 1000).toISOString();
+		const spcIssuedIso = new Date(nowMs - 3 * 60 * 60 * 1000).toISOString();
+		const spcPublishedIso = new Date(nowMs - 90 * 60 * 1000).toISOString();
+		const spcValidFromIso = new Date(nowMs - 2 * 60 * 60 * 1000).toISOString();
+		const spcValidToIso = new Date(nowMs + 10 * 60 * 60 * 1000).toISOString();
+		const activeWarningIso = new Date(nowMs).toISOString();
+		const activeWarningExpiresIso = new Date(Date.now() + 20 * 60 * 1000).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:spc:thread:1', JSON.stringify({
+			postId: 'spc-day1-post-1',
+			outlookDay: 1,
+			issuedAt: spcIssuedIso,
+			publishedAt: spcPublishedIso,
+			hash: 'spc-day1-hash-1',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				issuedAt: spcIssuedIso,
+				validFrom: spcValidFromIso,
+				validTo: spcValidToIso,
+				outlookDay: 1,
+				highestRiskLevel: 'enhanced',
+				highestRiskNumber: 3,
+				affectedStates: ['IA', 'IL', 'WI'],
+				stateFocusText: 'Eastern Iowa, Northern Illinois, and Southern Wisconsin',
+				primaryRegion: 'Midwest',
+				hazardFocus: 'tornado',
+				hazardList: ['tornadoes', 'damaging winds'],
+				stormMode: 'supercells',
+				notableText: null,
+				tornadoProbability: 10,
+				windProbability: 30,
+				hailProbability: null,
+				timingText: 'this afternoon',
+				summaryHash: 'spc-day1-hash-1',
+			},
+		}));
+
+		await __testing.autoPostFacebookAlerts(
+			goodEnv as any,
+			{
+				'tw-ia-1': {
+					id: 'tw-ia-1',
+					properties: {
+						event: 'Tornado Watch',
+						severity: 'Moderate',
+						areaDesc: 'Polk; Story; Boone',
+						senderName: 'NWS Des Moines IA',
+						headline: 'Tornado Watch for central Iowa',
+						description: 'Tornadoes, large hail, and isolated damaging winds are possible.',
+						instruction: 'Be ready to act quickly if warnings are issued.',
+						sent: nowIso,
+						updated: nowIso,
+						effective: nowIso,
+						expires: expiresIso,
+						geocode: {
+							UGC: ['IAC015', 'IAC153', 'IAC169'],
+						},
+					},
+				},
+				'tornado-live': {
+					id: 'tornado-live',
+					properties: {
+						event: 'Tornado Warning',
+						severity: 'Severe',
+						areaDesc: 'Leslie County',
+						senderName: 'NWS Jackson KY',
+						headline: 'Tornado Warning for Leslie County',
+						description: 'A tornado warning is in effect for Leslie County.',
+						instruction: 'Take shelter now.',
+						sent: activeWarningIso,
+						updated: activeWarningIso,
+						effective: activeWarningIso,
+						expires: activeWarningExpiresIso,
+						geocode: {
+							UGC: ['KYC131'],
+						},
+					},
+				},
+			},
+			[
+				{
+					alertId: 'tw-ia-1',
+					stateCodes: ['IA'],
+					countyCodes: ['015', '153', '169'],
+					event: 'Tornado Watch',
+					areaDesc: 'Polk; Story; Boone',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Moderate',
+				},
+				{
+					alertId: 'tornado-live',
+					stateCodes: ['KY'],
+					countyCodes: ['131'],
+					event: 'Tornado Warning',
+					areaDesc: 'Leslie County',
+					changedAt: activeWarningIso,
+					changeType: 'new',
+					severity: 'Severe',
+				},
+			],
+		);
+
+		const postCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/feed') || String(input).includes('/photos'),
+		);
+		const spcCommentCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/spc-day1-post-1/comments'),
+		);
+		expect(postCalls.length).toBe(1);
+		expect(spcCommentCalls.length).toBe(0);
+
+		const spcThreadRaw = await goodEnv.WEATHER_KV.get('fb:spc:thread:1');
+		expect(spcThreadRaw).toBeTruthy();
+		expect(JSON.parse(spcThreadRaw || '{}').commentCount).toBe(0);
+	});
+
+	it('runSpcCoverageForDay still publishes scheduled Day 2 anchors after a recent alert-lane Facebook post in the same cycle', async () => {
+		const { autoPostFacebookAlerts, runSpcCoverageForDay } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		} as any;
+		const nowIso = new Date().toISOString();
+		const expiresIso = new Date(Date.now() + 45 * 60 * 1000).toISOString();
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'tornado_only',
+			updatedAt: nowIso,
+			spcDay1CoverageEnabled: false,
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'enhanced',
+			spcDay3CoverageEnabled: false,
+			spcHashtagsEnabled: false,
+			spcTimingRefreshEnabled: true,
+		}));
+
+		await autoPostFacebookAlerts(
+			goodEnv,
+			{
+				'tornado-gap-1': {
+					id: 'tornado-gap-1',
+					properties: {
+						event: 'Tornado Warning',
+						severity: 'Severe',
+						areaDesc: 'Test County, KY',
+						senderName: 'NWS Jackson KY',
+						headline: 'Tornado Warning for Test County',
+						description: 'A tornado warning is in effect for the county.',
+						instruction: 'Take shelter now.',
+						sent: nowIso,
+						updated: nowIso,
+						effective: nowIso,
+						expires: expiresIso,
+						geocode: {
+							UGC: ['KYC001'],
+							SAME: ['21001'],
+						},
+					},
+				},
+			},
+			[
+				{
+					alertId: 'tornado-gap-1',
+					stateCodes: ['KY'],
+					countyCodes: ['001'],
+					event: 'Tornado Warning',
+					areaDesc: 'Test County, KY',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Severe',
+				},
+			],
+		);
+
+		const sharedTimestamp = await goodEnv.WEATHER_KV.get('fb:last-post-timestamp');
+		expect(sharedTimestamp).toBeTruthy();
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', '2026-04-02T18:30:00.000Z');
+
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk.html') {
+				return new Response([
+					'<html>',
+					'<head><title>Storm Prediction Center Apr 2, 2026 0600 UTC Day 2 Convective Outlook</title></head>',
+					"<body onload=\"show_tab('otlk_0600')\">",
+					'<div>Updated:&nbsp;Thu Apr 2 06:02:03 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					'<pre>' + [
+						'SPC AC 020602',
+						'',
+						'Day 2 Convective Outlook',
+						'NWS Storm Prediction Center Norman OK',
+						'0102 AM CDT Thu Apr 02 2026',
+						'',
+						'Valid 031200Z - 041200Z',
+						'',
+						'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...AND NORTHERN MISSOURI...',
+						'',
+						'...SUMMARY...',
+						'Severe thunderstorms are expected across southern Iowa and northern Missouri tomorrow afternoon into evening.',
+					].join('\n') + '</pre>',
+					'</body>',
+					'</html>',
+				].join(''), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson') {
+				return new Response(JSON.stringify({
+					type: 'FeatureCollection',
+					features: [{ type: 'Feature', properties: { LABEL: 'ENH', VALID_ISO: '2026-04-03T12:00:00+00:00', EXPIRE_ISO: '2026-04-04T12:00:00+00:00', ISSUE_ISO: '2026-04-02T06:02:00+00:00' } }],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com')) {
+				return new Response(JSON.stringify({ id: 'should-not-post' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		const result = await runSpcCoverageForDay(
+			goodEnv,
+			2,
+			Date.parse('2026-04-02T18:35:00.000Z'),
+		);
+
+		expect(result.error).toBeNull();
+		expect(result.plannedOutputMode).toBe('post');
+		expect(fetchMock.mock.calls.some(([input]) => String(input).includes('graph.facebook.com'))).toBe(true);
+	});
+
 	it('saves the facebook auto-post mode and renders it selected on admin refresh', async () => {
 		const goodEnv = { ...env, ADMIN_PASSWORD: 'testpassword' };
 		const loginResp = await worker.fetch(
@@ -2493,7 +3347,7 @@ describe('Live Weather Admin worker', () => {
 		expect(__testing.normalizeFbAutoPostConfig(false).mode).toBe('off');
 	});
 
-	it('qualifies smart auto-post warnings using the updated family-specific rules', async () => {
+	it('applies deterministic tiered standalone alert rules in smart_high_impact mode', async () => {
 		const tornadoDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
 			'smart_high_impact',
@@ -2520,6 +3374,32 @@ describe('Live Weather Admin worker', () => {
 		expect(tornadoDecision.eligible).toBe(true);
 		expect(tornadoDecision.reason).toBe('all_tornado_warnings');
 
+		const freezeDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'freeze-tier3',
+				properties: {
+					event: 'Freeze Warning',
+					areaDesc: 'Northern Utah Valleys',
+					geocode: { UGC: ['UTZ101'] },
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'freeze-tier3',
+				stateCodes: ['UT'],
+				countyCodes: ['001', '003', '005'],
+				event: 'Freeze Warning',
+				areaDesc: 'Northern Utah Valleys',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(freezeDecision.eligible).toBe(false);
+		expect(freezeDecision.reason).toBe('tier3_minor_hazard');
+
 		const floodDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
 			'smart_high_impact',
@@ -2531,6 +3411,7 @@ describe('Live Weather Admin worker', () => {
 					geocode: {
 						UGC: ['WYC001', 'WYC003', 'WYC005', 'WYC007', 'WYC009', 'WYC011', 'WYC013', 'WYC015', 'WYC017', 'WYC019'],
 					},
+					description: 'Flooding is occurring with water over roads and several road closures likely through tonight.',
 					sent: new Date().toISOString(),
 					expires: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
 				},
@@ -2547,7 +3428,7 @@ describe('Live Weather Admin worker', () => {
 		);
 		expect(floodDecision.eligible).toBe(true);
 		expect(floodDecision.countyCount).toBe(10);
-		expect(floodDecision.reason).toBe('ten_county_warning');
+		expect(floodDecision.reason).toBe('tier2_flood_warning');
 
 		const winterDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
@@ -2560,6 +3441,7 @@ describe('Live Weather Admin worker', () => {
 					geocode: {
 						UGC: ['WYC021', 'WYC023', 'WYC025', 'WYC027', 'WYC029', 'WYC031', 'WYC033', 'WYC035', 'WYC037', 'WYC039'],
 					},
+					description: 'Snow accumulations of 8 to 12 inches and dangerous travel are expected through the passes.',
 					sent: new Date().toISOString(),
 					expires: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
 				},
@@ -2575,7 +3457,37 @@ describe('Live Weather Admin worker', () => {
 			},
 		);
 		expect(winterDecision.eligible).toBe(true);
-		expect(winterDecision.reason).toBe('ten_county_warning');
+		expect(winterDecision.reason).toBe('tier2_winter_warning');
+
+		const highWindDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'wind-10',
+				properties: {
+					event: 'High Wind Warning',
+					areaDesc: 'Ten county high wind warning',
+					geocode: {
+						UGC: ['WYC101', 'WYC103', 'WYC105', 'WYC107', 'WYC109', 'WYC111', 'WYC113', 'WYC115', 'WYC117', 'WYC119'],
+					},
+					description: 'West winds 30 to 40 mph with gusts up to 70 mph. Downed trees and scattered power outages are possible.',
+					parameters: { maxWindGust: ['70 mph'] },
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'wind-10',
+				stateCodes: ['WY'],
+				countyCodes: ['101', '103', '105', '107', '109', '111', '113', '115', '117', '119'],
+				event: 'High Wind Warning',
+				areaDesc: 'Ten county high wind warning',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(highWindDecision.eligible).toBe(true);
+		expect(highWindDecision.reason).toBe('tier2_high_wind_warning');
 
 		const redFlagDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
@@ -2689,7 +3601,7 @@ describe('Live Weather Admin worker', () => {
 			},
 		);
 		expect(metroSevereStrongDecision.eligible).toBe(true);
-		expect(metroSevereStrongDecision.reason).toBe('major_metro_warning');
+		expect(metroSevereStrongDecision.reason).toBe('tier2_severe_thunderstorm_warning');
 
 		const tenCountySevereDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
@@ -2718,7 +3630,33 @@ describe('Live Weather Admin worker', () => {
 			},
 		);
 		expect(tenCountySevereDecision.eligible).toBe(true);
-		expect(tenCountySevereDecision.reason).toBe('ten_county_warning');
+		expect(tenCountySevereDecision.reason).toBe('tier2_severe_thunderstorm_warning');
+
+		const watchDecision = await __testing.evaluateFacebookAutoPostDecision(
+			env as any,
+			'smart_high_impact',
+			{
+				id: 'watch-1',
+				properties: {
+					event: 'Severe Thunderstorm Watch',
+					areaDesc: 'Dallas-Fort Worth Metroplex',
+					geocode: { UGC: ['TXC113'] },
+					sent: new Date().toISOString(),
+					expires: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
+				},
+			},
+			{
+				alertId: 'watch-1',
+				stateCodes: ['TX'],
+				countyCodes: ['113'],
+				event: 'Severe Thunderstorm Watch',
+				areaDesc: 'Dallas-Fort Worth Metroplex',
+				changedAt: new Date().toISOString(),
+				changeType: 'new',
+			},
+		);
+		expect(watchDecision.eligible).toBe(false);
+		expect(watchDecision.reason).toBe('not_warning');
 
 		const staleTornadoDecision = await __testing.evaluateFacebookAutoPostDecision(
 			env as any,
@@ -2747,7 +3685,7 @@ describe('Live Weather Admin worker', () => {
 		expect(staleTornadoDecision.reason).toBe('stale_alert');
 	});
 
-	it('selects the top two severe weather fallback auto-posts by metro priority before regional coverage', async () => {
+	it('does not create relative severe-weather fallback promotions under deterministic rules', async () => {
 		const nowIso = new Date().toISOString();
 		const futureIso = new Date(Date.now() + 45 * 60 * 1000).toISOString();
 
@@ -2849,21 +3787,133 @@ describe('Live Weather Admin worker', () => {
 			},
 		]);
 
-		expect(overrides.get('nyc-watch')).toMatchObject({
-			eligible: true,
-			reason: 'severe_weather_fallback',
-		});
-		expect(overrides.get('dfw-warning')).toMatchObject({
-			eligible: true,
-			reason: 'severe_weather_fallback',
-		});
-		expect(overrides.get('regional-warning')).toMatchObject({
-			eligible: false,
-			reason: 'severe_weather_fallback_not_selected',
-		});
+		expect(overrides.size).toBe(0);
 	});
 
-	it('disables severe weather fallback when a tornado warning is active in the same batch', async () => {
+	it('caps lower-tier standalone alert posts at four per hour while still allowing same-story comments', async () => {
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: '1097328350123101',
+			FB_PAGE_ACCESS_TOKEN: 'dummy-token',
+		};
+		const nowMs = Date.now();
+		const nowIso = new Date(nowMs).toISOString();
+		const expiresIso = new Date(nowMs + 2 * 60 * 60 * 1000).toISOString();
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: nowIso,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:auto-post:standalone-history:v1', JSON.stringify({
+			postTimestamps: [0, 1, 2, 3].map((offset) => new Date(nowMs - offset * 10 * 60 * 1000).toISOString()),
+			updatedAt: nowIso,
+		}));
+		await goodEnv.WEATHER_KV.put('thread:CAZ401:high_wind_warning', JSON.stringify({
+			postId: 'cap-existing-post',
+			nwsAlertId: 'prior-cap-alert',
+			expiresAt: Math.floor(Date.parse(expiresIso) / 1000),
+			county: 'Comment corridor',
+			alertType: 'High Wind Warning',
+			updateCount: 1,
+			lastPostedAt: new Date(nowMs - 20 * 60 * 1000).toISOString(),
+			lastPostedSnapshot: __testing.buildAlertPostedSnapshot({
+				event: 'High Wind Warning',
+				areaDesc: 'Comment corridor',
+				headline: 'Earlier High Wind Warning coverage',
+				description: 'Earlier high wind impacts were expected across the corridor.',
+				instruction: 'Use caution.',
+				severity: 'Severe',
+				expires: expiresIso,
+				senderName: 'NWS Reno NV',
+				geocode: { UGC: ['CAZ401'] },
+			}),
+		}));
+
+		await __testing.autoPostFacebookAlerts(
+			goodEnv as any,
+			{
+				'wind-cap-comment': {
+					id: 'wind-cap-comment',
+					properties: {
+						event: 'High Wind Warning',
+						severity: 'Severe',
+						areaDesc: 'Comment corridor',
+						senderName: 'NWS Reno NV',
+						headline: 'High Wind Warning continues for the Comment corridor',
+						description: 'West winds 30 to 40 mph with gusts up to 70 mph. Downed trees and scattered power outages are possible.',
+						instruction: 'Avoid travel in exposed areas.',
+						sent: nowIso,
+						updated: nowIso,
+						effective: nowIso,
+						expires: expiresIso,
+						geocode: { UGC: ['CAZ401'] },
+						parameters: { maxWindGust: ['70 mph'] },
+					},
+				},
+				'wind-cap-skip': {
+					id: 'wind-cap-skip',
+					properties: {
+						event: 'High Wind Warning',
+						severity: 'Severe',
+						areaDesc: 'Skip corridor',
+						senderName: 'NWS Reno NV',
+						headline: 'High Wind Warning for the Skip corridor',
+						description: 'West winds 30 to 40 mph with gusts up to 70 mph. Downed trees and scattered power outages are possible.',
+						instruction: 'Avoid travel in exposed areas.',
+						sent: nowIso,
+						updated: nowIso,
+						effective: nowIso,
+						expires: expiresIso,
+						geocode: { UGC: ['NVZ402'] },
+						parameters: { maxWindGust: ['70 mph'] },
+					},
+				},
+			},
+			[
+				{
+					alertId: 'wind-cap-comment',
+					stateCodes: ['CA'],
+					countyCodes: ['401', '403', '405', '407', '409', '411', '413', '415', '417', '419'],
+					event: 'High Wind Warning',
+					areaDesc: 'Comment corridor',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Severe',
+				},
+				{
+					alertId: 'wind-cap-skip',
+					stateCodes: ['NV'],
+					countyCodes: ['421', '423', '425', '427', '429', '431', '433', '435', '437', '439'],
+					event: 'High Wind Warning',
+					areaDesc: 'Skip corridor',
+					changedAt: nowIso,
+					changeType: 'new',
+					severity: 'Severe',
+				},
+			],
+		);
+
+		const postCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/feed') || String(input).includes('/photos'),
+		);
+		const commentCalls = (globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+			String(input).includes('/cap-existing-post/comments'),
+		);
+		expect(postCalls.length).toBe(0);
+		expect(commentCalls.length).toBe(1);
+
+		const commentThreadRaw = await goodEnv.WEATHER_KV.get('thread:CAZ401:high_wind_warning');
+		expect(commentThreadRaw).toBeTruthy();
+		expect(JSON.parse(commentThreadRaw || '{}').updateCount).toBe(2);
+
+		const skippedThreadRaw = await goodEnv.WEATHER_KV.get('thread:NVZ402:high_wind_warning');
+		expect(skippedThreadRaw).toBeNull();
+
+		const historyRaw = await goodEnv.WEATHER_KV.get('fb:auto-post:standalone-history:v1');
+		expect(historyRaw).toBeTruthy();
+		expect(JSON.parse(historyRaw || '{}').postTimestamps).toHaveLength(4);
+	});
+
+	it('returns no fallback overrides even when tornado warnings are active in the same batch', async () => {
 		const nowIso = new Date().toISOString();
 		const futureIso = new Date(Date.now() + 45 * 60 * 1000).toISOString();
 
@@ -3704,11 +4754,11 @@ describe('Live Weather Admin worker', () => {
 				'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS EASTERN IOWA...NORTHERN ILLINOIS...AND SOUTHERN WISCONSIN...',
 				'',
 				'...SUMMARY...',
-				'Severe thunderstorms capable of producing several tornadoes are expected across eastern Iowa, northern Illinois, and southern Wisconsin this afternoon.',
+				'Fast-moving supercells capable of producing several tornadoes are expected across eastern Iowa, northern Illinois, and southern Wisconsin this afternoon.',
 				'',
-				'...Eastern IA/Northern IL/Southern WI...',
+				'...Eastern Iowa, Northern Illinois, and Southern Wisconsin...',
 				'Tornado potential will be the main concern, though damaging winds are also possible.',
-				'A few tornadoes may develop before storms grow into a line later today.',
+				'A few supercells may develop before storms grow into a line later today.',
 			].join('\n') + '</pre>',
 			'</body>',
 			'</html>',
@@ -3734,6 +4784,14 @@ describe('Live Weather Admin worker', () => {
 				},
 				{
 					type: 'Feature',
+					geometry: {
+						type: 'MultiPolygon',
+						coordinates: [
+							[[[-91.7, 42.0], [-91.1, 42.0], [-91.1, 42.5], [-91.7, 42.5], [-91.7, 42.0]]],
+							[[[-89.5, 41.8], [-88.8, 41.8], [-88.8, 42.2], [-89.5, 42.2], [-89.5, 41.8]]],
+							[[[-89.9, 42.8], [-89.2, 42.8], [-89.2, 43.3], [-89.9, 43.3], [-89.9, 42.8]]],
+						],
+					},
 					properties: {
 						LABEL: 'ENH',
 						VALID_ISO: '2026-04-02T13:00:00+00:00',
@@ -3748,13 +4806,112 @@ describe('Live Weather Admin worker', () => {
 		expect(summary.highestRiskNumber).toBe(3);
 		expect(summary.affectedStates).toEqual(['IA', 'IL', 'WI']);
 		expect(summary.stateFocusText).toBe('Eastern Iowa, Northern Illinois, and Southern Wisconsin');
+		expect(summary.primaryAreaSource).toBe('geojson');
 		expect(summary.primaryRegion).toBe('Midwest');
 		expect(summary.hazardFocus).toBe('tornado');
 		expect(summary.hazardList).toEqual(['tornadoes', 'damaging winds']);
-		expect(summary.stormMode).toBe('supercells');
+		expect(summary.primaryHazards).toEqual(['tornadoes']);
+		expect(summary.secondaryHazards).toEqual(['damaging winds']);
+		expect(summary.stormMode).toBe('fast-moving supercells');
+		expect(summary.stormEvolution).toBe(true);
+		expect(summary.stormEvolutionText).toContain('before storms organize into a line of storms later on');
+		expect(summary.riskAreas?.enhanced).toEqual(['IA', 'IL', 'WI']);
 		expect(summary.timingText).toBe('this afternoon');
 		expect(summary.imageUrl).toBe('https://www.spc.noaa.gov/products/outlook/day1otlk_1300.png');
 		expect(summary.summaryHash).toHaveLength(64);
+	});
+
+	it('selectSpcPrimaryRiskArea keeps an IA/MO/IL enhanced core from drifting into Southern Plains framing', async () => {
+		const { buildSpcOutlookSummary, selectSpcPrimaryRiskArea } = __testing as any;
+		const page = {
+			title: 'Day 2 Convective Outlook',
+			updated: 'Thu Apr 02 12:56:18 UTC 2026',
+			issuedLabel: '0756 AM CDT Thu Apr 02 2026',
+			summary: 'A focused severe weather corridor is expected from southern Iowa into northern Missouri and western Illinois. A broader severe line may extend later into eastern Oklahoma and north Texas.',
+			discussionText: 'Early storms should focus from southern Iowa into northern Missouri and western Illinois before the line extends south and west later in the period into eastern Oklahoma and north Texas.',
+			pageUrl: 'https://www.spc.noaa.gov/products/outlook/day2otlk.html',
+			imageUrl: 'https://www.spc.noaa.gov/products/outlook/day2otlk_0600.png',
+			headlineText: 'THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...NORTHERN MISSOURI...AND WESTERN ILLINOIS...',
+			sectionHeadings: ['Southern Iowa, Northern Missouri, and Western Illinois'],
+			timingText: 'late afternoon into evening',
+		};
+
+		const story = selectSpcPrimaryRiskArea(page, ['IA', 'MO', 'IL']);
+		expect(story.primaryStates).toEqual(['IA', 'MO', 'IL']);
+		expect(story.primaryFocusText).toBe('Southern Iowa, Northern Missouri, and Western Illinois');
+		expect(story.primaryAreaSource).toBe('geojson');
+		expect(story.secondaryStates).toEqual([]);
+
+		const summary = await buildSpcOutlookSummary(2, page, {
+			type: 'FeatureCollection',
+			features: [
+				{
+					type: 'Feature',
+					geometry: {
+						type: 'MultiPolygon',
+						coordinates: [
+							[[[-94.8, 40.8], [-94.2, 40.8], [-94.2, 41.2], [-94.8, 41.2], [-94.8, 40.8]]],
+							[[[-93.8, 39.4], [-93.2, 39.4], [-93.2, 39.8], [-93.8, 39.8], [-93.8, 39.4]]],
+							[[[-90.9, 40.4], [-90.3, 40.4], [-90.3, 40.8], [-90.9, 40.8], [-90.9, 40.4]]],
+						],
+					},
+					properties: {
+						LABEL: 'ENH',
+						VALID_ISO: '2026-04-03T12:00:00+00:00',
+						EXPIRE_ISO: '2026-04-04T12:00:00+00:00',
+						ISSUE_ISO: '2026-04-02T06:00:00+00:00',
+					},
+				},
+			],
+		});
+
+		expect(summary.affectedStates).toEqual(['IA', 'MO', 'IL']);
+		expect(summary.primaryRegion).toBe('Mid-Mississippi Valley');
+		expect(summary.primaryRegion).not.toBe('Southern Plains');
+	});
+
+	it('buildSpcOutlookSummary keeps discussion tail states out of the main story when the highest-risk polygon is tighter', async () => {
+		const { buildSpcOutlookSummary } = __testing as any;
+		const page = {
+			title: 'Day 2 Convective Outlook',
+			updated: 'Thu Apr 02 12:56:18 UTC 2026',
+			issuedLabel: '0756 AM CDT Thu Apr 02 2026',
+			summary: 'Severe thunderstorms are expected across southern Iowa, northern Missouri, and western Illinois tomorrow afternoon into evening. A broader severe line may later extend into eastern Oklahoma and north Texas.',
+			discussionText: 'Early discrete storms should focus from southern Iowa into northern Missouri and western Illinois before storms organize into a line later in the period. The broader line may eventually extend toward eastern Oklahoma and north Texas.',
+			pageUrl: 'https://www.spc.noaa.gov/products/outlook/day2otlk.html',
+			imageUrl: 'https://www.spc.noaa.gov/products/outlook/day2otlk_0600.png',
+			headlineText: 'THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...NORTHERN MISSOURI...AND WESTERN ILLINOIS...',
+			sectionHeadings: ['Southern Iowa, Northern Missouri, and Western Illinois'],
+			timingText: 'late afternoon into evening',
+		};
+
+		const summary = await buildSpcOutlookSummary(2, page, {
+			type: 'FeatureCollection',
+			features: [
+				{
+					type: 'Feature',
+					geometry: {
+						type: 'MultiPolygon',
+						coordinates: [
+							[[[-94.8, 40.8], [-94.2, 40.8], [-94.2, 41.2], [-94.8, 41.2], [-94.8, 40.8]]],
+							[[[-93.8, 39.4], [-93.2, 39.4], [-93.2, 39.8], [-93.8, 39.8], [-93.8, 39.4]]],
+							[[[-90.9, 40.4], [-90.3, 40.4], [-90.3, 40.8], [-90.9, 40.8], [-90.9, 40.4]]],
+						],
+					},
+					properties: {
+						LABEL: 'ENH',
+						VALID_ISO: '2026-04-03T12:00:00+00:00',
+						EXPIRE_ISO: '2026-04-04T12:00:00+00:00',
+						ISSUE_ISO: '2026-04-02T06:00:00+00:00',
+					},
+				},
+			],
+		});
+
+		expect(summary.affectedStates).toEqual(['IA', 'MO', 'IL']);
+		expect(summary.affectedStates).not.toEqual(expect.arrayContaining(['OK', 'TX']));
+		expect(summary.primaryRegion).toBe('Mid-Mississippi Valley');
+		expect(summary.primaryAreaSource).toBe('geojson');
 	});
 
 	it('buildSpcPostDecision handles day-aware setup, upgrade, and timing refresh cases', () => {
@@ -3939,8 +5096,15 @@ describe('Live Weather Admin worker', () => {
 			highestRiskLevel: 'enhanced',
 			highestRiskNumber: 3,
 			affectedStates: ['IA', 'IL', 'WI'],
+			stateFocusText: 'Eastern Iowa, Northern Illinois, and Southern Wisconsin',
 			primaryRegion: 'Midwest',
 			hazardFocus: 'tornado',
+			hazardList: ['tornadoes', 'damaging winds'],
+			primaryHazards: ['tornadoes'],
+			secondaryHazards: ['damaging winds'],
+			stormMode: 'fast-moving supercells',
+			laterStormMode: 'a line of storms',
+			stormEvolutionText: 'Fast-moving supercells may develop early before storms organize into a line of storms later on.',
 			timingText: 'this afternoon',
 			summaryHash: 'hash-enhanced-1',
 		} as any;
@@ -3961,13 +5125,14 @@ describe('Live Weather Admin worker', () => {
 		expect(text.startsWith('This afternoon to watch across the Midwest.')).toBe(false);
 		expect(text).toContain('Level 3 Enhanced Risk');
 		expect(text).toContain('centered on Eastern Iowa, Northern Illinois, and Southern Wisconsin');
-		expect(text).toContain('Expect fast-moving supercells capable of producing tornadoes and damaging winds.');
-		expect(text).toContain('Storms will develop this afternoon.');
+		expect(text).toContain('Fast-moving supercells may develop early before storms organize into a line of storms later on.');
+		expect(text).toContain('Tornadoes look like the main threats, with damaging winds possible.');
+		expect(text).toContain('The main window looks this afternoon.');
 		expect(text).toContain('#IAwx #ILwx #WIwx');
 
 		const changeHint = buildSpcCommentChangeHint(previousSummary, summary);
 		expect(changeHint).toContain('risk upgraded');
-		expect(changeHint).toContain('new states added');
+		expect(changeHint).toContain('new core states added');
 
 		const commentText = buildSpcPostText(summary, {
 			shouldPost: true,
@@ -3975,11 +5140,163 @@ describe('Live Weather Admin worker', () => {
 			postType: 'upgrade',
 		}, [], true, 'comment', changeHint);
 		expect(commentText.startsWith('UPDATE:')).toBe(true);
-		expect(commentText).toContain('SPC continues a Level 3 Enhanced Risk centered on Eastern Iowa, Northern Illinois, and Southern Wisconsin.');
+		expect(commentText).toContain('SPC still has a Level 3 Enhanced Risk centered on Eastern Iowa, Northern Illinois, and Southern Wisconsin.');
 		expect(commentText).not.toContain('#IAwx');
 	});
 
+	it('buildSpcDay1WatchCommentText keeps overlapping watch updates brief and broad', () => {
+		const { buildSpcDay1WatchCommentText } = __testing as any;
+		const summary = {
+			issuedAt: '2026-04-02T12:56:00+00:00',
+			validFrom: '2026-04-02T13:00:00+00:00',
+			validTo: '2026-04-03T12:00:00+00:00',
+			outlookDay: 1,
+			highestRiskLevel: 'enhanced',
+			highestRiskNumber: 3,
+			affectedStates: ['IA', 'IL', 'WI'],
+			stateFocusText: 'Eastern Iowa, Northern Illinois, and Southern Wisconsin',
+			primaryRegion: 'Midwest',
+			hazardFocus: 'tornado',
+			hazardList: ['tornadoes', 'damaging winds'],
+			primaryHazards: ['tornadoes'],
+			secondaryHazards: ['damaging winds'],
+			stormMode: 'supercells',
+			notableText: null,
+			tornadoProbability: 10,
+			windProbability: 30,
+			hailProbability: null,
+			timingText: 'this afternoon',
+			summaryHash: 'spc-day1-hash-1',
+		} as any;
+
+		const text = buildSpcDay1WatchCommentText(summary, ['IA'], {
+			expiresAt: '2026-04-02T23:00:00.000Z',
+			nowMs: Date.parse('2026-04-02T18:00:00.000Z'),
+		});
+
+		expect(text).toContain('UPDATE: A Tornado Watch is now in effect for parts of Iowa');
+		expect(text).toContain('Tornadoes and damaging winds will be the main concerns');
+		expect(text).not.toContain('Eastern Iowa');
+		expect(text).not.toContain('#IAwx');
+	});
+
+	it('selectAfdOfficesForSpcRegion prefers offices inside the SPC core and caps the selection', () => {
+		const { selectAfdOfficesForSpcRegion } = __testing as any;
+		const selected = selectAfdOfficesForSpcRegion({
+			affectedStates: ['IA', 'IL', 'WI'],
+			primaryRegion: 'Midwest',
+			stateFocusText: 'Eastern Iowa, Northern Illinois, and Southern Wisconsin',
+			summaryText: 'Fast-moving supercells are possible from eastern Iowa into northern Illinois and southern Wisconsin.',
+			discussionText: 'The corridor from eastern Iowa into northern Illinois and southern Wisconsin may see the highest severe coverage.',
+		}, 3);
+
+		expect(selected.map((office: any) => office.code)).toEqual(['DVN', 'ARX', 'LOT']);
+		expect(selected[0].matchedFocusKeywords).toContain('eastern iowa');
+		expect(selected).toHaveLength(3);
+	});
+
+	it('extractAfdSignalFromText pulls timing, storm mode, hazard, confidence, and uncertainty cues', () => {
+		const { extractAfdSignalFromText } = __testing as any;
+		const signal = extractAfdSignalFromText([
+			'.KEY MESSAGES...',
+			'- Discrete supercells may develop late afternoon into evening before quick upscale growth takes over.',
+			'- Tornado and large hail potential would be strongest with any storms that stay isolated.',
+			'- Confidence is increasing in organized severe storm development, though cloud cover may limit destabilization.',
+			'- Storms may move quickly and reduce warning time.',
+		].join('\n'));
+
+		expect(signal.timingHints).toContain('late afternoon into evening');
+		expect(signal.stormModeHints).toEqual(expect.arrayContaining(['discrete supercells', 'quick upscale growth']));
+		expect(signal.hazardEmphasis).toEqual(expect.arrayContaining(['tornado', 'large hail']));
+		expect(signal.confidenceHints).toContain('confidence is increasing in organized severe storm development');
+		expect(signal.uncertaintyHints).toContain('cloud cover may limit destabilization');
+		expect(signal.notableBehaviorHints).toContain('storms may move quickly and reduce warning time');
+	});
+
+	it('buildSpcAfdEnrichment merges the latest selected office AFDs and tolerates failed offices', async () => {
+		const { buildSpcAfdEnrichment } = __testing as any;
+		(globalThis as any).fetch = vi.fn(async (input: RequestInfo) => {
+			const url = String(input);
+			if (url.endsWith('/products/types/AFD/locations/DVN')) {
+				return new Response(JSON.stringify({
+					'@graph': [{
+						id: 'afd-dvn-1',
+						issuanceTime: '2026-04-02T17:30:00Z',
+					}],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.endsWith('/products/types/AFD/locations/DMX')) {
+				return new Response(JSON.stringify({ '@graph': [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.endsWith('/products/afd-dvn-1')) {
+				return new Response(JSON.stringify({
+					id: 'afd-dvn-1',
+					productText: [
+						'.KEY MESSAGES...',
+						'- Discrete supercells may develop late afternoon into evening before quick upscale growth takes over.',
+						'- Tornado and large hail potential would be strongest with any storms that stay isolated.',
+						'- Confidence is increasing in organized severe storm development.',
+					].join('\n'),
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			return new Response('not found', { status: 404 });
+		});
+
+		const enrichment = await buildSpcAfdEnrichment({
+			affectedStates: ['IA'],
+			primaryRegion: 'Midwest',
+			stateFocusText: 'Eastern Iowa',
+			summaryText: 'Strong to severe storms are possible across eastern Iowa late today.',
+			discussionText: 'Eastern Iowa remains the corridor to watch for organized severe development.',
+		}, 2);
+
+		expect(enrichment).toBeTruthy();
+		expect(enrichment.selectedOffices.map((office: any) => office.code)).toEqual(['DVN', 'DMX']);
+		expect(enrichment.sourceProductIds).toEqual(['afd-dvn-1']);
+		expect(enrichment.failedOfficeCodes).toContain('DMX');
+		expect(enrichment.timingHints).toContain('late afternoon into evening');
+		expect(enrichment.hazardEmphasis).toEqual(expect.arrayContaining(['tornado', 'large hail']));
+	});
+
 	it('buildSpcPostText keeps Day 2 copy centered on the SPC core with squall-line messaging', () => {
+		const { buildSpcPostText } = __testing as any;
+		const summary = {
+			issuedAt: '2026-04-02T06:02:00+00:00',
+			validFrom: '2026-04-03T12:00:00+00:00',
+			validTo: '2026-04-04T12:00:00+00:00',
+			outlookDay: 2,
+			highestRiskLevel: 'enhanced',
+			highestRiskNumber: 3,
+			affectedStates: ['IA', 'MO', 'IL'],
+			stateFocusText: 'Southern Iowa, Northern Missouri, and Western Illinois',
+			primaryRegion: 'Mid-Mississippi Valley',
+			hazardFocus: 'mixed',
+			hazardList: ['large hail', 'damaging winds', 'tornadoes'],
+			primaryHazards: ['large hail', 'damaging winds'],
+			secondaryHazards: ['tornadoes'],
+			stormMode: 'discrete supercells',
+			laterStormMode: 'a large squall line',
+			stormEvolutionText: 'Discrete supercells may develop early before storms organize into a large squall line later on.',
+			notableText: null,
+			timingText: 'late afternoon into evening',
+			summaryHash: 'hash-day2-core',
+		} as any;
+
+		const text = buildSpcPostText(summary, {
+			shouldPost: true,
+			reason: 'new_slight_or_higher',
+			postType: 'day2_lookahead',
+		}, [], true);
+
+		expect(text).toContain('SPC has issued a Level 3 Enhanced Risk centered on Southern Iowa, Northern Missouri, and Western Illinois.');
+		expect(text).toContain('Discrete supercells may develop early before storms organize into a large squall line later on.');
+		expect(text).toContain('Large hail and damaging winds would be the main threats, with a few tornadoes possible.');
+		expect(text).toContain('The better window looks late afternoon into evening.');
+		expect(text).toContain('#IAwx #MOwx #ILwx');
+		expect(text).not.toContain('Southern Plains');
+	});
+
+	it('buildSpcPostText uses AFD support hints to sharpen storm evolution and confidence wording', () => {
 		const { buildSpcPostText } = __testing as any;
 		const summary = {
 			issuedAt: '2026-04-02T06:02:00+00:00',
@@ -3992,24 +5309,32 @@ describe('Live Weather Admin worker', () => {
 			stateFocusText: 'Southern Iowa and Northern Missouri',
 			primaryRegion: 'Midwest',
 			hazardFocus: 'wind',
-			hazardList: ['widespread damaging winds', 'tornadoes'],
-			stormMode: 'a large squall line',
-			notableText: 'a few discrete storms may form early before the line organizes',
+			hazardList: ['damaging winds', 'tornadoes'],
+			stormMode: 'a squall line',
+			notableText: null,
 			timingText: 'late afternoon into evening',
-			summaryHash: 'hash-day2-core',
+			summaryHash: 'hash-day2-afd-support',
 		} as any;
 
 		const text = buildSpcPostText(summary, {
 			shouldPost: true,
 			reason: 'new_slight_or_higher',
 			postType: 'day2_lookahead',
-		}, [], true);
+		}, [], false, 'post', null, {
+			selectedOffices: [{ code: 'DVN', label: 'Quad Cities IA/IL', score: 13, matchedStateCodes: ['IA'], matchedFocusKeywords: ['eastern iowa'] }],
+			sourceProductIds: ['afd-dvn-1'],
+			failedOfficeCodes: [],
+			fetchedAt: '2026-04-02T17:45:00.000Z',
+			timingHints: ['late afternoon into evening'],
+			stormModeHints: ['quick upscale growth'],
+			hazardEmphasis: ['tornado'],
+			uncertaintyHints: ['cloud cover may limit destabilization'],
+			confidenceHints: ['confidence is increasing in organized severe storm development'],
+			notableBehaviorHints: [],
+		});
 
-		expect(text).toContain('SPC has issued a Level 3 Enhanced Risk centered on Southern Iowa and Northern Missouri.');
-		expect(text).toContain('A developing system may produce a large squall line, with widespread damaging winds and tornadoes as the main threats during the late afternoon into evening window.');
-		expect(text).toContain('A few discrete storms may form early before the line organizes.');
-		expect(text).toContain('#IAwx #MOwx');
-		expect(text).not.toContain('Mississippi');
+		expect(text).toContain('Quick upscale growth may follow once storms mature.');
+		expect(text).toContain('Confidence is increasing in organized severe storm development, though cloud cover may limit destabilization.');
 	});
 
 	it('validateSpcLlmOutput rejects states outside the SPC core area', () => {
@@ -4020,29 +5345,119 @@ describe('Live Weather Admin worker', () => {
 			postType: 'day2_lookahead',
 			riskLevel: 'enhanced',
 			riskNumber: 3,
-			primaryRegion: 'Midwest',
-			states: ['IA', 'MO'],
-			stateFocusText: 'Southern Iowa and Northern Missouri',
+			primaryRegion: 'Mid-Mississippi Valley',
+			states: ['IA', 'MO', 'IL'],
+			stateFocusText: 'Southern Iowa, Northern Missouri, and Western Illinois',
 			hazardFocus: 'wind',
-			hazardList: ['widespread damaging winds', 'tornadoes'],
-			hazardLine: 'widespread damaging winds and tornadoes',
-			stormMode: 'a large squall line',
+			hazardList: ['large hail', 'damaging winds', 'tornadoes'],
+			primaryHazards: ['large hail', 'damaging winds'],
+			secondaryHazards: ['tornadoes'],
+			hazardLine: 'large hail and damaging winds',
+			stormMode: 'discrete supercells',
+			stormEvolutionText: 'Discrete supercells may develop early before storms organize into a large squall line later on.',
 			timingWindow: 'late afternoon into evening',
-			notableText: 'a few discrete storms may form early before the line organizes',
+			notableText: null,
 			trend: 'developing',
 			recentOpenings: [],
 			hashtagsEnabled: true,
 		});
 
 		expect(validateSpcLlmOutput(
-			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa, northern Missouri, and Mississippi.',
+			'Watching tomorrow closely across the Mid-Mississippi Valley. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa, northern Missouri, western Illinois, and Mississippi.',
 			payload,
 		).failureReason).toBe('mentions_out_of_scope_state');
 
 		expect(validateSpcLlmOutput(
-			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa and northern Missouri. A developing system may produce a large squall line, with widespread damaging winds and tornadoes as the main threats late afternoon into the evening.',
+			'Watching tomorrow closely across the Southern Plains. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa, northern Missouri, and western Illinois. Discrete supercells may develop early before storms organize into a larger line later in the day, with large hail and damaging winds as the main threats and a few tornadoes possible.',
+			payload,
+		).failureReason).toBe('mentions_conflicting_region');
+
+		expect(validateSpcLlmOutput(
+			'Watching tomorrow closely across the Mid-Mississippi Valley. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa, northern Missouri, and western Illinois. Discrete supercells may develop early before storms organize into a larger line later on. Large hail and damaging winds look like the main threats, with a few tornadoes possible. The better window looks late afternoon into evening.',
 			payload,
 		).valid).toBe(true);
+	});
+
+	it('buildSpcLlmPayload and buildSpcUserPrompt include AFD hints as secondary forecast guidance', () => {
+		const { buildSpcLlmPayload, buildSpcUserPrompt } = __testing as any;
+		const payload = buildSpcLlmPayload({
+			outputMode: 'post',
+			outlookDay: 2,
+			postType: 'day2_lookahead',
+			riskLevel: 'enhanced',
+			riskNumber: 3,
+			primaryRegion: 'Mid-Mississippi Valley',
+			states: ['IA', 'MO'],
+			stateFocusText: 'Southern Iowa and Northern Missouri',
+			hazardFocus: 'wind',
+			hazardList: ['damaging winds', 'tornadoes'],
+			primaryHazards: ['damaging winds'],
+			secondaryHazards: ['tornadoes'],
+			hazardLine: 'damaging winds and tornadoes',
+			stormMode: 'a squall line',
+			stormEvolutionText: 'Discrete supercells may develop early before storms organize into a squall line later on.',
+			timingWindow: 'late afternoon into evening',
+			notableText: null,
+			afdTimingHints: ['late afternoon into evening'],
+			afdStormModeHints: ['quick upscale growth'],
+			afdHazardEmphasis: ['tornado'],
+			afdUncertaintyHints: ['cloud cover may limit destabilization'],
+			afdConfidenceHints: ['confidence is increasing in organized severe storm development'],
+			afdNotableBehaviorHints: ['storms may move quickly and reduce warning time'],
+			trend: 'developing',
+			recentOpenings: [],
+			hashtagsEnabled: false,
+		});
+
+		expect(payload.afd_timing_hints).toEqual(['late afternoon into evening']);
+		expect(payload.afd_uncertainty_hints).toEqual(['cloud cover may limit destabilization']);
+		expect(payload.primary_states).toEqual(['IA', 'MO']);
+		expect(payload.region).toBe('Mid-Mississippi Valley');
+		expect(payload.storm_evolution).toBe(true);
+		const prompt = buildSpcUserPrompt(payload);
+		expect(prompt).toContain('Source priority: 1) SPC core categorical risk area 2) SPC summary 3) SPC discussion details.');
+		expect(prompt).toContain('SPC remains the primary source of truth');
+		expect(prompt).toContain('Locked primary states: Iowa and Missouri.');
+		expect(prompt).toContain('Storm evolution is present and must be included in the copy.');
+		expect(prompt).toContain('Supporting timing nuance: late afternoon into evening.');
+		expect(prompt).toContain('Supporting uncertainty wording: cloud cover may limit destabilization.');
+		expect(prompt).toContain('If tornadoes are secondary or conditional, do not lead with tornadoes.');
+	});
+
+	it('validateSpcLlmOutput rejects missing storm evolution and tornado-led copy when wind and hail are primary', () => {
+		const { buildSpcLlmPayload, validateSpcLlmOutput } = __testing as any;
+		const payload = buildSpcLlmPayload({
+			outputMode: 'post',
+			outlookDay: 2,
+			postType: 'day2_lookahead',
+			riskLevel: 'enhanced',
+			riskNumber: 3,
+			primaryRegion: 'Mid-Mississippi Valley',
+			states: ['IA', 'MO', 'IL'],
+			stateFocusText: 'Southern Iowa, Northern Missouri, and Western Illinois',
+			hazardFocus: 'mixed',
+			hazardList: ['large hail', 'damaging winds', 'tornadoes'],
+			primaryHazards: ['large hail', 'damaging winds'],
+			secondaryHazards: ['tornadoes'],
+			hazardLine: 'large hail and damaging winds',
+			stormMode: 'discrete supercells',
+			stormEvolutionText: 'Discrete supercells may develop early before storms organize into a large squall line later on.',
+			timingWindow: 'late afternoon into evening',
+			notableText: null,
+			trend: 'developing',
+			recentOpenings: [],
+			hashtagsEnabled: false,
+		});
+
+		expect(validateSpcLlmOutput(
+			'Watching tomorrow closely across the Mid-Mississippi Valley. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa, northern Missouri, and western Illinois. Large hail and damaging winds look like the main threats, with a few tornadoes possible. The better window looks late afternoon into evening.',
+			payload,
+		).failureReason).toBe('missing_storm_evolution');
+
+		expect(validateSpcLlmOutput(
+			'Watching tomorrow closely across the Mid-Mississippi Valley. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa, northern Missouri, and western Illinois. Tornadoes look like the main threat. Discrete supercells may develop early before storms organize into a large squall line later on. The better window looks late afternoon into evening.',
+			payload,
+		).failureReason).toBe('tornado_lead_mismatch');
 	});
 
 	it('validateSpcLlmOutput rejects narrowed cores and timing drift, but accepts the stronger desk-style copy', () => {
@@ -4067,14 +5482,14 @@ describe('Live Weather Admin worker', () => {
 			hashtagsEnabled: true,
 		});
 
-		expect(buildSpcUserPrompt(day1Payload)).toContain('Do not narrow this multi-state corridor down to a single state.');
+		expect(buildSpcUserPrompt(day1Payload)).toContain('Do not narrow this multi-state corridor down to a single state or swap it for a broader but less accurate region.');
 		expect(validateSpcLlmOutput(
 			"Today's severe weather threat is focused on the Midwest, particularly southern Wisconsin, where a Level 3 enhanced risk is in place. Fast-moving supercells are expected to develop this afternoon and evening, bringing tornadoes and damaging winds, with storms moving quickly enough to limit warning time.",
 			day1Payload,
 		).failureReason).toBe('missing_core_state_cluster');
 
 		expect(validateSpcLlmOutput(
-			'This afternoon to watch across the Midwest. SPC has issued a Level 3 Enhanced Risk for severe storms centered on eastern Iowa, northern Illinois, and southern Wisconsin. Fast-moving supercells are expected to develop this afternoon and evening, bringing tornado potential and damaging winds. Storms will race northeast quickly, which may limit warning time.',
+			'Watching today closely across the Midwest. SPC has issued a Level 3 Enhanced Risk for severe storms centered on eastern Iowa, northern Illinois, and southern Wisconsin. Fast-moving supercells may develop early before storms organize into a line of storms later on. Tornadoes look like the main threats, with damaging winds possible. The main window looks this afternoon. Storms may move quickly enough to limit warning time.',
 			day1Payload,
 		).valid).toBe(true);
 
@@ -4099,13 +5514,52 @@ describe('Live Weather Admin worker', () => {
 		});
 
 		expect(validateSpcLlmOutput(
-			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa and northern Missouri. A developing storm system will evolve into a squall line overnight, bringing tornadoes, large hail, and damaging winds to the region, with the threat shifting into place by morning.',
+			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa and northern Missouri. A developing storm system will evolve into a squall line overnight, bringing damaging winds and large hail to the region, with a few tornadoes possible before the threat shifts into place by morning.',
 			day2Payload,
 		).failureReason).toBe('timing_not_aligned');
 
 		expect(validateSpcLlmOutput(
 			'Watching tomorrow closely across the Midwest. SPC has issued a Level 3 Enhanced Risk centered on southern Iowa and northern Missouri. A developing storm system is expected to organize into a squall line late Friday afternoon into the evening, bringing damaging winds and tornado potential as it moves east.',
 			day2Payload,
+		).valid).toBe(true);
+	});
+
+	it('validateSpcLlmOutput requires the primary SPC area to stay anchored even when secondary states are allowed', () => {
+		const { buildSpcLlmPayload, validateSpcLlmOutput } = __testing as any;
+		const payload = buildSpcLlmPayload({
+			outputMode: 'comment',
+			outlookDay: 1,
+			postType: 'upgrade',
+			riskLevel: 'enhanced',
+			riskNumber: 3,
+			primaryRegion: 'Midwest',
+			states: ['IA', 'IL', 'WI'],
+			secondaryStates: ['MO'],
+			stateFocusText: 'Iowa, Illinois, and Wisconsin',
+			secondaryAreaText: 'parts of Missouri later on',
+			hazardFocus: 'wind',
+			hazardList: ['damaging winds', 'large hail'],
+			primaryHazards: ['damaging winds', 'large hail'],
+			secondaryHazards: ['tornadoes'],
+			hazardLine: 'damaging winds and large hail',
+			stormMode: 'supercells',
+			stormEvolution: true,
+			stormEvolutionText: 'Supercells may develop early before storms organize into a line later on.',
+			timingWindow: 'late afternoon through evening',
+			notableText: 'storms may move quickly enough to limit warning time',
+			trend: 'shifting',
+			changeHint: 'core risk area now centered on Iowa, Illinois, and Wisconsin',
+			recentOpenings: [],
+			hashtagsEnabled: false,
+		});
+
+		expect(validateSpcLlmOutput(
+			'UPDATE: Missouri may see a secondary extension later this evening as storms organize into a line.',
+			payload,
+		).failureReason).toBe('missing_primary_area_anchor');
+		expect(validateSpcLlmOutput(
+			'UPDATE: The Midwest core still centers on Iowa and Illinois, with Missouri only a secondary extension later as storms organize into a line.',
+			payload,
 		).valid).toBe(true);
 	});
 
@@ -4419,7 +5873,7 @@ describe('Live Weather Admin worker', () => {
 		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/comments')).length).toBe(0);
 	});
 
-	it('runSpcCoverageForDay enforces the 15-minute cross-lane SPC post gap', async () => {
+	it('runSpcCoverageForDay lets scheduled Day 2 main posts bypass the 15-minute SPC lane gap', async () => {
 		const { runSpcCoverageForDay } = __testing as any;
 		const goodEnv = {
 			...env,
@@ -4499,7 +5953,7 @@ describe('Live Weather Admin worker', () => {
 				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
 			}
 			if (url.includes('graph.facebook.com')) {
-				return new Response(JSON.stringify({ id: 'should-not-post' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+				return new Response(JSON.stringify({ id: 'spc-day2-post-gap-bypass' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 			}
 			if (init?.method === 'HEAD') {
 				return new Response('', { status: 200 });
@@ -4510,9 +5964,345 @@ describe('Live Weather Admin worker', () => {
 
 		const result = await runSpcCoverageForDay(goodEnv, 2, Date.parse('2026-04-02T18:05:00Z'));
 
-		expect(result.error).toBe('recent_spc_post_gap');
+		expect(result.error).toBeNull();
+		expect(result.plannedOutputMode).toBe('post');
+		expect(fetchMock.mock.calls.some(([input]) => String(input).includes('graph.facebook.com'))).toBe(true);
+	});
+
+	it('runSpcCoverageForDay lets scheduled Day 2 main posts ignore the shared Facebook cooldown', async () => {
+		const { runSpcCoverageForDay } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: 'page-1',
+			FB_PAGE_ACCESS_TOKEN: 'token-1',
+		} as any;
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'off',
+			updatedAt: '2026-04-02T12:00:00.000Z',
+			spcDay1CoverageEnabled: false,
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'enhanced',
+			spcDay3CoverageEnabled: false,
+			spcHashtagsEnabled: false,
+			spcTimingRefreshEnabled: true,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', '2026-04-02T17:55:00.000Z');
+
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk.html') {
+				return new Response([
+					'<html>',
+					'<head><title>Storm Prediction Center Apr 2, 2026 0600 UTC Day 2 Convective Outlook</title></head>',
+					"<body onload=\"show_tab('otlk_0600')\">",
+					'<div>Updated:&nbsp;Thu Apr 2 06:02:03 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					'<pre>' + [
+						'SPC AC 020602',
+						'',
+						'Day 2 Convective Outlook',
+						'NWS Storm Prediction Center Norman OK',
+						'0102 AM CDT Thu Apr 02 2026',
+						'',
+						'Valid 031200Z - 041200Z',
+						'',
+						'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...AND NORTHERN MISSOURI...',
+						'',
+						'...SUMMARY...',
+						'Severe thunderstorms are expected across southern Iowa and northern Missouri tomorrow afternoon into evening.',
+					].join('\n') + '</pre>',
+					'</body>',
+					'</html>',
+				].join(''), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson') {
+				return new Response(JSON.stringify({
+					type: 'FeatureCollection',
+					features: [{ type: 'Feature', properties: { LABEL: 'ENH', VALID_ISO: '2026-04-03T12:00:00+00:00', EXPIRE_ISO: '2026-04-04T12:00:00+00:00', ISSUE_ISO: '2026-04-02T06:02:00+00:00' } }],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com')) {
+				return new Response(JSON.stringify({ id: 'spc-day2-shared-gap-bypass' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		const result = await runSpcCoverageForDay(goodEnv, 2, Date.parse('2026-04-02T18:05:00Z'));
+
+		expect(result.error).toBeNull();
+		expect(result.plannedOutputMode).toBe('post');
+		expect(fetchMock.mock.calls.some(([input]) => String(input).includes('graph.facebook.com'))).toBe(true);
+	});
+
+	it('runSpcCoverageForDay still respects the shared Facebook cooldown for Day 2 upgrades', async () => {
+		const { runSpcCoverageForDay } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: 'page-1',
+			FB_PAGE_ACCESS_TOKEN: 'token-1',
+		} as any;
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'off',
+			updatedAt: '2026-04-02T12:00:00.000Z',
+			spcDay1CoverageEnabled: false,
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'slight',
+			spcDay3CoverageEnabled: false,
+			spcHashtagsEnabled: false,
+			spcTimingRefreshEnabled: true,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:spc:last-post:2', JSON.stringify({
+			outlookDay: 2,
+			issuedAt: '2026-04-02T06:02:00+00:00',
+			validFrom: '2026-04-03T12:00:00+00:00',
+			validTo: '2026-04-04T12:00:00+00:00',
+			postedAt: '2026-04-02T17:30:00.000Z',
+			summaryHash: 'day2-old-hash',
+			postId: 'day2-old-post',
+			outputMode: 'post',
+			highestRiskLevel: 'slight',
+			highestRiskNumber: 2,
+			affectedStates: ['IA', 'MO'],
+			stateFocusText: 'Southern Iowa and Northern Missouri',
+			primaryRegion: 'Midwest',
+			hazardFocus: 'wind',
+			hazardList: ['damaging winds'],
+			stormMode: 'storm clusters',
+			notableText: null,
+			tornadoProbability: null,
+			windProbability: 15,
+			hailProbability: null,
+			timingText: 'tomorrow afternoon into evening',
+			postType: 'day2_lookahead',
+			reason: 'new_slight_or_higher',
+		}));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', '2026-04-02T18:00:00.000Z');
+
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk.html') {
+				return new Response([
+					'<html>',
+					'<head><title>Storm Prediction Center Apr 2, 2026 0600 UTC Day 2 Convective Outlook</title></head>',
+					"<body onload=\"show_tab('otlk_0600')\">",
+					'<div>Updated:&nbsp;Thu Apr 2 06:02:03 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					'<pre>' + [
+						'SPC AC 020602',
+						'',
+						'Day 2 Convective Outlook',
+						'NWS Storm Prediction Center Norman OK',
+						'0102 AM CDT Thu Apr 02 2026',
+						'',
+						'Valid 031200Z - 041200Z',
+						'',
+						'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...NORTHERN MISSOURI...AND WEST-CENTRAL ILLINOIS...',
+						'',
+						'...SUMMARY...',
+						'A more organized severe weather episode is expected across southern Iowa, northern Missouri, and west-central Illinois tomorrow late afternoon into evening.',
+					].join('\n') + '</pre>',
+					'</body>',
+					'</html>',
+				].join(''), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson') {
+				return new Response(JSON.stringify({
+					type: 'FeatureCollection',
+					features: [{ type: 'Feature', properties: { LABEL: 'ENH', VALID_ISO: '2026-04-03T12:00:00+00:00', EXPIRE_ISO: '2026-04-04T12:00:00+00:00', ISSUE_ISO: '2026-04-02T18:05:00+00:00' } }],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com')) {
+				return new Response(JSON.stringify({ id: 'should-not-post-upgrade' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		const result = await runSpcCoverageForDay(goodEnv, 2, Date.parse('2026-04-02T18:05:00Z'));
+
+		expect(result.error).toBe('recent_global_post_gap');
 		expect(result.plannedOutputMode).toBeNull();
 		expect(fetchMock.mock.calls.some(([input]) => String(input).includes('graph.facebook.com'))).toBe(false);
+	});
+
+	it('runCoordinatedFacebookCoverage releases a deferred Day 2 anchor after a Day 1 suppression', async () => {
+		const { runCoordinatedFacebookCoverage, readFacebookCoordinatorSnapshot, runSpcCoverageForDay } = __testing as any;
+		const goodEnv = {
+			...env,
+			FB_PAGE_ID: 'page-1',
+			FB_PAGE_ACCESS_TOKEN: 'token-1',
+		} as any;
+
+		await goodEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'off',
+			updatedAt: '2026-04-02T12:00:00.000Z',
+			spcDay1CoverageEnabled: true,
+			spcDay1MinRiskLevel: 'slight',
+			spcDay2CoverageEnabled: true,
+			spcDay2MinRiskLevel: 'slight',
+			spcDay3CoverageEnabled: false,
+			spcHashtagsEnabled: false,
+			spcTimingRefreshEnabled: true,
+		}));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', '');
+
+		let day1Version: 'initial' | 'upgrade' = 'initial';
+		let graphCallCount = 0;
+		const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day1otlk.html') {
+				const title = day1Version === 'initial'
+					? 'Storm Prediction Center Apr 2, 2026 1300 UTC Day 1 Convective Outlook'
+					: 'Storm Prediction Center Apr 2, 2026 1800 UTC Day 1 Convective Outlook';
+				const tabId = day1Version === 'initial' ? 'otlk_1300' : 'otlk_1800';
+				const updatedLine = day1Version === 'initial'
+					? 'Updated:&nbsp;Thu Apr 2 12:56:18 UTC 2026&nbsp;(<a href="#">Print Version</a>)'
+					: 'Updated:&nbsp;Thu Apr 2 18:00:00 UTC 2026&nbsp;(<a href="#">Print Version</a>)';
+				const acLine = day1Version === 'initial' ? 'SPC AC 021256' : 'SPC AC 021800';
+				const issuedLine = day1Version === 'initial'
+					? '0756 AM CDT Thu Apr 02 2026'
+					: '0100 PM CDT Thu Apr 02 2026';
+				const validLine = day1Version === 'initial'
+					? 'Valid 021300Z - 031200Z'
+					: 'Valid 021800Z - 031200Z';
+				const riskLine = day1Version === 'initial'
+					? '...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS EASTERN IOWA...NORTHERN ILLINOIS...AND SOUTHERN WISCONSIN...'
+					: '...THERE IS A MODERATE RISK OF SEVERE THUNDERSTORMS EASTERN IOWA...NORTHERN ILLINOIS...SOUTHERN WISCONSIN...AND NORTHWEST INDIANA...';
+				const summaryLine = day1Version === 'initial'
+					? 'Severe thunderstorms capable of producing several tornadoes are expected across eastern Iowa, northern Illinois, and southern Wisconsin this afternoon.'
+					: 'Severe thunderstorms capable of producing strong tornadoes are expected across eastern Iowa, northern Illinois, southern Wisconsin, and northwest Indiana this afternoon into evening.';
+				return new Response([
+					'<html>',
+					`<head><title>${title}</title></head>`,
+					`<body onload="show_tab('${tabId}')">`,
+					`<div>${updatedLine}</div>`,
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					'<pre>' + [
+						acLine,
+						'',
+						'Day 1 Convective Outlook',
+						'NWS Storm Prediction Center Norman OK',
+						issuedLine,
+						'',
+						validLine,
+						'',
+						riskLine,
+						'',
+						'...SUMMARY...',
+						summaryLine,
+					].join('\n') + '</pre>',
+					'</body>',
+					'</html>',
+				].join(''), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson') {
+				return new Response(JSON.stringify({
+					type: 'FeatureCollection',
+					features: [{
+						type: 'Feature',
+						properties: {
+							LABEL: day1Version === 'initial' ? 'ENH' : 'MDT',
+							VALID_ISO: day1Version === 'initial' ? '2026-04-02T13:00:00+00:00' : '2026-04-02T18:00:00+00:00',
+							EXPIRE_ISO: '2026-04-03T12:00:00+00:00',
+							ISSUE_ISO: day1Version === 'initial' ? '2026-04-02T12:56:00+00:00' : '2026-04-02T18:00:00+00:00',
+						},
+					}],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk.html') {
+				return new Response([
+					'<html>',
+					'<head><title>Storm Prediction Center Apr 2, 2026 0600 UTC Day 2 Convective Outlook</title></head>',
+					"<body onload=\"show_tab('otlk_0600')\">",
+					'<div>Updated:&nbsp;Thu Apr 2 06:02:03 UTC 2026&nbsp;(<a href="#">Print Version</a>)</div>',
+					'<div><font color="#FFFFFF"><b>&nbsp;Forecast Discussion</b></font></div>',
+					'<pre>' + [
+						'SPC AC 020602',
+						'',
+						'Day 2 Convective Outlook',
+						'NWS Storm Prediction Center Norman OK',
+						'0102 AM CDT Thu Apr 02 2026',
+						'',
+						'Valid 031200Z - 041200Z',
+						'',
+						'...THERE IS AN ENHANCED RISK OF SEVERE THUNDERSTORMS SOUTHERN IOWA...NORTHERN MISSOURI...AND WEST-CENTRAL ILLINOIS...',
+						'',
+						'...SUMMARY...',
+						'A more organized severe weather episode is expected across southern Iowa, northern Missouri, and west-central Illinois tomorrow late afternoon into evening.',
+					].join('\n') + '</pre>',
+					'</body>',
+					'</html>',
+				].join(''), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+			}
+			if (url === 'https://www.spc.noaa.gov/products/outlook/day2otlk_cat.nolyr.geojson') {
+				return new Response(JSON.stringify({
+					type: 'FeatureCollection',
+					features: [{ type: 'Feature', properties: { LABEL: 'ENH', VALID_ISO: '2026-04-03T12:00:00+00:00', EXPIRE_ISO: '2026-04-04T12:00:00+00:00', ISSUE_ISO: '2026-04-02T06:02:00+00:00' } }],
+				}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			}
+			if (url.includes('graph.facebook.com')) {
+				graphCallCount += 1;
+				const id = graphCallCount === 1
+					? 'spc-day1-anchor-post'
+					: graphCallCount === 2
+						? 'spc-day1-upgrade-comment'
+						: 'spc-day2-deferred-post';
+				return new Response(JSON.stringify({ id }), {
+					status: 200,
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+			if (init?.method === 'HEAD') {
+				return new Response('', { status: 200 });
+			}
+			return new Response('not found', { status: 404 });
+		});
+		(globalThis as any).fetch = fetchMock;
+
+		const initialDay1 = await runSpcCoverageForDay(goodEnv, 1, Date.parse('2026-04-02T13:10:00Z'));
+		expect(initialDay1.error).toBeNull();
+		expect(initialDay1.plannedOutputMode).toBe('post');
+		day1Version = 'upgrade';
+
+		const firstSnapshot = await runCoordinatedFacebookCoverage(goodEnv, {}, [], Date.parse('2026-04-02T18:20:00Z'));
+
+		expect(firstSnapshot.selectedLane).toBe('spc_day1');
+		expect(firstSnapshot.selectedAction).toBe('comment');
+		expect(firstSnapshot.selectedIntentReason).toBe('risk_upgrade');
+		expect(firstSnapshot.statuses.some((status: any) => (
+			status.lane === 'spc_day2'
+			&& status.status === 'suppressed'
+			&& status.reason === 'coordinator_suppressed_spc_day2_by_spc_day1'
+		))).toBe(true);
+
+		const deferredRaw = await goodEnv.WEATHER_KV.get('fb:spc:deferred-anchor:2');
+		expect(deferredRaw).toBeTruthy();
+		expect(JSON.parse(deferredRaw || '{}')).toMatchObject({
+			day: 2,
+			suppressedByLane: 'spc_day1',
+			forecastDay: '2026-04-03',
+		});
+
+		const secondSnapshot = await runCoordinatedFacebookCoverage(goodEnv, {}, [], Date.parse('2026-04-02T19:25:00Z'));
+
+		expect(secondSnapshot.selectedLane).toBe('spc_day2');
+		expect(secondSnapshot.selectedReason).toBe('coordinator_selected_spc_day2');
+		expect(secondSnapshot.selectedIntentReason).toBe('deferred_anchor_release');
+		expect(await goodEnv.WEATHER_KV.get('fb:spc:deferred-anchor:2')).toBeNull();
+
+		const savedSnapshot = await readFacebookCoordinatorSnapshot(goodEnv);
+		expect(savedSnapshot?.selectedLane).toBe('spc_day2');
+		expect(savedSnapshot?.selectedIntentReason).toBe('deferred_anchor_release');
+		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('graph.facebook.com')).length).toBe(3);
 	});
 
 	it('runSpcCoverageForDay uses Facebook comments for same-thread SPC upgrades', async () => {
@@ -4885,6 +6675,111 @@ describe('Live Weather Admin worker', () => {
 		expect(summary.topAlertTypes).toContain('Winter Storm Warning');
 	});
 
+	it('selectDigestRegionalStory keeps scattered winter alerts focused on the dominant regional cluster', () => {
+		const { buildDigestCandidates, selectDigestRegionalStory } = __testing as any;
+		const alertMap: Record<string, any> = {
+			'winter-mn': {
+				id: 'winter-mn',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Minnesota counties',
+					geocode: { UGC: ['MNC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+			'winter-wi': {
+				id: 'winter-wi',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Wisconsin counties',
+					geocode: { UGC: ['WIC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+			'winter-sd': {
+				id: 'winter-sd',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'South Dakota counties',
+					geocode: { UGC: ['SDC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+			'winter-nd': {
+				id: 'winter-nd',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'North Dakota counties',
+					geocode: { UGC: ['NDC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+			'winter-ca': {
+				id: 'winter-ca',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Expected',
+					areaDesc: 'California mountain counties',
+					geocode: { UGC: ['CAC001'] },
+					status: 'Actual',
+					headline: 'California winter storm warning',
+					description: 'Mountain snow expected in California.',
+				},
+			},
+			'winter-il': {
+				id: 'winter-il',
+				properties: {
+					event: 'Winter Weather Advisory',
+					severity: 'Moderate',
+					urgency: 'Expected',
+					areaDesc: 'Illinois counties',
+					geocode: { UGC: ['ILC001'] },
+					status: 'Actual',
+					headline: 'Illinois winter weather advisory',
+					description: 'Light snow and travel impacts possible.',
+				},
+			},
+			'winter-wy': {
+				id: 'winter-wy',
+				properties: {
+					event: 'Winter Weather Advisory',
+					severity: 'Moderate',
+					urgency: 'Expected',
+					areaDesc: 'Wyoming counties',
+					geocode: { UGC: ['WYC001'] },
+					status: 'Actual',
+					headline: 'Wyoming winter weather advisory',
+					description: 'Light snow and travel impacts possible.',
+				},
+			},
+		};
+
+		const candidates = buildDigestCandidates(alertMap, new Set<string>()).filter((candidate: any) => candidate.hazardFamily === 'winter');
+		const selection = selectDigestRegionalStory(candidates);
+
+		expect(selection.storyRegion).toBe('northern Plains and Upper Midwest');
+		expect(selection.storyStates).toEqual(['MN', 'ND', 'SD', 'WI']);
+		expect(selection.outlierStates).toEqual(expect.arrayContaining(['CA', 'IL', 'WY']));
+		expect(selection.regionalCoherence).toBe('cohesive');
+	});
+
 	it('selectDigestPrimaryCluster falls back to a different hazard family when the top one is cooling down', () => {
 		const { selectDigestPrimaryCluster } = __testing as any;
 		const nowMs = Date.UTC(2026, 3, 1, 13, 0, 0);
@@ -4987,6 +6882,134 @@ describe('Live Weather Admin worker', () => {
 		const afterHour = await canPostNewDigest(env, startMs + 81 * 60 * 1000, 'flood');
 		expect(afterHour.allowed).toBe(true);
 		expect(afterHour.reason).toBeNull();
+	});
+
+	it('evaluateDigestNewPostGap enforces the 60-minute digest anchor gap', () => {
+		const { evaluateDigestNewPostGap } = __testing as any;
+		const nowMs = Date.UTC(2026, 3, 1, 13, 0, 0);
+
+		expect(evaluateDigestNewPostGap(null, nowMs)).toMatchObject({
+			allowed: true,
+			reason: 'no_previous_digest_post',
+		});
+
+		const duringGap = evaluateDigestNewPostGap({
+			blockId: 'block-during-gap',
+			publishedAt: new Date(nowMs - 31 * 60 * 1000).toISOString(),
+			hash: 'during-gap',
+			postId: 'post-during-gap',
+		}, nowMs);
+		expect(duringGap.allowed).toBe(false);
+		expect(duringGap.reason).toBe('digest_new_post_gap_not_met');
+
+		const afterGap = evaluateDigestNewPostGap({
+			blockId: 'block-after-gap',
+			publishedAt: new Date(nowMs - 81 * 60 * 1000).toISOString(),
+			hash: 'after-gap',
+			postId: 'post-after-gap',
+		}, nowMs);
+		expect(afterGap.allowed).toBe(true);
+		expect(afterGap.reason).toBe('digest_new_post_allowed_after_60m');
+	});
+
+	it('evaluateDigestSameStory and evaluateSecondDigestPostAllowance separate same-story updates from material pivots', () => {
+		const {
+			evaluateDigestChangeThresholds,
+			evaluateDigestSameStory,
+			evaluateSecondDigestPostAllowance,
+		} = __testing as any;
+		const previousSummary = {
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'flood',
+			states: ['OH', 'IN'],
+			storyStates: ['OH', 'IN'],
+			storyRegion: 'Midwest',
+			storyFingerprint: 'flood|Midwest|IN,OH|flood warning',
+			topAlertTypes: ['Flood Warning'],
+			urgency: 'moderate',
+			alertCount: 3,
+			warningCount: 1,
+			hash: 'prev-flood-story',
+		} as any;
+
+		const sameStoryUpdate = {
+			...previousSummary,
+			states: ['OH', 'IN', 'PA'],
+			storyStates: ['OH', 'IN', 'PA'],
+			storyFingerprint: 'flood|Midwest|IN,OH,PA|flood warning',
+			alertCount: 4,
+			hash: 'same-story-update',
+		} as any;
+		const sameStory = evaluateDigestSameStory(previousSummary, sameStoryUpdate);
+		expect(sameStory.samePublicStory).toBe(true);
+		expect(sameStory.sameTopAlertTypes).toBe(true);
+		expect(sameStory.storyStateOverlapRatio).toBeGreaterThanOrEqual(0.5);
+
+		const warningJumpSummary = {
+			...sameStoryUpdate,
+			alertCount: 8,
+			warningCount: 4,
+			hash: 'warning-jump-story',
+		} as any;
+		const warningJumpChange = evaluateDigestChangeThresholds(previousSummary, warningJumpSummary);
+		expect(evaluateSecondDigestPostAllowance(previousSummary, warningJumpSummary, warningJumpChange)).toMatchObject({
+			allowed: true,
+			reason: 'digest_second_post_allowed_warning_jump',
+		});
+
+		const hazardShiftSummary = {
+			...previousSummary,
+			hazardFocus: 'winter',
+			states: ['MI', 'OH'],
+			storyStates: ['MI', 'OH'],
+			storyRegion: 'Great Lakes',
+			storyFingerprint: 'winter|Great Lakes|MI,OH|winter storm warning',
+			topAlertTypes: ['Winter Storm Warning'],
+			alertCount: 5,
+			warningCount: 2,
+			hash: 'hazard-shift-story',
+		} as any;
+		const hazardShiftChange = evaluateDigestChangeThresholds(previousSummary, hazardShiftSummary);
+		expect(evaluateSecondDigestPostAllowance(previousSummary, hazardShiftSummary, hazardShiftChange)).toMatchObject({
+			allowed: true,
+			reason: 'digest_second_post_allowed_hazard_change',
+		});
+
+		const regionShiftSummary = {
+			...previousSummary,
+			states: ['TX', 'LA'],
+			storyStates: ['TX', 'LA'],
+			storyRegion: 'Gulf Coast',
+			storyFingerprint: 'flood|Gulf Coast|LA,TX|flood warning',
+			alertCount: 4,
+			warningCount: 2,
+			hash: 'region-shift-story',
+		} as any;
+		const regionShiftChange = evaluateDigestChangeThresholds(previousSummary, regionShiftSummary);
+		expect(evaluateSecondDigestPostAllowance(previousSummary, regionShiftSummary, regionShiftChange)).toMatchObject({
+			allowed: true,
+			reason: 'digest_second_post_allowed_region_change',
+		});
+
+		const newMajorStorySummary = {
+			...previousSummary,
+			states: ['IA', 'MO'],
+			storyStates: ['IA', 'MO'],
+			storyRegion: 'Midwest',
+			storyFingerprint: 'flood|Midwest|IA,MO|flash flood warning',
+			topAlertTypes: ['Flash Flood Warning'],
+			alertCount: 4,
+			warningCount: 2,
+			hash: 'new-major-story',
+		} as any;
+		const newMajorStoryDiff = evaluateDigestSameStory(previousSummary, newMajorStorySummary);
+		expect(newMajorStoryDiff.clearlyDifferentStory).toBe(true);
+		const newMajorStoryChange = evaluateDigestChangeThresholds(previousSummary, newMajorStorySummary);
+		expect(evaluateSecondDigestPostAllowance(previousSummary, newMajorStorySummary, newMajorStoryChange)).toMatchObject({
+			allowed: true,
+			reason: 'digest_second_post_allowed_new_major_story',
+		});
 	});
 
 	it('checkClusterBreakout only uses the flood override for actual flood warnings', () => {
@@ -5220,6 +7243,28 @@ describe('Live Weather Admin worker', () => {
 		expect(prompt).toContain('Do not restart with a broad national summary.');
 	});
 
+	it('buildUserPrompt tells the model to ignore suppressed outlier states', () => {
+		const { buildUserPrompt } = __testing as any;
+		const prompt = buildUserPrompt({
+			mode: 'incident',
+			post_type: 'cluster',
+			hazard_focus: 'winter',
+			states: ['MN', 'ND', 'SD', 'WI'],
+			regional_focus: 'northern Plains and Upper Midwest',
+			example_states: ['Minnesota', 'North Dakota', 'South Dakota', 'Wisconsin'],
+			trend: 'expanding',
+			impact: ['snow', 'travel'],
+			top_alert_types: ['Winter Storm Warning'],
+			urgency: 'high',
+			max_length: 450,
+			style: 'live national weather desk update, clear, concise, distinct, no hype',
+			recent_openings: [],
+			suppressed_outliers: ['California', 'Wyoming'],
+		});
+
+		expect(prompt).toContain('Ignore these weaker or distant outlier states for this post: California, Wyoming.');
+	});
+
 	it('buildCommentChangeHint summarizes what shifted since the last digest update', () => {
 		const { buildCommentChangeHint } = __testing as any;
 		const changeHint = buildCommentChangeHint({
@@ -5370,6 +7415,68 @@ describe('Live Weather Admin worker', () => {
 		expect(override.overrideNewPost).toBe(true);
 	});
 
+	it('evaluateDigestChangeThresholds suppresses new posts for same-hazard same-region continuations', () => {
+		const { evaluateDigestChangeThresholds } = __testing as any;
+		const previousSummary = {
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'winter',
+			states: ['MN', 'WI'],
+			storyRegion: 'northern Plains and Upper Midwest',
+			topAlertTypes: ['Winter Storm Warning'],
+			urgency: 'moderate',
+			alertCount: 4,
+			warningCount: 2,
+			hash: 'prev-winter-story',
+		} as any;
+
+		const continuation = evaluateDigestChangeThresholds(previousSummary, {
+			mode: 'normal',
+			postType: 'digest',
+			hazardFocus: 'winter',
+			states: ['MN', 'ND', 'SD', 'WI'],
+			storyRegion: 'northern Plains and Upper Midwest',
+			topAlertTypes: ['Winter Storm Warning'],
+			urgency: 'moderate',
+			alertCount: 6,
+			warningCount: 3,
+			hash: 'next-winter-story',
+		} as any);
+
+		expect(continuation.sameStorySuppressionCandidate).toBe(true);
+		expect(continuation.meaningfulPostChange).toBe(false);
+		expect(continuation.meaningfulCommentChange).toBe(true);
+	});
+
+	it('evaluateDigestChangeThresholds ignores rotated display states when the underlying story fingerprint is unchanged', () => {
+		const { evaluateDigestChangeThresholds } = __testing as any;
+		const previousSummary = {
+			mode: 'incident',
+			postType: 'cluster',
+			hazardFocus: 'winter',
+			states: ['MN', 'SD', 'WI'],
+			storyStates: ['MN', 'ND', 'SD', 'WI'],
+			storyRegion: 'northern Plains and Upper Midwest',
+			storyFingerprint: 'winter|northern Plains and Upper Midwest|MN,ND,SD,WI|winter storm warning',
+			topAlertTypes: ['Winter Storm Warning'],
+			urgency: 'high',
+			alertCount: 7,
+			warningCount: 4,
+			hash: 'winter-story-steady',
+		} as any;
+
+		const continuation = evaluateDigestChangeThresholds(previousSummary, {
+			...previousSummary,
+			states: ['ND', 'SD', 'WI'],
+			alertCount: 8,
+			warningCount: 4,
+			hash: 'winter-story-rotated-display',
+		} as any);
+
+		expect(continuation.sameStorySuppressionCandidate).toBe(true);
+		expect(continuation.meaningfulPostChange).toBe(false);
+	});
+
 	it('getDigestImageUrl selects hazard-specific digest art', () => {
 		const { getDigestImageUrl } = __testing as any;
 		const imageEnv = {
@@ -5438,6 +7545,30 @@ describe('Live Weather Admin worker', () => {
 			.toBe(true);
 	});
 
+	it('validateLlmOutput rejects text that reintroduces suppressed outlier states', () => {
+		const { validateLlmOutput } = __testing;
+		const payload = {
+			states: ['MN', 'ND', 'SD', 'WI'],
+			regional_focus: 'northern Plains and Upper Midwest',
+			example_states: ['Minnesota', 'North Dakota', 'South Dakota', 'Wisconsin'],
+			trend: 'expanding',
+			impact: ['snow', 'travel'],
+			top_alert_types: ['Winter Storm Warning'],
+			hazard_focus: 'winter',
+			mode: 'incident',
+			post_type: 'cluster',
+			urgency: 'high',
+			max_length: 450,
+			style: '',
+			recent_openings: [],
+			suppressed_outliers: ['California'],
+		} as any;
+
+		expect(
+			validateLlmOutput('Winter weather is the main weather story right now across the northern Plains and Upper Midwest, with impacts centered in Minnesota and California.', payload).failureReason,
+		).toBe('mentions_suppressed_outlier');
+	});
+
 	it('recordRecentDigestOpening keeps the newest distinct openings first', async () => {
 		const { recordRecentDigestOpening, readRecentDigestOpenings } = __testing as any;
 
@@ -5481,12 +7612,43 @@ describe('Live Weather Admin worker', () => {
 		expect(openings[0]).toMatch(/Flooding is the main weather story right now across/i);
 	});
 
+	it('runDigestCoverage skips startup and new posts during the shared Facebook cooldown', async () => {
+		const { runDigestCoverage, readRecentDigestOpenings } = __testing as any;
+		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const copyFn = vi.fn(async () => 'This digest should never be written.');
+		const recentPostAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+		await goodEnv.WEATHER_KV.put('fb:digest:recent-openings', JSON.stringify({ openings: [], updatedAt: new Date().toISOString() }));
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', recentPostAt);
+
+		await runDigestCoverage(goodEnv, {
+			'alert-global-gap-1': {
+				id: 'alert-global-gap-1',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Ohio County',
+					geocode: { UGC: ['OHC001', 'INC001'] },
+					status: 'Actual',
+					headline: 'Flood Warning remains in effect',
+					description: 'Flooding continues across the region.',
+				},
+			},
+		}, copyFn);
+
+		expect(copyFn).not.toHaveBeenCalled();
+		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) => String(input).includes('graph.facebook.com'))).toBe(false);
+		const openings = await readRecentDigestOpenings(goodEnv);
+		expect(openings).toEqual([]);
+	});
+
 	it('runDigestCoverage uses comment-mode copy for same-block digest updates', async () => {
 		const { runDigestCoverage, readRecentDigestOpenings } = __testing as any;
 		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
 		const nowMs = Date.now();
-		const publishedAt = new Date(nowMs - 5 * 60 * 1000).toISOString();
-		const blockId = `block-${Math.floor(nowMs / (30 * 60 * 1000))}`;
+		const publishedAt = new Date(nowMs - 25 * 60 * 1000).toISOString();
+		const blockId = `block-${Math.floor(nowMs / (60 * 60 * 1000))}`;
 		const copyFn = vi.fn(async (_env: any, _summary: any, outputMode = 'post') => (
 			outputMode === 'comment'
 				? 'UPDATE: Flooding is intensifying in Ohio and Indiana tonight with travel impacts building.'
@@ -5730,13 +7892,347 @@ describe('Live Weather Admin worker', () => {
 		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) => String(input).includes('/comments'))).toBe(false);
 	});
 
-	it('runDigestCoverage skips same-block digest comments when the story pivots away from the parent thread', async () => {
+	it('evaluateDigestCoverageIntent surfaces explicit pacing reasons for new posts, comments, and skips', async () => {
+		const { evaluateDigestCoverageIntent } = __testing as any;
+		const nowMs = Date.now();
+
+		const hourlyEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const oldPublishedAt = new Date(nowMs - 70 * 60 * 1000).toISOString();
+		const oldBlockId = `block-${Math.floor((nowMs - 70 * 60 * 1000) / (60 * 60 * 1000))}`;
+		await hourlyEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: new Date().toISOString(),
+			digestCoverageEnabled: true,
+			digestCommentUpdatesEnabled: true,
+			digestMaxCommentsPerThread: 3,
+			digestMinCommentGapMinutes: 20,
+		}));
+		await hourlyEnv.WEATHER_KV.put('fb:last-post-timestamp', oldPublishedAt);
+		await hourlyEnv.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId: oldBlockId,
+			publishedAt: oldPublishedAt,
+			hash: 'old-flood-story',
+			postId: 'old-flood-post',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: { flood: oldPublishedAt },
+			recentPostTimestamps: [oldPublishedAt],
+		}));
+		await hourlyEnv.WEATHER_KV.put(`fb:digest-thread:${oldBlockId}`, JSON.stringify({
+			postId: 'old-flood-post',
+			blockId: oldBlockId,
+			publishedAt: oldPublishedAt,
+			hash: 'old-flood-story',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				mode: 'normal',
+				postType: 'digest',
+				hazardFocus: 'flood',
+				states: ['OH'],
+				storyStates: ['OH'],
+				storyRegion: 'Midwest',
+				topAlertTypes: ['Flood Warning'],
+				urgency: 'moderate',
+				alertCount: 2,
+				warningCount: 1,
+				hash: 'old-flood-story',
+			},
+		}));
+
+		const hourlyEvaluation = await evaluateDigestCoverageIntent(hourlyEnv, {
+			'winter-hourly-1': {
+				id: 'winter-hourly-1',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Minnesota and Wisconsin counties',
+					geocode: { UGC: ['MNC001', 'WIC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+		}, nowMs);
+		expect(hourlyEvaluation.intent?.action).toBe('post');
+		expect(hourlyEvaluation.intent?.reason).toBe('digest_new_post_allowed_after_60m');
+
+		const sameStoryEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const recentPublishedAt = new Date(nowMs - 25 * 60 * 1000).toISOString();
+		const recentBlockId = `block-${Math.floor(nowMs / (60 * 60 * 1000))}`;
+		await sameStoryEnv.WEATHER_KV.put('fb:auto-post-config', JSON.stringify({
+			mode: 'smart_high_impact',
+			updatedAt: new Date().toISOString(),
+			digestCoverageEnabled: true,
+			digestCommentUpdatesEnabled: true,
+			digestMaxCommentsPerThread: 3,
+			digestMinCommentGapMinutes: 20,
+		}));
+		await sameStoryEnv.WEATHER_KV.put('fb:last-post-timestamp', recentPublishedAt);
+		await sameStoryEnv.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId: recentBlockId,
+			publishedAt: recentPublishedAt,
+			hash: 'recent-flood-story',
+			postId: 'recent-flood-post',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: { flood: recentPublishedAt },
+			recentPostTimestamps: [recentPublishedAt],
+		}));
+		await sameStoryEnv.WEATHER_KV.put(`fb:digest-thread:${recentBlockId}`, JSON.stringify({
+			postId: 'recent-flood-post',
+			blockId: recentBlockId,
+			publishedAt: recentPublishedAt,
+			hash: 'recent-flood-story',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				mode: 'normal',
+				postType: 'digest',
+				hazardFocus: 'flood',
+				states: ['OH'],
+				storyStates: ['OH'],
+				storyRegion: 'Midwest',
+				topAlertTypes: ['Flood Warning'],
+				urgency: 'moderate',
+				alertCount: 2,
+				warningCount: 1,
+				hash: 'recent-flood-story',
+			},
+		}));
+
+		const commentEvaluation = await evaluateDigestCoverageIntent(sameStoryEnv, {
+			'comment-flood-1': {
+				id: 'comment-flood-1',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Moderate',
+					urgency: 'Immediate',
+					areaDesc: 'Ohio and Indiana counties',
+					geocode: { UGC: ['OHC001', 'INC001'] },
+					status: 'Actual',
+					headline: 'Flood Warning remains in effect',
+					description: 'Flooding continues and is worsening in low-lying areas.',
+				},
+			},
+		}, nowMs);
+		expect(commentEvaluation.intent?.action).toBe('comment');
+		expect(commentEvaluation.intent?.reason).toBe('digest_same_story_comment_only');
+
+		const skipEvaluation = await evaluateDigestCoverageIntent(sameStoryEnv, {
+			'skip-flood-1': {
+				id: 'skip-flood-1',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Moderate',
+					urgency: 'Expected',
+					areaDesc: 'Ohio County',
+					geocode: { UGC: ['OHC001'] },
+					status: 'Actual',
+					headline: 'Flood Warning remains in effect',
+					description: 'Minor flooding concerns continue in the same area.',
+				},
+			},
+		}, nowMs);
+		expect(skipEvaluation.intent).toBeNull();
+		expect(skipEvaluation.blockedReason).toBe('digest_same_story_skip');
+
+		const warningJumpEvaluation = await evaluateDigestCoverageIntent(sameStoryEnv, {
+			'warning-jump-1': {
+				id: 'warning-jump-1',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Ohio County',
+					geocode: { UGC: ['OHC001'] },
+					status: 'Actual',
+					headline: 'Flood Warning remains in effect',
+					description: 'Flooding continues and warnings are increasing in coverage.',
+				},
+			},
+			'warning-jump-2': {
+				id: 'warning-jump-2',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Indiana County',
+					geocode: { UGC: ['INC001'] },
+					status: 'Actual',
+					headline: 'Additional Flood Warning posted',
+					description: 'Flooding continues in more low-lying areas.',
+				},
+			},
+			'warning-jump-3': {
+				id: 'warning-jump-3',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Additional Ohio County',
+					geocode: { UGC: ['OHC003'] },
+					status: 'Actual',
+					headline: 'Flood Warning expanded again',
+					description: 'Warnings continue to increase as flooding worsens.',
+				},
+			},
+			'warning-jump-4': {
+				id: 'warning-jump-4',
+				properties: {
+					event: 'Flood Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Additional Indiana County',
+					geocode: { UGC: ['INC003'] },
+					status: 'Actual',
+					headline: 'Flood Warning expanded again',
+					description: 'Warnings continue to increase as flooding worsens.',
+				},
+			},
+		}, nowMs);
+		expect(warningJumpEvaluation.intent?.action).toBe('post');
+		expect(warningJumpEvaluation.intent?.reason).toBe('digest_second_post_allowed_warning_jump');
+	});
+
+	it('runDigestCoverage passes a coherent regional winter story into digest copy generation', async () => {
+		const { runDigestCoverage } = __testing as any;
+		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
+		const nowMs = Date.now();
+		const previousPublishedAt = new Date(nowMs - 65 * 60 * 1000).toISOString();
+		const previousBlockId = `block-${Math.floor((nowMs - 65 * 60 * 1000) / (60 * 60 * 1000))}`;
+		const copyFn = vi.fn(async () => 'Winter weather is the main weather story right now across the northern Plains and Upper Midwest tonight.');
+
+		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', previousPublishedAt);
+		await goodEnv.WEATHER_KV.put('fb:digest:block', JSON.stringify({
+			blockId: previousBlockId,
+			publishedAt: previousPublishedAt,
+			hash: 'older-flood-story',
+			postId: 'flood-story-post',
+			hazardFocus: 'flood',
+			lastPublishedAtByFocus: { flood: previousPublishedAt },
+			recentPostTimestamps: [previousPublishedAt],
+		}));
+		await goodEnv.WEATHER_KV.put(`fb:digest-thread:${previousBlockId}`, JSON.stringify({
+			postId: 'flood-story-post',
+			blockId: previousBlockId,
+			publishedAt: previousPublishedAt,
+			hash: 'older-flood-story',
+			commentCount: 0,
+			lastCommentAt: null,
+			summary: {
+				mode: 'normal',
+				postType: 'digest',
+				hazardFocus: 'flood',
+				states: ['OH', 'IN'],
+				storyRegion: 'Midwest',
+				topAlertTypes: ['Flood Warning'],
+				urgency: 'moderate',
+				alertCount: 3,
+				warningCount: 1,
+				hash: 'older-flood-story',
+			},
+		}));
+
+		await runDigestCoverage(goodEnv, {
+			'winter-mn': {
+				id: 'winter-mn',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Minnesota counties',
+					geocode: { UGC: ['MNC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+			'winter-wi': {
+				id: 'winter-wi',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'Wisconsin counties',
+					geocode: { UGC: ['WIC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+			'winter-sd': {
+				id: 'winter-sd',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'South Dakota counties',
+					geocode: { UGC: ['SDC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+			'winter-nd': {
+				id: 'winter-nd',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Immediate',
+					areaDesc: 'North Dakota counties',
+					geocode: { UGC: ['NDC001'] },
+					status: 'Actual',
+					headline: 'Winter storm warning',
+					description: 'Heavy snow and ice expected.',
+				},
+			},
+			'winter-ca': {
+				id: 'winter-ca',
+				properties: {
+					event: 'Winter Storm Warning',
+					severity: 'Severe',
+					urgency: 'Expected',
+					areaDesc: 'California mountain counties',
+					geocode: { UGC: ['CAC001'] },
+					status: 'Actual',
+					headline: 'California winter storm warning',
+					description: 'Mountain snow expected in California.',
+				},
+			},
+			'winter-wy': {
+				id: 'winter-wy',
+				properties: {
+					event: 'Winter Weather Advisory',
+					severity: 'Moderate',
+					urgency: 'Expected',
+					areaDesc: 'Wyoming counties',
+					geocode: { UGC: ['WYC001'] },
+					status: 'Actual',
+					headline: 'Wyoming winter weather advisory',
+					description: 'Light snow and travel impacts possible.',
+				},
+			},
+		}, copyFn);
+
+		expect(copyFn).toHaveBeenCalledTimes(1);
+		const summary = copyFn.mock.calls[0][1];
+		expect(summary.hazardFocus).toBe('winter');
+		expect(summary.storyRegion).toBe('northern Plains and Upper Midwest');
+		expect(summary.states).toEqual(['MN', 'ND', 'SD', 'WI']);
+		expect(summary.outlierStates).toEqual(expect.arrayContaining(['CA', 'WY']));
+	});
+
+	it('runDigestCoverage starts a new override digest instead of commenting when the story pivots away from the parent thread', async () => {
 		const { runDigestCoverage, readDigestThread, readRecentDigestOpenings } = __testing as any;
 		const goodEnv = { ...env, FB_PAGE_ID: 'page-1', FB_PAGE_ACCESS_TOKEN: 'token-1' } as any;
 		const nowMs = Date.now();
-		const publishedAt = new Date(nowMs - 5 * 60 * 1000).toISOString();
-		const blockId = `block-${Math.floor(nowMs / (30 * 60 * 1000))}`;
-		const copyFn = vi.fn(async () => 'UPDATE: This comment should never be posted.');
+		const publishedAt = new Date(nowMs - 25 * 60 * 1000).toISOString();
+		const blockId = `block-${Math.floor(nowMs / (60 * 60 * 1000))}`;
+		const copyFn = vi.fn(async (_env: any, _summary: any, outputMode = 'post') => (
+			outputMode === 'comment'
+				? 'UPDATE: This comment should never be posted.'
+				: 'High winds are becoming the main weather story across California, Nevada, Wyoming, and Indiana tonight.'
+		));
 
 		await goodEnv.WEATHER_KV.put('fb:digest:recent-openings', JSON.stringify({ openings: [], updatedAt: new Date().toISOString() }));
 		await goodEnv.WEATHER_KV.put('fb:last-post-timestamp', publishedAt);
@@ -5783,16 +8279,21 @@ describe('Live Weather Admin worker', () => {
 			},
 		}, copyFn);
 
-		expect(copyFn).not.toHaveBeenCalled();
+		expect(copyFn).toHaveBeenCalledTimes(1);
+		expect(copyFn.mock.calls[0][2]).toBe('post');
 		expect((globalThis.fetch as any).mock.calls.some(([input]: [RequestInfo]) => String(input).includes('/comments'))).toBe(false);
+		expect(
+			(globalThis.fetch as any).mock.calls.filter(([input]: [RequestInfo]) =>
+				String(input).includes('/photos') || String(input).includes('/feed'),
+			).length,
+		).toBeGreaterThan(0);
 
 		const thread = await readDigestThread(goodEnv, blockId);
 		expect(thread?.commentCount).toBe(0);
-		expect(thread?.hash).toBe('older-thread-hash');
-		expect(thread?.summary?.hazardFocus).toBe('flood');
+		expect(thread?.summary?.hazardFocus).toBe('wind');
 
 		const openings = await readRecentDigestOpenings(goodEnv);
-		expect(openings).toEqual([]);
+		expect(openings[0]).toBe('High winds are becoming the main weather story across California, Nevada, Wyoming, and Indiana tonight.');
 	});
 
 	it('generateDigestCopy falls back to template when AI is unavailable', async () => {

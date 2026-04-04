@@ -14,7 +14,25 @@ function threadKvKey(ugcCode: string, event: string): string {
 }
 
 export function stormClusterFamilyForEvent(event: string): string | null {
+	const normalized = String(event || '').trim().toLowerCase();
 	if (isSevereWeatherFallbackEvent(event)) return 'severe_thunderstorm';
+	if (normalized === 'high wind warning' || normalized === 'wind advisory' || normalized === 'wind watch') {
+		return 'wind';
+	}
+	if (normalized === 'flood warning' || normalized === 'flood advisory' || normalized === 'flood watch') {
+		return 'flood';
+	}
+	if (
+		normalized === 'winter storm warning'
+		|| normalized === 'winter weather advisory'
+		|| normalized === 'ice storm warning'
+		|| normalized === 'blizzard warning'
+	) {
+		return 'winter';
+	}
+	if (normalized === 'red flag warning' || normalized === 'fire weather watch') {
+		return 'fire_weather';
+	}
 	return null;
 }
 

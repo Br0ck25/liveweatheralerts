@@ -5,15 +5,17 @@ import type {
 	DigestHazardCooldownKey,
 	DigestAlertTier,
 	DigestCandidate,
+	DigestRegionalStorySelection,
 	HazardClusterSummary,
 	DigestSummary,
 	DigestThreadRecord,
 	PublishedDigestBlockRecord,
 	StandaloneCoveredAlertRecord,
 	StartupStateRecord,
+	FacebookCoverageEvaluation,
+	FacebookCoverageIntent,
 } from '../types';
 import {
-	KV_FB_LAST_POST_TIMESTAMP,
 	KV_FB_DIGEST_BLOCK,
 	KV_FB_DIGEST_HASH,
 	KV_FB_DIGEST_ROTATION_CURSOR,
@@ -33,13 +35,16 @@ import {
 	FB_CLUSTER_BREAKOUT_FLOOD_WARNINGS,
 	FB_CLUSTER_BREAKOUT_SCORE_THRESHOLD,
 	FB_CLUSTER_BREAKOUT_MIN_STATES,
-	FB_DIGEST_TOP_STATE_COUNT,
-	FB_DIGEST_ROTATION_STATE_COUNT,
-	FB_DIGEST_MAX_NORMAL_MULTISTATE,
+	FB_DIGEST_MAX_STORY_STATES,
 	PRIMARY_APP_ORIGIN,
 } from '../constants';
 import { deriveAlertImpactCategories, dedupeStrings } from '../utils';
-import { readFbAutoPostConfig } from './config';
+import { matchingMetroNamesForAlert, readFbAutoPostConfig } from './config';
+import {
+	readLastFacebookActivityTimestamp,
+	readRecentFacebookActivity,
+	recordLastFacebookActivity,
+} from './activity';
 import {
 	buildCommentChangeHint,
 	buildDigestRegionalBuckets,
@@ -111,6 +116,369 @@ function isTestOrDuplicateOrLowValue(properties: any): boolean {
 	return false;
 }
 
+type DigestStateStoryScore = {
+	stateCode: string;
+	score: number;
+	warningCount: number;
+	alertCount: number;
+	metroCount: number;
+};
+
+type DigestStoryComponent = {
+	states: string[];
+	score: number;
+	warningCount: number;
+	alertCount: number;
+	metroCount: number;
+};
+
+const DIGEST_STATE_NEIGHBORS: Record<string, string[]> = {
+	AK: [],
+	AL: ['FL', 'GA', 'MS', 'TN'],
+	AR: ['LA', 'MO', 'MS', 'OK', 'TN', 'TX'],
+	AZ: ['CA', 'CO', 'NM', 'NV', 'UT'],
+	CA: ['AZ', 'NV', 'OR'],
+	CO: ['AZ', 'KS', 'NE', 'NM', 'OK', 'UT', 'WY'],
+	CT: ['MA', 'NY', 'RI'],
+	DC: ['MD', 'VA'],
+	DE: ['MD', 'NJ', 'PA'],
+	FL: ['AL', 'GA'],
+	GA: ['AL', 'FL', 'NC', 'SC', 'TN'],
+	GU: [],
+	HI: [],
+	IA: ['IL', 'MN', 'MO', 'NE', 'SD', 'WI'],
+	ID: ['MT', 'NV', 'OR', 'UT', 'WA', 'WY'],
+	IL: ['IA', 'IN', 'KY', 'MO', 'WI'],
+	IN: ['IL', 'KY', 'MI', 'OH'],
+	KS: ['CO', 'MO', 'NE', 'OK'],
+	KY: ['IL', 'IN', 'MO', 'OH', 'TN', 'VA', 'WV'],
+	LA: ['AR', 'MS', 'TX'],
+	MA: ['CT', 'NH', 'NY', 'RI', 'VT'],
+	MD: ['DC', 'DE', 'PA', 'VA', 'WV'],
+	ME: ['NH'],
+	MI: ['IN', 'OH', 'WI'],
+	MN: ['IA', 'ND', 'SD', 'WI'],
+	MO: ['AR', 'IA', 'IL', 'KS', 'KY', 'NE', 'OK', 'TN'],
+	MS: ['AL', 'AR', 'LA', 'TN'],
+	MT: ['ID', 'ND', 'SD', 'WY'],
+	NC: ['GA', 'SC', 'TN', 'VA'],
+	ND: ['MN', 'MT', 'SD'],
+	NE: ['CO', 'IA', 'KS', 'MO', 'SD', 'WY'],
+	NH: ['MA', 'ME', 'VT'],
+	NJ: ['DE', 'NY', 'PA'],
+	NM: ['AZ', 'CO', 'OK', 'TX', 'UT'],
+	NV: ['AZ', 'CA', 'ID', 'OR', 'UT'],
+	NY: ['CT', 'MA', 'NJ', 'PA', 'VT'],
+	OH: ['IN', 'KY', 'MI', 'PA', 'WV'],
+	OK: ['AR', 'CO', 'KS', 'MO', 'NM', 'TX'],
+	OR: ['CA', 'ID', 'NV', 'WA'],
+	PA: ['DE', 'MD', 'NJ', 'NY', 'OH', 'WV'],
+	PR: [],
+	RI: ['CT', 'MA'],
+	SC: ['GA', 'NC'],
+	SD: ['IA', 'MN', 'MT', 'ND', 'NE', 'WY'],
+	TN: ['AL', 'AR', 'GA', 'KY', 'MO', 'MS', 'NC', 'VA'],
+	TX: ['AR', 'LA', 'NM', 'OK'],
+	UT: ['AZ', 'CO', 'ID', 'NM', 'NV', 'WY'],
+	VA: ['DC', 'KY', 'MD', 'NC', 'TN', 'WV'],
+	VI: [],
+	VT: ['MA', 'NH', 'NY'],
+	WA: ['ID', 'OR'],
+	WI: ['IA', 'IL', 'MI', 'MN'],
+	WV: ['KY', 'MD', 'OH', 'PA', 'VA'],
+	WY: ['CO', 'ID', 'MT', 'NE', 'SD', 'UT'],
+};
+
+const DIGEST_STORY_REGION_BY_STATE: Record<string, string> = {
+	AK: 'Pacific',
+	AL: 'Gulf Coast',
+	AR: 'Southeast',
+	AZ: 'Southwest',
+	CA: 'West Coast',
+	CO: 'Rockies',
+	CT: 'Northeast',
+	DC: 'Northeast',
+	DE: 'Northeast',
+	FL: 'Gulf Coast',
+	GA: 'Southeast',
+	GU: 'Pacific',
+	HI: 'Pacific',
+	IA: 'Midwest',
+	ID: 'Rockies',
+	IL: 'Midwest',
+	IN: 'Midwest',
+	KS: 'Plains',
+	KY: 'Southeast',
+	LA: 'Gulf Coast',
+	MA: 'Northeast',
+	MD: 'Northeast',
+	ME: 'Northeast',
+	MI: 'Midwest',
+	MN: 'Midwest',
+	MO: 'Midwest',
+	MS: 'Gulf Coast',
+	MT: 'Rockies',
+	NC: 'Southeast',
+	ND: 'Plains',
+	NE: 'Plains',
+	NH: 'Northeast',
+	NJ: 'Northeast',
+	NM: 'Southwest',
+	NV: 'Rockies',
+	NY: 'Northeast',
+	OH: 'Midwest',
+	OK: 'Plains',
+	OR: 'West Coast',
+	PA: 'Northeast',
+	PR: 'Caribbean',
+	RI: 'Northeast',
+	SC: 'Southeast',
+	SD: 'Plains',
+	TN: 'Southeast',
+	TX: 'Plains',
+	UT: 'Rockies',
+	VA: 'Southeast',
+	VI: 'Caribbean',
+	VT: 'Northeast',
+	WA: 'West Coast',
+	WI: 'Midwest',
+	WV: 'Southeast',
+	WY: 'Rockies',
+};
+
+const DIGEST_STORY_REGION_PAIR_LABELS: Record<string, string> = {
+	'Gulf Coast|Southeast': 'Southeast',
+	'Midwest|Northeast': 'Great Lakes and Northeast',
+	'Midwest|Plains': 'northern Plains and Upper Midwest',
+	'Rockies|Southwest': 'Southwest',
+	'Rockies|West Coast': 'West',
+};
+
+function digestSeverityScore(severity: string): number {
+	const normalized = String(severity || '').trim().toLowerCase();
+	if (normalized === 'extreme') return 4;
+	if (normalized === 'severe') return 3;
+	if (normalized === 'moderate') return 2;
+	if (normalized === 'minor') return 1;
+	return 0;
+}
+
+function digestUrgencyScore(urgency: string): number {
+	const normalized = String(urgency || '').trim().toLowerCase();
+	if (normalized === 'immediate') return 3;
+	if (normalized === 'expected') return 2;
+	if (normalized === 'future') return 1;
+	return 0;
+}
+
+function scoreDigestCandidateForStory(candidate: DigestCandidate): number {
+	const metroBonus = Math.min(2, candidate.matchedMetroNames.length) * 4;
+	const warningMetroBonus = candidate.alertTier === 'warning' && candidate.matchedMetroNames.length > 0 ? 2 : 0;
+	return (alertTierScore(candidate.alertTier) * 12)
+		+ (digestSeverityScore(candidate.severity) * 3)
+		+ (digestUrgencyScore(candidate.urgency) * 2)
+		+ metroBonus
+		+ warningMetroBonus;
+}
+
+function compareDigestStateStoryScores(left: DigestStateStoryScore, right: DigestStateStoryScore): number {
+	const scoreDiff = right.score - left.score;
+	if (scoreDiff !== 0) return scoreDiff;
+
+	const warningDiff = right.warningCount - left.warningCount;
+	if (warningDiff !== 0) return warningDiff;
+
+	const metroDiff = right.metroCount - left.metroCount;
+	if (metroDiff !== 0) return metroDiff;
+
+	const alertDiff = right.alertCount - left.alertCount;
+	if (alertDiff !== 0) return alertDiff;
+
+	return left.stateCode.localeCompare(right.stateCode);
+}
+
+function compareDigestStoryComponents(left: DigestStoryComponent, right: DigestStoryComponent): number {
+	const scoreDiff = right.score - left.score;
+	if (scoreDiff !== 0) return scoreDiff;
+
+	const warningDiff = right.warningCount - left.warningCount;
+	if (warningDiff !== 0) return warningDiff;
+
+	const metroDiff = right.metroCount - left.metroCount;
+	if (metroDiff !== 0) return metroDiff;
+
+	const stateDiff = right.states.length - left.states.length;
+	if (stateDiff !== 0) return stateDiff;
+
+	return left.states.join('|').localeCompare(right.states.join('|'));
+}
+
+function buildDigestStateStoryScores(candidates: DigestCandidate[]): Map<string, DigestStateStoryScore> {
+	const scores = new Map<string, DigestStateStoryScore>();
+
+	for (const candidate of candidates) {
+		const weight = scoreDigestCandidateForStory(candidate);
+		const metroCount = Math.min(2, candidate.matchedMetroNames.length);
+		for (const stateCode of dedupeStrings(candidate.stateCodes.map((state) => state.toUpperCase()))) {
+			const existing = scores.get(stateCode) ?? {
+				stateCode,
+				score: 0,
+				warningCount: 0,
+				alertCount: 0,
+				metroCount: 0,
+			};
+			existing.score += weight;
+			existing.alertCount += 1;
+			existing.metroCount += metroCount;
+			if (candidate.alertTier === 'warning') {
+				existing.warningCount += 1;
+			}
+			scores.set(stateCode, existing);
+		}
+	}
+
+	return scores;
+}
+
+function buildDigestStoryComponents(stateScores: Map<string, DigestStateStoryScore>): DigestStoryComponent[] {
+	const stateSet = new Set(stateScores.keys());
+	const remaining = new Set(stateSet);
+	const components: DigestStoryComponent[] = [];
+
+	while (remaining.size > 0) {
+		const seed = Array.from(remaining)[0];
+		const queue = [seed];
+		const componentStates = new Set<string>();
+		remaining.delete(seed);
+
+		while (queue.length > 0) {
+			const stateCode = queue.shift();
+			if (!stateCode || componentStates.has(stateCode)) continue;
+			componentStates.add(stateCode);
+			for (const neighbor of DIGEST_STATE_NEIGHBORS[stateCode] || []) {
+				if (!stateSet.has(neighbor) || !remaining.has(neighbor)) continue;
+				remaining.delete(neighbor);
+				queue.push(neighbor);
+			}
+		}
+
+		const orderedStates = Array.from(componentStates)
+			.map((stateCode) => stateScores.get(stateCode))
+			.filter((record): record is DigestStateStoryScore => !!record)
+			.sort(compareDigestStateStoryScores);
+
+		components.push({
+			states: orderedStates.map((record) => record.stateCode),
+			score: orderedStates.reduce((total, record) => total + record.score, 0),
+			warningCount: orderedStates.reduce((total, record) => total + record.warningCount, 0),
+			alertCount: orderedStates.reduce((total, record) => total + record.alertCount, 0),
+			metroCount: orderedStates.reduce((total, record) => total + record.metroCount, 0),
+		});
+	}
+
+	return components.sort(compareDigestStoryComponents);
+}
+
+function buildDigestStoryRegionLabel(
+	states: string[],
+	stateScores: Map<string, DigestStateStoryScore>,
+	hazardFamily: DigestHazardFamily | null = null,
+): string | null {
+	if (states.length === 0) return null;
+
+	if (hazardFamily === 'flood' && states.some((stateCode) => ['TX', 'LA', 'MS', 'AL', 'FL'].includes(stateCode))) {
+		return 'Gulf Coast';
+	}
+	if (hazardFamily === 'fire' && states.some((stateCode) => ['AZ', 'NM', 'TX'].includes(stateCode))) {
+		return 'Southwest';
+	}
+
+	const regionScores = new Map<string, number>();
+	for (const stateCode of states) {
+		const region = DIGEST_STORY_REGION_BY_STATE[stateCode] || stateCode;
+		const score = stateScores.get(stateCode)?.score ?? 0;
+		regionScores.set(region, (regionScores.get(region) || 0) + score);
+	}
+
+	const orderedRegions = Array.from(regionScores.entries()).sort((left, right) => {
+		const scoreDiff = right[1] - left[1];
+		if (scoreDiff !== 0) return scoreDiff;
+		return left[0].localeCompare(right[0]);
+	});
+
+	const primaryRegion = orderedRegions[0]?.[0] ?? null;
+	const primaryScore = orderedRegions[0]?.[1] ?? 0;
+	const secondaryRegion = orderedRegions[1]?.[0] ?? null;
+	const secondaryScore = orderedRegions[1]?.[1] ?? 0;
+	if (!primaryRegion) return null;
+
+	if (secondaryRegion && primaryScore > 0 && secondaryScore >= (primaryScore * 0.65)) {
+		const pairKey = [primaryRegion, secondaryRegion].sort().join('|');
+		return DIGEST_STORY_REGION_PAIR_LABELS[pairKey] || primaryRegion;
+	}
+
+	return primaryRegion;
+}
+
+export function selectDigestRegionalStory(candidates: DigestCandidate[]): DigestRegionalStorySelection {
+	if (candidates.length === 0) {
+		return {
+			storyRegion: null,
+			storyStates: [],
+			outlierStates: [],
+			regionalCoherence: 'cohesive',
+			dominantStateShare: 1,
+		};
+	}
+
+	const stateScores = buildDigestStateStoryScores(candidates);
+	const components = buildDigestStoryComponents(stateScores);
+	const dominantComponent = components[0];
+	if (!dominantComponent) {
+		return {
+			storyRegion: null,
+			storyStates: [],
+			outlierStates: [],
+			regionalCoherence: 'cohesive',
+			dominantStateShare: 1,
+		};
+	}
+
+	const totalStateScore = Array.from(stateScores.values()).reduce((total, record) => total + record.score, 0);
+	const dominantStateShare = totalStateScore > 0 ? dominantComponent.score / totalStateScore : 1;
+	const dominantOrderedStates = dominantComponent.states
+		.map((stateCode) => stateScores.get(stateCode))
+		.filter((record): record is DigestStateStoryScore => !!record);
+	const topStateScore = dominantOrderedStates[0]?.score ?? 0;
+	const minimumRetainedStates = Math.min(3, dominantOrderedStates.length);
+	let storyStates = dominantOrderedStates
+		.filter((record) => topStateScore <= 0 || record.score >= (topStateScore * 0.6))
+		.map((record) => record.stateCode)
+		.slice(0, FB_DIGEST_MAX_STORY_STATES);
+	if (storyStates.length < minimumRetainedStates) {
+		storyStates = dominantOrderedStates
+			.slice(0, Math.min(FB_DIGEST_MAX_STORY_STATES, minimumRetainedStates))
+			.map((record) => record.stateCode);
+	}
+	const storyStateSet = new Set(storyStates);
+	const outlierStates = Array.from(stateScores.values())
+		.sort(compareDigestStateStoryScores)
+		.map((record) => record.stateCode)
+		.filter((stateCode) => !storyStateSet.has(stateCode));
+
+	return {
+		storyRegion: buildDigestStoryRegionLabel(
+			dominantComponent.states,
+			stateScores,
+			candidates[0]?.hazardFamily ?? null,
+		),
+		storyStates,
+		outlierStates,
+		regionalCoherence: components.length === 1 || dominantStateShare >= 0.65 ? 'cohesive' : 'scattered',
+		dominantStateShare,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Covered alerts KV helpers
 // ---------------------------------------------------------------------------
@@ -159,29 +527,6 @@ export async function pruneExpiredCoveredAlerts(env: Env, activeAlertIds: Set<st
 // Startup state KV helpers
 // ---------------------------------------------------------------------------
 
-async function readLastPostTimestamp(env: Env): Promise<number | null> {
-	try {
-		const raw = await env.WEATHER_KV.get(KV_FB_LAST_POST_TIMESTAMP);
-		if (!raw) return null;
-		const ms = Date.parse(raw);
-		return Number.isFinite(ms) ? ms : null;
-	} catch {
-		return null;
-	}
-}
-
-export async function recordLastPostTimestamp(env: Env, nowMs = Date.now()): Promise<void> {
-	try {
-		await env.WEATHER_KV.put(
-			KV_FB_LAST_POST_TIMESTAMP,
-			new Date(nowMs).toISOString(),
-			{ expirationTtl: 8 * 60 * 60 },
-		);
-	} catch {
-		// Non-critical
-	}
-}
-
 async function readStartupState(env: Env): Promise<StartupStateRecord | null> {
 	try {
 		const raw = await env.WEATHER_KV.get(KV_FB_STARTUP_STATE);
@@ -197,7 +542,7 @@ async function writeStartupState(env: Env, state: StartupStateRecord): Promise<v
 }
 
 export async function isStartupMode(env: Env, nowMs = Date.now()): Promise<boolean> {
-	const lastPost = await readLastPostTimestamp(env);
+	const lastPost = await readLastFacebookActivityTimestamp(env);
 	if (lastPost == null) return true;
 	if ((nowMs - lastPost) > FB_STARTUP_GAP_MS) return true;
 	const digestBlock = await readDigestBlockRecord(env);
@@ -294,6 +639,7 @@ export function buildDigestCandidates(
 
 		const areaDesc = String(p.areaDesc || '').trim();
 		const isMarine = isMarineOrCoastalAlert(event, areaDesc);
+		const matchedMetroNames = matchingMetroNamesForAlert(feature);
 		const hazardFamily = detectHazardFamily(event, String(p.headline || ''), String(p.description || ''));
 		const alertTier = detectAlertTier(event);
 
@@ -307,6 +653,7 @@ export function buildDigestCandidates(
 			certainty: String(p.certainty || ''),
 			hazardFamily,
 			alertTier,
+			matchedMetroNames,
 			isMarineOrCoastal: isMarine,
 		});
 	}
@@ -509,6 +856,7 @@ export function buildHazardClusters(candidates: DigestCandidate[]): HazardCluste
 		const stateSet = new Set<string>();
 		let score = 0;
 		let warningCount = 0;
+		const regionalStory = selectDigestRegionalStory(items);
 		const eventCounts = new Map<string, number>();
 		for (const item of items) {
 			for (const s of item.stateCodes) stateSet.add(s);
@@ -527,6 +875,11 @@ export function buildHazardClusters(candidates: DigestCandidate[]): HazardCluste
 			alertCount: items.length,
 			warningCount,
 			topAlertTypes,
+			storyRegion: regionalStory.storyRegion,
+			storyStates: regionalStory.storyStates,
+			outlierStates: regionalStory.outlierStates,
+			regionalCoherence: regionalStory.regionalCoherence,
+			dominantStateShare: regionalStory.dominantStateShare,
 		});
 	}
 	clusters.sort(compareHazardClusters);
@@ -545,33 +898,26 @@ function scoreStates(candidates: DigestCandidate[]): Map<string, number> {
 }
 
 function selectStatesForDigest(
-	candidates: DigestCandidate[],
 	stateScores: Map<string, number>,
 	rotationCursor: number,
+	preferredStates: string[] = [],
 ): { selectedStates: string[]; nextCursor: number } {
+	const curatedStates = dedupeStrings(preferredStates.map((stateCode) => String(stateCode || '').trim().toUpperCase()))
+		.slice(0, FB_DIGEST_MAX_STORY_STATES);
+	if (curatedStates.length > 0) {
+		return { selectedStates: curatedStates, nextCursor: rotationCursor };
+	}
+
 	const distinctStates = Array.from(stateScores.keys()).sort((a, b) => {
 		const scoreDiff = (stateScores.get(b) || 0) - (stateScores.get(a) || 0);
 		if (scoreDiff !== 0) return scoreDiff;
 		return a.localeCompare(b);
 	});
 
-	if (distinctStates.length === 0) return { selectedStates: [], nextCursor: rotationCursor };
-	if (distinctStates.length <= FB_DIGEST_MAX_NORMAL_MULTISTATE) {
-		return { selectedStates: distinctStates, nextCursor: rotationCursor };
-	}
-
-	// 7+ states: top 3 + 3 rotated from the remaining pool
-	const topStates = distinctStates.slice(0, FB_DIGEST_TOP_STATE_COUNT);
-	const remainingPool = distinctStates.slice(FB_DIGEST_TOP_STATE_COUNT);
-	const rotated: string[] = [];
-	for (let i = 0; i < FB_DIGEST_ROTATION_STATE_COUNT && remainingPool.length > 0; i++) {
-		const idx = (rotationCursor + i) % remainingPool.length;
-		rotated.push(remainingPool[idx]);
-	}
-	const nextCursor = remainingPool.length > 0
-		? (rotationCursor + FB_DIGEST_ROTATION_STATE_COUNT) % remainingPool.length
-		: 0;
-	return { selectedStates: [...topStates, ...rotated], nextCursor };
+	return {
+		selectedStates: distinctStates.slice(0, FB_DIGEST_MAX_STORY_STATES),
+		nextCursor: rotationCursor,
+	};
 }
 
 export function checkClusterBreakout(clusters: HazardClusterSummary[]): HazardClusterSummary | null {
@@ -609,8 +955,31 @@ export function selectDigestPrimaryCluster(
 		?? null;
 }
 
-function buildDigestHash(states: string[], topAlertTypes: string[], hazardFocus: string | null): string {
-	return `${hazardFocus || 'multi'}|${[...states].sort().join(',')}|${[...topAlertTypes].sort().join(',')}`;
+function buildDigestHash(
+	states: string[],
+	topAlertTypes: string[],
+	hazardFocus: string | null,
+	storyRegion: string | null = null,
+): string {
+	return `${hazardFocus || 'multi'}|${storyRegion || 'regionless'}|${[...states].sort().join(',')}|${[...topAlertTypes].sort().join(',')}`;
+}
+
+function getDigestStoryStates(summary: Pick<DigestSummary, 'states' | 'storyStates'>): string[] {
+	const storyStates = Array.isArray(summary.storyStates) && summary.storyStates.length > 0
+		? summary.storyStates
+		: summary.states;
+	return dedupeStrings(storyStates.map((state) => String(state || '').trim().toUpperCase()));
+}
+
+function getDigestStoryFingerprint(summary: Pick<DigestSummary, 'states' | 'storyStates' | 'storyFingerprint' | 'topAlertTypes' | 'hazardFocus' | 'storyRegion'>): string {
+	return summary.storyFingerprint
+		? String(summary.storyFingerprint)
+		: buildDigestHash(
+			getDigestStoryStates(summary),
+			summary.topAlertTypes,
+			summary.hazardFocus,
+			summary.storyRegion ?? null,
+		);
 }
 
 function deriveDigestUrgency(candidates: DigestCandidate[]): 'high' | 'moderate' | 'low' {
@@ -631,24 +1000,34 @@ export function buildDigestSummary(
 ): DigestSummary {
 	const focusCluster = primaryCluster ?? clusterBreakout ?? (clusters[0] ?? null);
 	const hazardFocus = focusCluster?.family ?? null;
+	const storyRegion = focusCluster?.storyRegion ?? null;
+	const storyStates = dedupeStrings((focusCluster?.storyStates && focusCluster.storyStates.length > 0
+		? focusCluster.storyStates
+		: (focusCluster?.states ?? selectedStates)).map((state) => String(state || '').trim().toUpperCase()));
+	const outlierStates = dedupeStrings((focusCluster?.outlierStates ?? []).map((stateCode) => String(stateCode || '').trim().toUpperCase()));
 	const topAlertTypes = dedupeStrings([
 		...(focusCluster?.topAlertTypes ?? []),
 		...clusters.flatMap((c) => c.topAlertTypes),
 	]).slice(0, 3);
 	const urgency = deriveDigestUrgency(candidates);
 	const warningCount = candidates.filter((candidate) => candidate.alertTier === 'warning').length;
-	const hash = buildDigestHash(selectedStates, topAlertTypes, hazardFocus);
+	const hash = buildDigestHash(storyStates, topAlertTypes, hazardFocus, storyRegion);
 
 	return {
 		mode,
 		postType: clusterBreakout && focusCluster?.family === clusterBreakout.family ? 'cluster' : 'digest',
 		hazardFocus: hazardFocus ?? null,
 		states: selectedStates,
+		storyStates,
+		storyFingerprint: hash,
 		topAlertTypes,
 		urgency,
 		alertCount: candidates.length,
 		warningCount,
 		hash,
+		storyRegion,
+		outlierStates,
+		regionalCoherence: focusCluster?.regionalCoherence ?? (outlierStates.length > 0 ? 'scattered' : 'cohesive'),
 	};
 }
 
@@ -662,6 +1041,123 @@ function hasDigestAlertTypeOverlap(previousSummary: DigestSummary, currentSummar
 		.some((alertType) => previousAlertTypes.has(alertType));
 }
 
+type DigestNewPostGapEvaluation = {
+	allowed: boolean;
+	withinGap: boolean;
+	lastPublishedMs: number | null;
+	timeSinceLastDigestPostMs: number | null;
+	reason: 'no_previous_digest_post' | 'digest_new_post_gap_not_met' | 'digest_new_post_allowed_after_60m';
+};
+
+type DigestSameStoryEvaluation = {
+	sameHazardFamily: boolean;
+	sameStoryRegion: boolean;
+	sameTopAlertTypes: boolean;
+	sameStoryFingerprint: boolean;
+	storyStateOverlapRatio: number;
+	samePublicStory: boolean;
+	clearlyDifferentStory: boolean;
+};
+
+type DigestSecondPostAllowance = {
+	allowed: boolean;
+	reason:
+		| 'digest_second_post_allowed_hazard_change'
+		| 'digest_second_post_allowed_region_change'
+		| 'digest_second_post_allowed_warning_jump'
+		| 'digest_second_post_allowed_new_major_story'
+		| 'digest_second_post_allowed_urgency_increase'
+		| 'digest_second_post_blocked_not_material';
+};
+
+function digestStateOverlapRatio(previousStates: string[], currentStates: string[]): number {
+	if (previousStates.length === 0 && currentStates.length === 0) return 1;
+	if (previousStates.length === 0 || currentStates.length === 0) return 0;
+	const previousStateSet = new Set(previousStates);
+	const sharedStateCount = currentStates.filter((state) => previousStateSet.has(state)).length;
+	return sharedStateCount / Math.max(previousStates.length, currentStates.length);
+}
+
+export function evaluateDigestNewPostGap(
+	block: PublishedDigestBlockRecord | null | undefined,
+	nowMs: number,
+): DigestNewPostGapEvaluation {
+	const lastPublishedMs = Number.isFinite(Date.parse(String(block?.publishedAt || '')))
+		? Date.parse(String(block?.publishedAt || ''))
+		: null;
+	if (lastPublishedMs == null) {
+		return {
+			allowed: true,
+			withinGap: false,
+			lastPublishedMs: null,
+			timeSinceLastDigestPostMs: null,
+			reason: 'no_previous_digest_post',
+		};
+	}
+
+	const timeSinceLastDigestPostMs = nowMs - lastPublishedMs;
+	const withinGap = timeSinceLastDigestPostMs >= 0 && timeSinceLastDigestPostMs < FB_DIGEST_COOLDOWN_MS;
+	return {
+		allowed: !withinGap,
+		withinGap,
+		lastPublishedMs,
+		timeSinceLastDigestPostMs,
+		reason: withinGap ? 'digest_new_post_gap_not_met' : 'digest_new_post_allowed_after_60m',
+	};
+}
+
+export function evaluateDigestSameStory(
+	previousSummary: DigestSummary | null | undefined,
+	currentSummary: DigestSummary,
+): DigestSameStoryEvaluation {
+	if (!previousSummary) {
+		return {
+			sameHazardFamily: false,
+			sameStoryRegion: false,
+			sameTopAlertTypes: false,
+			sameStoryFingerprint: false,
+			storyStateOverlapRatio: 0,
+			samePublicStory: false,
+			clearlyDifferentStory: false,
+		};
+	}
+
+	const previousRegionalFocus = buildDigestRegionalFocus(previousSummary);
+	const currentRegionalFocus = buildDigestRegionalFocus(currentSummary);
+	const previousStates = getDigestStoryStates(previousSummary);
+	const currentStates = getDigestStoryStates(currentSummary);
+	const previousRegionalBuckets = new Set(buildDigestRegionalBuckets(previousSummary));
+	const sharedRegionalBucket = buildDigestRegionalBuckets(currentSummary)
+		.some((bucket) => previousRegionalBuckets.has(bucket));
+	const sameHazardFamily = (previousSummary.hazardFocus ?? null) === (currentSummary.hazardFocus ?? null);
+	const sameStoryRegion = previousRegionalFocus === currentRegionalFocus || sharedRegionalBucket;
+	const sameTopAlertTypes = hasDigestAlertTypeOverlap(previousSummary, currentSummary)
+		|| normalizeDigestAlertTypes(previousSummary.topAlertTypes)[0] === normalizeDigestAlertTypes(currentSummary.topAlertTypes)[0];
+	const sameStoryFingerprint = getDigestStoryFingerprint(previousSummary) === getDigestStoryFingerprint(currentSummary);
+	const storyStateOverlapRatio = digestStateOverlapRatio(previousStates, currentStates);
+	const samePublicStory = sameHazardFamily
+		&& sameStoryRegion
+		&& sameTopAlertTypes
+		&& (sameStoryFingerprint || storyStateOverlapRatio >= 0.5);
+	const clearlyDifferentStory = !samePublicStory && (
+		!sameHazardFamily
+		|| !sameStoryRegion
+		|| !sameTopAlertTypes
+		|| storyStateOverlapRatio < 0.34
+		|| (storyStateOverlapRatio < 0.5 && !sameStoryFingerprint)
+	);
+
+	return {
+		sameHazardFamily,
+		sameStoryRegion,
+		sameTopAlertTypes,
+		sameStoryFingerprint,
+		storyStateOverlapRatio,
+		samePublicStory,
+		clearlyDifferentStory,
+	};
+}
+
 export function evaluateDigestChangeThresholds(
 	previousSummary: DigestSummary | null | undefined,
 	currentSummary: DigestSummary,
@@ -672,30 +1168,51 @@ export function evaluateDigestChangeThresholds(
 	alertDelta: number;
 	hazardChanged: boolean;
 	regionalShiftSignificant: boolean;
+	sameStoryRegion: boolean;
+	sameTopAlertTypes: boolean;
+	sameStoryFingerprint: boolean;
+	storyStateOverlapRatio: number;
+	samePublicStory: boolean;
+	clearlyDifferentStory: boolean;
+	similarUrgency: boolean;
+	urgencyIncreasedMaterially: boolean;
 	majorEscalation: boolean;
+	warningJumpSignificant: boolean;
 	outbreakBegan: boolean;
+	sameStorySuppressionCandidate: boolean;
 	meaningfulPostChange: boolean;
 	meaningfulCommentChange: boolean;
 	overrideNewPost: boolean;
 } {
 	if (!previousSummary) {
+		const currentStoryStates = getDigestStoryStates(currentSummary);
 		return {
-			addedStates: dedupeStrings(currentSummary.states.map((state) => state.toUpperCase())),
+			addedStates: dedupeStrings(currentStoryStates.map((state) => state.toUpperCase())),
 			addedAlertTypes: dedupeStrings(currentSummary.topAlertTypes),
 			warningDelta: currentSummary.warningCount,
 			alertDelta: currentSummary.alertCount,
 			hazardChanged: false,
 			regionalShiftSignificant: false,
+			sameStoryRegion: false,
+			sameTopAlertTypes: false,
+			sameStoryFingerprint: false,
+			storyStateOverlapRatio: 0,
+			samePublicStory: false,
+			clearlyDifferentStory: false,
+			similarUrgency: false,
+			urgencyIncreasedMaterially: false,
 			majorEscalation: false,
+			warningJumpSignificant: false,
 			outbreakBegan: false,
+			sameStorySuppressionCandidate: false,
 			meaningfulPostChange: true,
 			meaningfulCommentChange: false,
 			overrideNewPost: false,
 		};
 	}
 
-	const currentStates = dedupeStrings(currentSummary.states.map((state) => state.toUpperCase()));
-	const previousStates = dedupeStrings(previousSummary.states.map((state) => state.toUpperCase()));
+	const currentStates = getDigestStoryStates(currentSummary);
+	const previousStates = getDigestStoryStates(previousSummary);
 	const previousStateSet = new Set(previousStates);
 	const addedStates = currentStates.filter((state) => !previousStateSet.has(state));
 
@@ -709,37 +1226,43 @@ export function evaluateDigestChangeThresholds(
 	const sharedState = currentStates.some((state) => previousStateSet.has(state));
 	const sharedRegionalBucket = buildDigestRegionalBuckets(currentSummary)
 		.some((bucket) => previousRegionalBuckets.has(bucket));
+	const sameStory = evaluateDigestSameStory(previousSummary, currentSummary);
 
 	const warningDelta = currentSummary.warningCount - previousSummary.warningCount;
 	const alertDelta = currentSummary.alertCount - previousSummary.alertCount;
 	const hazardChanged = (previousSummary.hazardFocus ?? null) !== (currentSummary.hazardFocus ?? null);
 	const regionalShiftSignificant = previousRegionalFocus !== currentRegionalFocus && !sharedState && !sharedRegionalBucket;
-	const urgencyIncreased = digestUrgencyRank(currentSummary.urgency) > digestUrgencyRank(previousSummary.urgency);
-	const majorWarningSpike = warningDelta >= 3 || (currentSummary.warningCount >= 3 && warningDelta >= 2);
-	const majorEscalation = urgencyIncreased || majorWarningSpike;
+	const urgencyIncreasedMaterially = digestUrgencyRank(currentSummary.urgency) > digestUrgencyRank(previousSummary.urgency);
+	const sameStoryRegion = sameStory.sameStoryRegion;
+	const similarUrgency = !urgencyIncreasedMaterially;
+	const warningJumpSignificant = warningDelta >= 3
+		|| (currentSummary.warningCount >= 3 && warningDelta >= 2)
+		|| (alertDelta >= 8 && warningDelta > 0);
+	const majorEscalation = urgencyIncreasedMaterially || warningJumpSignificant;
 	const outbreakBegan = (
 		(previousSummary.mode !== 'incident' && currentSummary.mode === 'incident')
 		|| (previousSummary.postType !== 'cluster' && currentSummary.postType === 'cluster')
 	);
+	const sameStorySuppressionCandidate = sameStory.samePublicStory && similarUrgency && !majorEscalation && !outbreakBegan;
 
 	const meaningfulCommentChange = (
 		addedStates.length >= 1
 		|| addedAlertTypes.length > 0
 		|| majorEscalation
 		|| outbreakBegan
-		|| warningDelta > 0
+		|| (warningDelta >= 1 && currentSummary.warningCount >= 3)
 		|| alertDelta >= 4
 	);
 
 	const meaningfulPostChange = (
-		addedStates.length >= 2
-		|| hazardChanged
+		hazardChanged
 		|| regionalShiftSignificant
 		|| majorEscalation
 		|| outbreakBegan
-		|| (addedAlertTypes.length > 0 && (warningDelta > 0 || urgencyIncreased))
+		|| (addedAlertTypes.length > 0 && (warningDelta > 0 || urgencyIncreasedMaterially || !sameStory.sameTopAlertTypes))
 		|| (alertDelta >= 6 && warningDelta > 0)
-	);
+		|| (sameStory.clearlyDifferentStory && (addedStates.length > 0 || addedAlertTypes.length > 0))
+	) && !sameStorySuppressionCandidate;
 
 	return {
 		addedStates,
@@ -748,8 +1271,18 @@ export function evaluateDigestChangeThresholds(
 		alertDelta,
 		hazardChanged,
 		regionalShiftSignificant,
+		sameStoryRegion,
+		sameTopAlertTypes: sameStory.sameTopAlertTypes,
+		sameStoryFingerprint: sameStory.sameStoryFingerprint,
+		storyStateOverlapRatio: sameStory.storyStateOverlapRatio,
+		samePublicStory: sameStory.samePublicStory,
+		clearlyDifferentStory: sameStory.clearlyDifferentStory,
+		similarUrgency,
+		urgencyIncreasedMaterially,
 		majorEscalation,
+		warningJumpSignificant,
 		outbreakBegan,
+		sameStorySuppressionCandidate,
 		meaningfulPostChange,
 		meaningfulCommentChange,
 		overrideNewPost: hazardChanged || regionalShiftSignificant || majorEscalation || outbreakBegan,
@@ -778,6 +1311,8 @@ export function evaluateDigestStoryContinuity(
 	const previousRegionalFocus = buildDigestRegionalFocus(previousSummary);
 	const previousHazard = previousSummary.hazardFocus ?? null;
 	const currentHazard = currentSummary.hazardFocus ?? null;
+	const previousStoryFingerprint = getDigestStoryFingerprint(previousSummary);
+	const currentStoryFingerprint = getDigestStoryFingerprint(currentSummary);
 
 	if (!previousHazard || !currentHazard) {
 		return {
@@ -806,14 +1341,14 @@ export function evaluateDigestStoryContinuity(
 		};
 	}
 
-	const previousStateSet = new Set(dedupeStrings(previousSummary.states.map((state) => state.toUpperCase())));
-	const sharedState = dedupeStrings(currentSummary.states.map((state) => state.toUpperCase()))
+	const previousStateSet = new Set(getDigestStoryStates(previousSummary));
+	const sharedState = getDigestStoryStates(currentSummary)
 		.some((state) => previousStateSet.has(state));
 	const previousRegionalBuckets = new Set(buildDigestRegionalBuckets(previousSummary));
 	const sharedRegionalBucket = buildDigestRegionalBuckets(currentSummary)
 		.some((bucket) => previousRegionalBuckets.has(bucket));
 
-	if (sharedState || sharedRegionalBucket || previousRegionalFocus === currentRegionalFocus) {
+	if (previousStoryFingerprint === currentStoryFingerprint || sharedState || sharedRegionalBucket || previousRegionalFocus === currentRegionalFocus) {
 		return {
 			allowed: true,
 			reason: null,
@@ -828,6 +1363,50 @@ export function evaluateDigestStoryContinuity(
 		previousRegionalFocus,
 		currentRegionalFocus,
 	};
+}
+
+function hasDigestMaterialUrgencyIncrease(
+	previousSummary: DigestSummary,
+	currentSummary: DigestSummary,
+): boolean {
+	return digestUrgencyRank(currentSummary.urgency) > digestUrgencyRank(previousSummary.urgency);
+}
+
+function hasDigestSignificantWarningJump(
+	changeEvaluation: ReturnType<typeof evaluateDigestChangeThresholds>,
+	currentSummary: DigestSummary,
+): boolean {
+	if (changeEvaluation.warningJumpSignificant) return true;
+	if (changeEvaluation.warningDelta >= 2 && currentSummary.warningCount >= 3) return true;
+	return changeEvaluation.alertDelta >= 8 && changeEvaluation.warningDelta > 0;
+}
+
+export function evaluateSecondDigestPostAllowance(
+	previousSummary: DigestSummary,
+	currentSummary: DigestSummary,
+	changeEvaluation: ReturnType<typeof evaluateDigestChangeThresholds>,
+	): DigestSecondPostAllowance {
+	const sameStory = evaluateDigestSameStory(previousSummary, currentSummary);
+	if (changeEvaluation.sameStorySuppressionCandidate) {
+		return { allowed: false, reason: 'digest_second_post_blocked_not_material' };
+	}
+	if (changeEvaluation.hazardChanged) {
+		return { allowed: true, reason: 'digest_second_post_allowed_hazard_change' };
+	}
+	if (changeEvaluation.regionalShiftSignificant) {
+		return { allowed: true, reason: 'digest_second_post_allowed_region_change' };
+	}
+	if (hasDigestSignificantWarningJump(changeEvaluation, currentSummary)) {
+		return { allowed: true, reason: 'digest_second_post_allowed_warning_jump' };
+	}
+	if (hasDigestMaterialUrgencyIncrease(previousSummary, currentSummary)) {
+		return { allowed: true, reason: 'digest_second_post_allowed_urgency_increase' };
+	}
+	const continuity = evaluateDigestStoryContinuity(previousSummary, currentSummary);
+	if (changeEvaluation.outbreakBegan || !continuity.allowed || sameStory.clearlyDifferentStory) {
+		return { allowed: true, reason: 'digest_second_post_allowed_new_major_story' };
+	}
+	return { allowed: false, reason: 'digest_second_post_blocked_not_material' };
 }
 
 // ---------------------------------------------------------------------------
@@ -853,8 +1432,8 @@ export async function canPostNewDigest(
 		return { allowed: true, blockId, existingThread: null, lastBlock: null, reason: null };
 	}
 
-	const lastPublishedMs = Date.parse(block.publishedAt);
-	const withinGlobalCooldown = Number.isFinite(lastPublishedMs) && (nowMs - lastPublishedMs) < FB_DIGEST_COOLDOWN_MS;
+	const gapEvaluation = evaluateDigestNewPostGap(block, nowMs);
+	const withinGlobalCooldown = gapEvaluation.withinGap;
 	const recentPostCount = countRecentDigestPosts(block, nowMs);
 	const activeThread = (withinGlobalCooldown || recentPostCount >= FB_DIGEST_MAX_POSTS_PER_HOUR)
 		? await readDigestThread(env, block.blockId)
@@ -926,6 +1505,327 @@ function getDigestImagePath(hazardFocus: DigestHazardFamily | null | undefined):
 	return '/images/weather-alerts.png';
 }
 
+type DigestCoveragePlan = {
+	intent: FacebookCoverageIntent | null;
+	blockedReason: string | null;
+	startupNeeded: boolean;
+	summary: DigestSummary | null;
+	previousSummary: DigestSummary | null;
+	blockId: string;
+	lastBlock: PublishedDigestBlockRecord | null;
+	existingThread: DigestThreadRecord | null;
+	selectedStates: string[];
+	nextCursor: number;
+	changeEvaluation: ReturnType<typeof evaluateDigestChangeThresholds> | null;
+	recentPostCount: number;
+	commentSettings: { enabled: boolean; maxCommentsPerThread: number; minCommentGapMs: number } | null;
+	copyMode: DigestCopyMode | null;
+};
+
+function buildDigestIntent(
+	action: FacebookCoverageIntent['action'],
+	priority: number,
+	reason: string,
+	summary: DigestSummary,
+	storyKey?: string | null,
+	targetPostId?: string | null,
+): FacebookCoverageIntent {
+	const label = summary.hazardFocus ? `${summary.hazardFocus} digest` : 'digest';
+	const regionalFocus = summary.storyRegion ?? buildDigestRegionalFocus(summary);
+	return {
+		lane: 'digest',
+		action,
+		priority,
+		reason,
+		summary: `${label} for ${regionalFocus}`,
+		storyKey: storyKey ?? summary.storyFingerprint ?? summary.hash,
+		targetPostId: targetPostId ?? null,
+	};
+}
+
+async function buildDigestCoveragePlan(
+	env: Env,
+	alertMap: Record<string, any>,
+	nowMs = Date.now(),
+): Promise<DigestCoveragePlan> {
+	const emptyPlan = (): DigestCoveragePlan => ({
+		intent: null,
+		blockedReason: null,
+		startupNeeded: false,
+		summary: null,
+		previousSummary: null,
+		blockId: buildDigestBlockId(nowMs),
+		lastBlock: null,
+		existingThread: null,
+		selectedStates: [],
+		nextCursor: 0,
+		changeEvaluation: null,
+		recentPostCount: 0,
+		commentSettings: null,
+		copyMode: null,
+	});
+
+	if (!env.FB_PAGE_ID || !env.FB_PAGE_ACCESS_TOKEN) {
+		return { ...emptyPlan(), blockedReason: 'facebook_credentials_missing' };
+	}
+
+	const activeAlertIds = new Set(Object.keys(alertMap));
+	await pruneExpiredCoveredAlerts(env, activeAlertIds);
+
+	const coveredAlertIds = await readStandaloneCoveredAlerts(env);
+	const allCandidates = buildDigestCandidates(alertMap, coveredAlertIds);
+	const { candidates, marineShare } = applyMarineSuppression(allCandidates);
+	if (candidates.length === 0) {
+		return { ...emptyPlan(), blockedReason: 'no_candidates' };
+	}
+
+	const recentFacebookActivity = await readRecentFacebookActivity(env, nowMs);
+	if (recentFacebookActivity.withinGap) {
+		return { ...emptyPlan(), blockedReason: 'recent_global_post_gap' };
+	}
+
+	const distinctStates = dedupeStrings(candidates.flatMap((candidate) => candidate.stateCodes));
+	const mode = detectOperatingMode(activeAlertIds.size, distinctStates.length, marineShare);
+	const startupNeeded = await isStartupMode(env, nowMs);
+	const clusters = buildHazardClusters(candidates);
+	if (clusters.length === 0) {
+		return { ...emptyPlan(), blockedReason: 'no_clusters' };
+	}
+	if (startupNeeded) {
+		const leadCluster = clusters[0] ?? null;
+		const stateScores = scoreStates(
+			leadCluster?.family
+				? candidates.filter((candidate) => candidate.hazardFamily === leadCluster.family)
+				: candidates,
+		);
+		const cursor = await readRotationCursor(env);
+		const { selectedStates, nextCursor } = selectStatesForDigest(stateScores, cursor, leadCluster?.storyStates ?? []);
+		const summary = buildDigestSummary(candidates, clusters, selectedStates, mode, null, leadCluster);
+		return {
+			...emptyPlan(),
+			intent: buildDigestIntent('post', 470, 'digest_startup_snapshot', summary),
+			startupNeeded: true,
+			summary,
+			selectedStates,
+			nextCursor,
+		};
+	}
+
+	const previousBlock = await readDigestBlockRecord(env);
+	const previousThread = previousBlock ? await readDigestThread(env, previousBlock.blockId) : null;
+	const previousSummary = previousThread?.summary ?? null;
+	const clusterBreakout = checkClusterBreakout(clusters);
+	const primaryCluster = selectDigestPrimaryCluster(clusters, clusterBreakout, previousBlock, nowMs);
+	const statePool = primaryCluster?.family != null
+		? candidates.filter((candidate) => candidate.hazardFamily === primaryCluster.family)
+		: candidates;
+	const stateScores = scoreStates(statePool);
+	const cursor = await readRotationCursor(env);
+	const { selectedStates, nextCursor } = selectStatesForDigest(
+		stateScores,
+		cursor,
+		primaryCluster?.storyStates ?? [],
+	);
+	if (selectedStates.length === 0) {
+		return { ...emptyPlan(), blockedReason: 'no_states_selected' };
+	}
+
+	const summary = buildDigestSummary(candidates, clusters, selectedStates, mode, clusterBreakout, primaryCluster);
+	const changeEvaluation = evaluateDigestChangeThresholds(previousSummary, summary);
+	const { allowed, blockId, existingThread, lastBlock, reason } = await canPostNewDigest(
+		env,
+		nowMs,
+		summary.hazardFocus,
+		previousBlock,
+	);
+	const recentPostCount = countRecentDigestPosts(lastBlock, nowMs);
+	const withinHourlyDigestWindow = recentPostCount > 0
+		|| reason === 'same_block'
+		|| reason === 'global_cooldown'
+		|| reason === 'same_hazard_cooldown';
+	const withinHourlyFollowupWindow = withinHourlyDigestWindow && Boolean(previousSummary);
+	const secondPostAllowance = previousSummary
+		? evaluateSecondDigestPostAllowance(previousSummary, summary, changeEvaluation)
+		: { allowed: false, reason: 'digest_second_post_blocked_not_material' } satisfies DigestSecondPostAllowance;
+	const autoPostConfig = await readFbAutoPostConfig(env);
+	const commentSettings = getDigestCommentSettings(autoPostConfig);
+	const lastHash = await readLastDigestHash(env);
+
+	if (allowed) {
+		if (!previousSummary && summary.hash === lastHash) {
+			return {
+				...emptyPlan(),
+				summary,
+				previousSummary,
+				blockId,
+				lastBlock,
+				existingThread,
+				selectedStates,
+				nextCursor,
+				changeEvaluation,
+				recentPostCount,
+				commentSettings,
+				blockedReason: 'hash_unchanged',
+			};
+		}
+		if (previousSummary && !changeEvaluation.meaningfulPostChange) {
+			return {
+				...emptyPlan(),
+				summary,
+				previousSummary,
+				blockId,
+				lastBlock,
+				existingThread,
+				selectedStates,
+				nextCursor,
+				changeEvaluation,
+				recentPostCount,
+				commentSettings,
+				blockedReason: 'digest_same_story_skip',
+			};
+		}
+		return {
+			...emptyPlan(),
+			intent: buildDigestIntent('post', 480, 'digest_new_post_allowed_after_60m', summary),
+			summary,
+			previousSummary,
+			blockId,
+			lastBlock,
+			existingThread,
+			selectedStates,
+			nextCursor,
+			changeEvaluation,
+			recentPostCount,
+			commentSettings,
+			copyMode: 'post',
+		};
+	}
+
+	if (
+		changeEvaluation.overrideNewPost
+		&& secondPostAllowance.allowed
+		&& recentPostCount < FB_DIGEST_MAX_POSTS_PER_HOUR
+	) {
+		return {
+			...emptyPlan(),
+			intent: buildDigestIntent('post', 520, secondPostAllowance.reason, summary),
+			summary,
+			previousSummary,
+			blockId: buildDigestBlockId(nowMs),
+			lastBlock,
+			existingThread,
+			selectedStates,
+			nextCursor,
+			changeEvaluation,
+			recentPostCount,
+			commentSettings,
+			copyMode: 'post',
+		};
+	}
+
+	if (!existingThread) {
+		return {
+			...emptyPlan(),
+			summary,
+			previousSummary,
+			blockId,
+			lastBlock,
+			existingThread,
+			selectedStates,
+			nextCursor,
+			changeEvaluation,
+			recentPostCount,
+			commentSettings,
+			blockedReason: withinHourlyFollowupWindow && !secondPostAllowance.allowed
+				? secondPostAllowance.reason
+				: (reason ? `cooldown:${reason}` : 'cooldown'),
+		};
+	}
+
+	if (!changeEvaluation.meaningfulCommentChange) {
+		return {
+			...emptyPlan(),
+			summary,
+			previousSummary,
+			blockId,
+			lastBlock,
+			existingThread,
+			selectedStates,
+			nextCursor,
+			changeEvaluation,
+			recentPostCount,
+			commentSettings,
+			blockedReason: 'digest_same_story_skip',
+		};
+	}
+
+	const continuity = evaluateDigestStoryContinuity(existingThread.summary, summary);
+	if (!continuity.allowed) {
+		return {
+			...emptyPlan(),
+			summary,
+			previousSummary,
+			blockId,
+			lastBlock,
+			existingThread,
+			selectedStates,
+			nextCursor,
+			changeEvaluation,
+			recentPostCount,
+			commentSettings,
+			blockedReason: withinHourlyFollowupWindow && !secondPostAllowance.allowed
+				? secondPostAllowance.reason
+				: `story_continuity_blocked:${continuity.reason || 'unknown'}`,
+		};
+	}
+
+	if (!canPostDigestComment(existingThread, nowMs, commentSettings)) {
+		return {
+			...emptyPlan(),
+			summary,
+			previousSummary,
+			blockId,
+			lastBlock,
+			existingThread,
+			selectedStates,
+			nextCursor,
+			changeEvaluation,
+			recentPostCount,
+			commentSettings,
+			blockedReason: 'digest_comment_cooldown',
+		};
+	}
+
+	return {
+		...emptyPlan(),
+		intent: buildDigestIntent('comment', 420, 'digest_same_story_comment_only', summary, summary.storyFingerprint ?? summary.hash, existingThread.postId),
+		summary,
+		previousSummary,
+		blockId,
+		lastBlock,
+		existingThread,
+		selectedStates,
+		nextCursor,
+		changeEvaluation,
+		recentPostCount,
+		commentSettings,
+		copyMode: 'comment',
+	};
+}
+
+export async function evaluateDigestCoverageIntent(
+	env: Env,
+	alertMap: Record<string, any>,
+	nowMs = Date.now(),
+): Promise<FacebookCoverageEvaluation> {
+	const plan = await buildDigestCoveragePlan(env, alertMap, nowMs);
+	return {
+		lane: 'digest',
+		intent: plan.intent,
+		blockedReason: plan.blockedReason,
+	};
+}
+
 export function getDigestImageUrl(env: Env, hazardFocus: DigestHazardFamily | null | undefined = null): string {
 	const base = String(env.FB_IMAGE_BASE_URL || '').trim().replace(/\/$/, '') || PRIMARY_APP_ORIGIN;
 	return `${base}${getDigestImagePath(hazardFocus)}`;
@@ -993,12 +1893,18 @@ function formatStartupStateList(states: string[]): string {
 	return `${names.slice(0, 3).join(', ')} and ${names.length - 3} more state${names.length - 3 !== 1 ? 's' : ''}`;
 }
 
+function startupClusterStoryStates(cluster: HazardClusterSummary): string[] {
+	return cluster.storyStates && cluster.storyStates.length > 0 ? cluster.storyStates : cluster.states;
+}
+
 function buildStartupLeadSentence(cluster: HazardClusterSummary): string {
-	return `${startupClusterLabel(cluster.family)} is the main weather story right now across ${formatStartupStateList(cluster.states)}.`;
+	const regionText = cluster.storyRegion ? ` across the ${cluster.storyRegion.toLowerCase()}` : '';
+	return `${startupClusterLabel(cluster.family)} is the main weather story right now${regionText}, with the core impacts centered in ${formatStartupStateList(startupClusterStoryStates(cluster))}.`;
 }
 
 function buildStartupSecondarySentence(cluster: HazardClusterSummary): string {
-	return `${startupClusterLabel(cluster.family)} is also active in ${formatStartupStateList(cluster.states)}.`;
+	const regionText = cluster.storyRegion ? ` across the ${cluster.storyRegion.toLowerCase()}` : '';
+	return `${startupClusterLabel(cluster.family)} is also active${regionText}, with impacts centered in ${formatStartupStateList(startupClusterStoryStates(cluster))}.`;
 }
 
 export function buildStartupSnapshotText(clusters: HazardClusterSummary[], totalCount: number): string {
@@ -1034,74 +1940,35 @@ export async function runDigestCoverage(
 	alertMap: Record<string, any>,
 	generateCopy: (env: Env, summary: DigestSummary, outputMode?: DigestCopyMode) => Promise<string>,
 ): Promise<void> {
-	if (!env.FB_PAGE_ID || !env.FB_PAGE_ACCESS_TOKEN) return;
-
 	const nowMs = Date.now();
-	const activeAlertIds = new Set(Object.keys(alertMap));
-
-	// Prune covered alerts that have expired
-	await pruneExpiredCoveredAlerts(env, activeAlertIds);
-
-	const coveredAlertIds = await readStandaloneCoveredAlerts(env);
-	const allCandidates = buildDigestCandidates(alertMap, coveredAlertIds);
-	const { candidates, marineShare, suppressed } = applyMarineSuppression(allCandidates);
-
-	if (candidates.length === 0) {
-		console.log('[fb-digest] no digest candidates after filtering');
+	const plan = await buildDigestCoveragePlan(env, alertMap, nowMs);
+	if (!plan.intent || !plan.summary) {
+		console.log(`[fb-digest] skipping ${plan.blockedReason || 'no_actionable_digest'}`);
 		return;
 	}
 
-	const distinctStates = dedupeStrings(candidates.flatMap((c) => c.stateCodes));
-	const mode = detectOperatingMode(activeAlertIds.size, distinctStates.length, marineShare);
-	const autoPostConfig = await readFbAutoPostConfig(env);
-	const digestCommentSettings = getDigestCommentSettings(autoPostConfig);
-
-	// Check for startup mode
-	const startupNeeded = await isStartupMode(env, nowMs);
-	if (startupNeeded) {
+	if (plan.startupNeeded) {
+		const coveredAlertIds = await readStandaloneCoveredAlerts(env);
+		const allCandidates = buildDigestCandidates(alertMap, coveredAlertIds);
+		const { candidates, marineShare } = applyMarineSuppression(allCandidates);
+		const distinctStates = dedupeStrings(candidates.flatMap((candidate) => candidate.stateCodes));
+		const mode = detectOperatingMode(new Set(Object.keys(alertMap)).size, distinctStates.length, marineShare);
 		await runStartupCoverage(env, candidates, mode, nowMs);
 		await writeStartupState(env, { initializedAt: new Date(nowMs).toISOString() });
 		return;
 	}
 
-	const clusters = buildHazardClusters(candidates);
-	const previousBlock = await readDigestBlockRecord(env);
-	const previousThread = previousBlock ? await readDigestThread(env, previousBlock.blockId) : null;
-	const previousSummary = previousThread?.summary ?? null;
-	const clusterBreakout = checkClusterBreakout(clusters);
-	const primaryCluster = selectDigestPrimaryCluster(clusters, clusterBreakout, previousBlock, nowMs);
-	const defaultFocusFamily = clusterBreakout?.family ?? (clusters[0]?.family ?? null);
-	const useFocusedStatePool = primaryCluster?.family != null && primaryCluster.family !== defaultFocusFamily;
-	const statePool = useFocusedStatePool
-		? candidates.filter((candidate) => candidate.hazardFamily === primaryCluster?.family)
-		: candidates;
-	const stateScores = scoreStates(statePool);
-	const cursor = await readRotationCursor(env);
-	const { selectedStates, nextCursor } = selectStatesForDigest(statePool, stateScores, cursor);
-
-	if (selectedStates.length === 0) {
-		console.log('[fb-digest] no states selected for digest');
-		return;
-	}
-
-	const summary = buildDigestSummary(candidates, clusters, selectedStates, mode, clusterBreakout, primaryCluster);
-	const lastHash = await readLastDigestHash(env);
-	const changeEvaluation = evaluateDigestChangeThresholds(previousSummary, summary);
-	const postChangeHint = previousSummary ? buildCommentChangeHint(previousSummary, summary) : null;
-
-	const { allowed, blockId, existingThread, lastBlock, reason } = await canPostNewDigest(
-		env,
-		nowMs,
-		summary.hazardFocus,
-		previousBlock,
-	);
-	const recentPostCount = countRecentDigestPosts(lastBlock, nowMs);
+	const summary = plan.summary;
+	const postChangeHint = plan.previousSummary ? buildCommentChangeHint(plan.previousSummary, summary) : null;
 
 	const publishDigestPost = async (postSummary: DigestSummary, nextBlockId: string): Promise<void> => {
 		const copy = await generateCopy(env, postSummary, 'post');
 		const postId = await postToFacebook(env, copy, getDigestImageUrl(env, postSummary.hazardFocus));
 		await recordRecentDigestOpening(env, copy);
-		console.log(`[fb-digest] posted digest post=${postId} mode=${mode} states=${selectedStates.join(',')}`);
+		console.log(
+			`[fb-digest] posted digest post=${postId} reason=${plan.intent?.reason || 'digest_new_post'} `
+			+ `mode=${postSummary.mode} states=${plan.selectedStates.join(',')}`,
+		);
 		const publishedAt = new Date(nowMs).toISOString();
 
 		const block: PublishedDigestBlockRecord = {
@@ -1110,13 +1977,13 @@ export async function runDigestCoverage(
 			hash: postSummary.hash,
 			postId,
 			hazardFocus: postSummary.hazardFocus ?? null,
-			lastPublishedAtByFocus: buildNextPublishedAtByFocus(lastBlock, postSummary.hazardFocus, publishedAt),
-			recentPostTimestamps: buildNextRecentDigestPostTimestamps(lastBlock, publishedAt),
+			lastPublishedAtByFocus: buildNextPublishedAtByFocus(plan.lastBlock, postSummary.hazardFocus, publishedAt),
+			recentPostTimestamps: buildNextRecentDigestPostTimestamps(plan.lastBlock, publishedAt),
 		};
 		await writeDigestBlockRecord(env, block);
 		await writeLastDigestHash(env, postSummary.hash);
-		await writeRotationCursor(env, nextCursor);
-		await recordLastPostTimestamp(env, nowMs);
+		await writeRotationCursor(env, plan.nextCursor);
+		await recordLastFacebookActivity(env, nowMs);
 
 		const thread: DigestThreadRecord = {
 			postId,
@@ -1130,64 +1997,38 @@ export async function runDigestCoverage(
 		await writeDigestThread(env, nextBlockId, thread);
 	};
 
-	if (allowed) {
-		if (!previousSummary && summary.hash === lastHash) {
-			console.log('[fb-digest] hash unchanged, skipping digest');
-			return;
-		}
-		if (previousSummary && !changeEvaluation.meaningfulPostChange) {
-			console.log('[fb-digest] no meaningful hourly digest change, skipping post');
-			return;
-		}
+	if (plan.intent.action === 'post') {
 		await publishDigestPost(
 			postChangeHint ? { ...summary, changeHint: postChangeHint } : summary,
-			blockId,
+			plan.blockId,
 		);
-	} else if (changeEvaluation.overrideNewPost && recentPostCount < FB_DIGEST_MAX_POSTS_PER_HOUR) {
-		await publishDigestPost(
-			postChangeHint ? { ...summary, changeHint: postChangeHint } : summary,
-			buildDigestBlockId(nowMs),
-		);
-		console.log(`[fb-digest] posted override digest reason=${reason || 'override'} posts_last_hour=${recentPostCount + 1}`);
-	} else if (existingThread) {
-		if (!changeEvaluation.meaningfulCommentChange) {
-			console.log('[fb-digest] no meaningful within-hour digest change, skipping comment');
-			return;
+		if (plan.intent.reason.startsWith('digest_second_post_allowed_')) {
+			console.log(`[fb-digest] posted second digest reason=${plan.intent.reason} posts_last_hour=${plan.recentPostCount + 1}`);
 		}
-		const continuity = evaluateDigestStoryContinuity(existingThread.summary, summary);
-		if (!continuity.allowed) {
-			console.log(
-				`[fb-digest] story continuity guard blocked comment reason=${continuity.reason || 'unknown'} `
-				+ `previous=${existingThread.summary?.hazardFocus ?? 'unknown'}/${continuity.previousRegionalFocus ?? 'unknown'} `
-				+ `current=${summary.hazardFocus ?? 'unknown'}/${continuity.currentRegionalFocus}`,
-			);
-			return;
-		}
-		const commentAllowed = canPostDigestComment(existingThread, nowMs, digestCommentSettings);
-		if (!commentAllowed) {
-			console.log('[fb-digest] comment cooldown active or max comments reached, skipping');
-			return;
-		}
+	} else if (plan.intent.action === 'comment' && plan.existingThread) {
 		const commentSummary: DigestSummary = {
 			...summary,
-			changeHint: buildCommentChangeHint(existingThread.summary, summary),
+			changeHint: buildCommentChangeHint(plan.existingThread.summary, summary),
 		};
 		const copy = await generateCopy(env, commentSummary, 'comment');
-		const commentId = await commentOnFacebook(env, existingThread.postId, copy);
+		const commentId = await commentOnFacebook(env, plan.existingThread.postId, copy);
 		await recordRecentDigestOpening(env, copy);
-		console.log(`[fb-digest] posted digest comment=${commentId} post=${existingThread.postId}`);
+		console.log(
+			`[fb-digest] posted digest comment=${commentId} post=${plan.existingThread.postId} `
+			+ `reason=${plan.intent.reason}`,
+		);
 
 		const updatedThread: DigestThreadRecord = {
-			...existingThread,
+			...plan.existingThread,
 			hash: commentSummary.hash,
-			commentCount: existingThread.commentCount + 1,
+			commentCount: plan.existingThread.commentCount + 1,
 			lastCommentAt: new Date(nowMs).toISOString(),
 			summary: commentSummary,
 		};
-		await writeDigestThread(env, blockId, updatedThread);
-		await recordLastPostTimestamp(env, nowMs);
+		await writeDigestThread(env, plan.blockId, updatedThread);
+		await recordLastFacebookActivity(env, nowMs);
 	} else {
-		console.log(`[fb-digest] skipping new digest reason=${reason || 'cooldown'}`);
+		console.log(`[fb-digest] skipping new digest reason=${plan.blockedReason || 'cooldown'}`);
 	}
 }
 
@@ -1208,14 +2049,19 @@ async function runStartupCoverage(
 	await recordRecentDigestOpening(env, snapshotText);
 	console.log(`[fb-digest] startup snapshot post=${postId}`);
 
-	await recordLastPostTimestamp(env, nowMs);
+	await recordLastFacebookActivity(env, nowMs);
 
 	// Seed digest block record so normal mode picks up cleanly
 	const blockId = buildDigestBlockId(nowMs);
-	const stateScores = scoreStates(candidates);
+	const leadCluster = clusters[0] ?? null;
+	const stateScores = scoreStates(
+		leadCluster?.family
+			? candidates.filter((candidate) => candidate.hazardFamily === leadCluster.family)
+			: candidates,
+	);
 	const cursor = await readRotationCursor(env);
-	const { selectedStates } = selectStatesForDigest(candidates, stateScores, cursor);
-	const summary = buildDigestSummary(candidates, clusters, selectedStates, mode, null, clusters[0] ?? null);
+	const { selectedStates } = selectStatesForDigest(stateScores, cursor, leadCluster?.storyStates ?? []);
+	const summary = buildDigestSummary(candidates, clusters, selectedStates, mode, null, leadCluster);
 	const publishedAt = new Date(nowMs).toISOString();
 	const previousBlock = await readDigestBlockRecord(env);
 

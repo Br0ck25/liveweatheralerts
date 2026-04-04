@@ -58,9 +58,14 @@ import {
 import { normalizeFbAutoPostConfig, matchingMetroNamesForAlert } from './facebook/config';
 import {
 	evaluateFacebookAutoPostDecision,
+	autoPostHazardClusterFamilyForEvent,
+	buildAutoPostHazardClusterCommentMessage,
+	buildAutoPostHazardClusterPlans,
 	hasSevereThunderstormDestructiveCriteria,
+	scoreAutoPostHazardClusterCandidate,
 	selectSevereWeatherFallbackOverrides,
 	autoPostFacebookAlerts,
+	evaluateAutoPostIntent,
 } from './facebook/auto-post';
 import { buildAdminFacebookPostRankings } from './facebook/ranking';
 import { handleTokenExchange, handleTokenConfig, handleAutoPostConfig } from './facebook/api';
@@ -72,6 +77,9 @@ import {
 	checkClusterBreakout,
 	canPostNewDigest,
 	evaluateDigestChangeThresholds,
+	evaluateDigestNewPostGap,
+	evaluateDigestSameStory,
+	evaluateSecondDigestPostAllowance,
 	evaluateDigestStoryContinuity,
 	getDigestImageUrl,
 	readDigestThread,
@@ -79,6 +87,8 @@ import {
 	markAlertStandaloneCovered,
 	isStartupMode,
 	runDigestCoverage,
+	evaluateDigestCoverageIntent,
+	selectDigestRegionalStory,
 	selectDigestPrimaryCluster,
 } from './facebook/digest';
 import {
@@ -97,6 +107,7 @@ import {
 } from './facebook/spc-llm';
 import {
 	buildSpcDay1OutlookSummary,
+	buildSpcDay1WatchCommentText,
 	buildSpcCommentChangeHint as buildSpcCommentChangeHintHelper,
 	buildSpcHazardLine,
 	evaluateSpcPostingSchedule,
@@ -111,14 +122,25 @@ import {
 	readLastSpcSummary,
 	readLastSpcDay1Post,
 	readLastSpcDay1Summary,
+	readSpcThreadRecord,
 	readRecentSpcOpenings,
 	recordRecentSpcOpening,
+	recordSpcThreadCommentActivity,
 	readSpcDebugSnapshot,
 	runSpcCoverage,
 	runSpcCoverageForDay,
 	runSpcDay1Coverage,
+	evaluateSpcCoverageIntentForDay,
+	evaluateSpcCoverageIntents,
 	normalizeSpcMinRiskLevel,
+	selectSpcPrimaryRiskArea,
+	spcSummaryOverlapStates,
 } from './facebook/spc';
+import {
+	runCoordinatedFacebookCoverage,
+	readFacebookCoordinatorSnapshot,
+	selectFacebookCoverageIntent,
+} from './facebook/coordinator';
 import { isAuthenticated, parseRequestBody } from './admin/auth';
 import { shouldSuppressAlertFromUi, syncAlerts, recordInvalidSubscription, recordPushDeliveryFailure } from './nws';
 import { handleApiGeocode, handleApiLocation } from './weather/geocoding';
@@ -128,6 +150,11 @@ import {
 	handleAdminDiscussionData,
 	handleAdminConvectiveOutlookData,
 } from './weather/forecast';
+import {
+	buildSpcAfdEnrichment,
+	extractAfdSignalFromText,
+	selectAfdOfficesForSpcRegion,
+} from './weather/afd';
 import {
 	handleAdminLogin,
 	handleAdminPage,
@@ -219,8 +246,7 @@ async function handleScheduled(env: Env): Promise<void> {
 	const { map } = await syncAlerts(env);
 	const lifecycleDiff = await syncAlertLifecycleState(env, map);
 	await syncAlertHistoryDailySnapshots(env, map, lifecycleDiff.changes);
-	await autoPostFacebookAlerts(env, map, lifecycleDiff.changes);
-	await runSpcCoverage(env);
+	await runCoordinatedFacebookCoverage(env, map, lifecycleDiff.changes);
 	await dispatchStatePushNotifications(env, map, lifecycleDiff.changes, recordInvalidSubscription, recordPushDeliveryFailure);
 }
 
@@ -254,12 +280,17 @@ export const __testing = {
 	buildFacebookUpdateCommentMessage,
 	normalizeFbAutoPostConfig,
 	evaluateFacebookAutoPostDecision,
+	autoPostHazardClusterFamilyForEvent,
+	buildAutoPostHazardClusterCommentMessage,
+	buildAutoPostHazardClusterPlans,
 	matchingMetroNamesForAlert,
 	hasSevereThunderstormDestructiveCriteria,
+	scoreAutoPostHazardClusterCandidate,
 	selectSevereWeatherFallbackOverrides,
 	buildAdminFacebookPostRankings,
 	shouldSuppressAlertFromUi,
 	autoPostFacebookAlerts,
+	evaluateAutoPostIntent,
 	// Digest / coverage
 	buildDigestCandidates,
 	buildHazardClusters,
@@ -268,6 +299,9 @@ export const __testing = {
 	checkClusterBreakout,
 	canPostNewDigest,
 	evaluateDigestChangeThresholds,
+	evaluateDigestNewPostGap,
+	evaluateDigestSameStory,
+	evaluateSecondDigestPostAllowance,
 	evaluateDigestStoryContinuity,
 	getDigestImageUrl,
 	readDigestThread,
@@ -275,6 +309,8 @@ export const __testing = {
 	markAlertStandaloneCovered,
 	isStartupMode,
 	runDigestCoverage,
+	evaluateDigestCoverageIntent,
+	selectDigestRegionalStory,
 	selectDigestPrimaryCluster,
 	buildLlmPayload,
 	buildCommentChangeHint,
@@ -284,6 +320,7 @@ export const __testing = {
 	recordRecentDigestOpening,
 	validateLlmOutput,
 	buildSpcDay1OutlookSummary,
+	buildSpcDay1WatchCommentText,
 	buildSpcCommentChangeHint: buildSpcCommentChangeHintHelper,
 	buildSpcHazardLine,
 	buildSpcLlmPayload,
@@ -300,14 +337,26 @@ export const __testing = {
 	readLastSpcSummary,
 	readLastSpcDay1Post,
 	readLastSpcDay1Summary,
+	readSpcThreadRecord,
 	readRecentSpcOpenings,
 	recordRecentSpcOpening,
+	recordSpcThreadCommentActivity,
 	readSpcDebugSnapshot,
 	runSpcCoverage,
 	runSpcCoverageForDay,
 	runSpcDay1Coverage,
+	evaluateSpcCoverageIntentForDay,
+	evaluateSpcCoverageIntents,
 	normalizeSpcMinRiskLevel,
+	selectSpcPrimaryRiskArea,
+	spcSummaryOverlapStates,
+	selectAfdOfficesForSpcRegion,
+	extractAfdSignalFromText,
+	buildSpcAfdEnrichment,
 	validateSpcLlmOutput,
+	runCoordinatedFacebookCoverage,
+	readFacebookCoordinatorSnapshot,
+	selectFacebookCoverageIntent,
 };
 
 // ---------------------------------------------------------------------------

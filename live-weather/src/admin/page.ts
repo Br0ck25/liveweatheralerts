@@ -280,6 +280,126 @@ export function renderAdminPage(
 		);
 	}).join('\n');
 
+  const autoPostPanelMarkup =
+    '  <div class="admin-panel">\n' +
+    '    <h2>Facebook Auto Post</h2>\n' +
+    '    <p>Choose how automatic Facebook posting should behave. Auto-posted alerts use the same post/comment thread flow as manual posting in admin.</p>\n' +
+    '    <label class="toggle-row" for="autoPostMode">\n' +
+    '      <span>Auto-post mode</span>\n' +
+    '      <select id="autoPostMode">\n' +
+    '        <option value="off"' + (normalizedAutoPostConfig.mode === 'off' ? ' selected' : '') + '>Off</option>\n' +
+    '        <option value="tornado_only"' + (normalizedAutoPostConfig.mode === 'tornado_only' ? ' selected' : '') + '>Tornado-only</option>\n' +
+    '        <option value="smart_high_impact"' + (normalizedAutoPostConfig.mode === 'smart_high_impact' ? ' selected' : '') + '>Smart high-impact</option>\n' +
+    '      </select>\n' +
+    '    </label>\n' +
+    '    <p id="autoPostHelp" class="toggle-help">' + safeHtml(fbAutoPostModeHelp(normalizedAutoPostConfig.mode)) + '</p>\n' +
+    '    <label class="toggle-row" for="digestCoverageEnabled">\n' +
+    '      <span>Digest coverage</span>\n' +
+    '      <input type="checkbox" id="digestCoverageEnabled"' + (normalizedAutoPostConfig.digestCoverageEnabled ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">When enabled (smart high-impact mode only), digest coverage shifts to hourly main posts with delta-based storytelling. Earlier posts only happen for major escalations, hazard swaps, or fresh outbreak-style changes, and the lane hard-caps itself at two digest posts per hour.</p>\n' +
+    '    <label class="toggle-row" for="digestCommentUpdatesEnabled">\n' +
+    '      <span>Digest comment updates</span>\n' +
+    '      <input type="checkbox" id="digestCommentUpdatesEnabled"' + (normalizedAutoPostConfig.digestCommentUpdatesEnabled !== false ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">Meaningful within-hour updates stay in the same thread as comments when the hazard and regional story still match. Routine or low-signal changes are skipped.</p>\n' +
+    '    <label class="toggle-row" for="digestMaxCommentsPerThread">\n' +
+    '      <span>Max digest comments per thread</span>\n' +
+    '      <input type="number" id="digestMaxCommentsPerThread" min="1" max="5" value="' + safeHtml(String(normalizedAutoPostConfig.digestMaxCommentsPerThread || 3)) + '" />\n' +
+    '    </label>\n' +
+    '    <label class="toggle-row" for="digestMinCommentGapMinutes">\n' +
+    '      <span>Minutes between digest comments</span>\n' +
+    '      <input type="number" id="digestMinCommentGapMinutes" min="10" max="60" step="5" value="' + safeHtml(String(normalizedAutoPostConfig.digestMinCommentGapMinutes || 20)) + '" />\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">Recommended pacing is up to 3 comments per thread with at least 20 minutes between them, so the thread stays useful instead of turning into comment confetti.</p>\n' +
+    '    <label class="toggle-row" for="llmCopyEnabled">\n' +
+    '      <span>AI-generated copy</span>\n' +
+    '      <input type="checkbox" id="llmCopyEnabled"' + (normalizedAutoPostConfig.llmCopyEnabled ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">When enabled, digest posts use Workers AI (Llama 3.3 70B) to write human-readable copy. Falls back to templates if AI is unavailable.</p>\n' +
+    '    <label class="toggle-row" for="startupCatchupEnabled">\n' +
+    '      <span>Startup / catch-up mode</span>\n' +
+    '      <input type="checkbox" id="startupCatchupEnabled"' + (normalizedAutoPostConfig.startupCatchupEnabled ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">When enabled, a cold start or 6-hour gap publishes a single national snapshot post and seeds the digest state, rather than replaying all historical alerts.</p>\n' +
+    '    <hr class="admin-divider" />\n' +
+    '    <h3>SPC Outlook Lane</h3>\n' +
+    '    <p>Forecast-led severe weather posts run separately from alerts and digests, with independent Day 1, Day 2, and Day 3 controls plus optional AI polish.</p>\n' +
+    '    <label class="toggle-row" for="spcDay1CoverageEnabled">\n' +
+    '      <span>SPC Day 1 coverage</span>\n' +
+    '      <input type="checkbox" id="spcDay1CoverageEnabled"' + (normalizedAutoPostConfig.spcDay1CoverageEnabled ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <label class="toggle-row" for="spcDay1MinRiskLevel">\n' +
+    '      <span>Day 1 minimum risk</span>\n' +
+    '      <select id="spcDay1MinRiskLevel">\n' +
+    '        <option value="marginal"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
+    '        <option value="slight"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
+    '        <option value="enhanced"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
+    '        <option value="moderate"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
+    '        <option value="high"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
+    '      </select>\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">Same-day setup coverage. Stronger upgrades and late timing nudges can stay in the same Facebook thread as comments.</p>\n' +
+    '    <label class="toggle-row" for="spcDay2CoverageEnabled">\n' +
+    '      <span>SPC Day 2 coverage</span>\n' +
+    '      <input type="checkbox" id="spcDay2CoverageEnabled"' + (normalizedAutoPostConfig.spcDay2CoverageEnabled ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <label class="toggle-row" for="spcDay2MinRiskLevel">\n' +
+    '      <span>Day 2 minimum risk</span>\n' +
+    '      <select id="spcDay2MinRiskLevel">\n' +
+    '        <option value="marginal"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
+    '        <option value="slight"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
+    '        <option value="enhanced"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
+    '        <option value="moderate"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
+    '        <option value="high"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
+    '      </select>\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">Tomorrow-focused lookahead posts. Enhanced+ is the default to avoid noisy early posts, but you can widen that if you want more heads-up coverage.</p>\n' +
+    '    <label class="toggle-row" for="spcDay3CoverageEnabled">\n' +
+    '      <span>SPC Day 3 coverage</span>\n' +
+    '      <input type="checkbox" id="spcDay3CoverageEnabled"' + (normalizedAutoPostConfig.spcDay3CoverageEnabled ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <label class="toggle-row" for="spcDay3MinRiskLevel">\n' +
+    '      <span>Day 3 minimum risk</span>\n' +
+    '      <select id="spcDay3MinRiskLevel">\n' +
+    '        <option value="marginal"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
+    '        <option value="slight"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
+    '        <option value="enhanced"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
+    '        <option value="moderate"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
+    '        <option value="high"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
+    '      </select>\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">Early heads-up coverage for more distant setups. Leaving this tighter helps avoid posting on low-confidence noise.</p>\n' +
+    '    <label class="toggle-row" for="spcHashtagsEnabled">\n' +
+    '      <span>SPC hashtags</span>\n' +
+    '      <input type="checkbox" id="spcHashtagsEnabled"' + (normalizedAutoPostConfig.spcHashtagsEnabled !== false ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">Adds a light engagement footer like state weather tags plus #SevereWeather on SPC lane posts only.</p>\n' +
+    '    <label class="toggle-row" for="spcTimingRefreshEnabled">\n' +
+    '      <span>Late-day timing refresh</span>\n' +
+    '      <input type="checkbox" id="spcTimingRefreshEnabled"' + (normalizedAutoPostConfig.spcTimingRefreshEnabled !== false ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">Allows one additional late-day timing post on stronger setups when the outlook story is unchanged but the threat window is getting closer.</p>\n' +
+    '    <label class="toggle-row" for="spcLlmEnabled">\n' +
+    '      <span>SPC AI polish (V1.5)</span>\n' +
+    '      <input type="checkbox" id="spcLlmEnabled"' + (normalizedAutoPostConfig.spcLlmEnabled ? ' checked' : '') + ' />\n' +
+    '    </label>\n' +
+    '    <p class="toggle-help">When enabled, SPC posts and upgrade comments use Workers AI for forecast-desk writing, with geography validation and template fallback if the model output is not usable.</p>\n' +
+    '    <div id="autoPostStatus" class="auto-post-status">' + safeHtml(autoPostStatusText) + '</div>\n' +
+    '  </div>';
+
+  const tokenExchangePanelMarkup =
+    '  <div class="token-exchange">\n' +
+    '    <h2>Convert short-lived user token to long-lived token</h2>\n' +
+    '    <p>Enter Facebook App ID, App Secret, and a user access token to generate a long-lived token.</p>\n' +
+    '    <label>App ID: <input id="tokenAppId" type="text" value="' + safeHtml(savedAppId) + '" style="width:100%;max-width:480px" /></label>\n' +
+    '    <label>App Secret: <input id="tokenAppSecret" type="text" value="' + safeHtml(savedAppSecret) + '" style="width:100%;max-width:480px" /></label>\n' +
+    '    <label>User Access Token: <input id="tokenUserToken" type="text" style="width:100%;max-width:480px" /></label>\n' +
+    '    <button type="button" id="btnSaveAppConfig">Save app ID/secret</button>\n' +
+    '    <button type="button" id="btnTokenExchange">Convert token</button>\n' +
+    '    <div id="tokenResult" style="margin-top:10px;color:#333;"></div>\n' +
+    '  </div>';
+
 	const css = buildAdminStyles();
 
 	const js = postTextsJs + '\n' + autoPostConfigJs + '\n' + adminForecastConfigJs + '\n' + adminConvectiveOutlookConfigJs + `
@@ -293,6 +413,7 @@ let currentAdminPanel = 'alerts';
 let currentForecastView = (ADMIN_FORECAST_LOCATIONS[0] && ADMIN_FORECAST_LOCATIONS[0].id) || 'forecast-summary';
 let currentDiscussionView = (ADMIN_FORECAST_LOCATIONS[0] && ADMIN_FORECAST_LOCATIONS[0].id) || '';
 let currentOutlookView = (ADMIN_CONVECTIVE_OUTLOOKS[0] && ADMIN_CONVECTIVE_OUTLOOKS[0].id) || '';
+const ADMIN_PANEL_IDS = ['alerts', 'facebook-auto-post', 'facebook-tokens', 'facebook-post', 'forecast', 'discussions', 'outlook'];
 let forecastHubData = null;
 let discussionsHubData = null;
 let convectiveOutlookHubData = null;
@@ -614,7 +735,19 @@ async function submitPost() {
     const res = await fetch('/admin/post', { method: 'POST', body });
     const data = await res.json();
     const result = data.results && data.results[0];
-    if (result && (result.status === 'posted' || result.status === 'commented')) {
+    if (result && (result.status === 'posted' || result.status === 'commented' || result.status === 'skipped')) {
+      if (result.status === 'skipped') {
+      status.className = 'post-status';
+      status.textContent = 'Skipped duplicate/minor reissue — the existing Facebook post is still current.';
+      btn.disabled = false;
+      btn.textContent = currentThreadAction === 'comment' ? 'Post Comment' : 'Post to Facebook';
+      if (result.postId) {
+        currentPostId = result.postId;
+        currentThreadAction = 'comment';
+        setThreadIndicator('comment', { alertType: 'this alert', postId: result.postId, updateCount: result.updateCount ?? 0 });
+      }
+      return;
+      }
       status.className = 'post-status ok';
       const chainMsg = result.chainBreak ? ' (new thread started)' : '';
       status.textContent = result.status === 'commented'
@@ -730,7 +863,7 @@ function forecastEscHtml(value) {
 }
 
 function setActiveAdminPanel(panelId) {
-  currentAdminPanel = panelId === 'forecast' || panelId === 'discussions' || panelId === 'outlook' || panelId === 'facebook-post' ? panelId : 'alerts';
+  currentAdminPanel = ADMIN_PANEL_IDS.includes(panelId) ? panelId : 'alerts';
   document.querySelectorAll('[data-admin-panel-btn]').forEach((btn) => {
     btn.classList.toggle('is-active', btn.getAttribute('data-admin-panel-btn') === currentAdminPanel);
   });
@@ -1369,7 +1502,7 @@ const autoPostStatus = document.getElementById('autoPostStatus');
 const AUTO_POST_MODE_HELP = {
   off: 'Automatic Facebook posting is disabled.',
   tornado_only: 'All active, timely Tornado Warnings auto-post and follow the existing Facebook thread/comment rules.',
-  smart_high_impact: 'All active, timely Tornado Warnings auto-post. Severe Thunderstorm Warnings and Watches are storm-clustered, so one main post is created per metro/region and same-storm follow-ups become comments instead of duplicate posts. Otherwise Severe Thunderstorm Warnings need metro or 10 counties plus destructive, 70 mph, 2-inch hail, or strong wording. Fire warnings need wildfire or public safety escalation. Flood and winter warnings must pass the base impact gate.',
+  smart_high_impact: 'All active, timely Tornado Warnings and emergency-level alerts auto-post. Other standalone posts are limited to deterministic Tier 2 Severe Thunderstorm, Flood, Winter, and High Wind warnings that meet metro-or-10-county coverage plus explicit impact thresholds. Watches stay on SPC or digest coverage, same-story updates comment before creating new posts, and lower-tier standalone alerts are capped at 4 per hour.',
 };
 
 function setAutoPostStatus(message, variant) {
@@ -1614,6 +1747,8 @@ applyFilters();
     (syncError ? '<p class="sync-error">&#9888; Sync warning: ' + safeHtml(syncError) + '</p>\n' : '') +
 		'<div class="admin-page-tabs">\n' +
 		'  <button type="button" class="admin-page-tab is-active" data-admin-panel-btn="alerts">Alerts</button>\n' +
+    '  <button type="button" class="admin-page-tab" data-admin-panel-btn="facebook-auto-post">Facebook Auto Post</button>\n' +
+    '  <button type="button" class="admin-page-tab" data-admin-panel-btn="facebook-tokens">Facebook Tokens</button>\n' +
 		'  <button type="button" class="admin-page-tab" data-admin-panel-btn="facebook-post">Facebook Post</button>\n' +
 		'  <button type="button" class="admin-page-tab" data-admin-panel-btn="forecast">Forecast Center</button>\n' +
 		'  <button type="button" class="admin-page-tab" data-admin-panel-btn="discussions">NWS Discussions</button>\n' +
@@ -1627,123 +1762,13 @@ applyFilters();
 		'  <label>Severity: <select id="filterSeverity"><option value="all">All</option>' + severityOptions + '</select></label>\n' +
 		'  <button type="button" id="clearFilters">Clear</button>\n' +
 		'</div>\n' +
-		'\n<div class="admin-panel">\n' +
-		'  <h2>Facebook Auto Post</h2>\n' +
-		'  <p>Choose how automatic Facebook posting should behave. Auto-posted alerts use the same post/comment thread flow as manual posting in admin.</p>\n' +
-		'  <label class="toggle-row" for="autoPostMode">\n' +
-		'    <span>Auto-post mode</span>\n' +
-		'    <select id="autoPostMode">\n' +
-		'      <option value="off"' + (normalizedAutoPostConfig.mode === 'off' ? ' selected' : '') + '>Off</option>\n' +
-		'      <option value="tornado_only"' + (normalizedAutoPostConfig.mode === 'tornado_only' ? ' selected' : '') + '>Tornado-only</option>\n' +
-		'      <option value="smart_high_impact"' + (normalizedAutoPostConfig.mode === 'smart_high_impact' ? ' selected' : '') + '>Smart high-impact</option>\n' +
-		'    </select>\n' +
-		'  </label>\n' +
-		'  <p id="autoPostHelp" class="toggle-help">' + safeHtml(fbAutoPostModeHelp(normalizedAutoPostConfig.mode)) + '</p>\n' +
-		'  <label class="toggle-row" for="digestCoverageEnabled">\n' +
-		'    <span>Digest coverage</span>\n' +
-		'    <input type="checkbox" id="digestCoverageEnabled"' + (normalizedAutoPostConfig.digestCoverageEnabled ? ' checked' : '') + ' />\n' +
-		'  </label>\n' +
-    '  <p class="toggle-help">When enabled (smart high-impact mode only), digest coverage shifts to hourly main posts with delta-based storytelling. Earlier posts only happen for major escalations, hazard swaps, or fresh outbreak-style changes, and the lane hard-caps itself at two digest posts per hour.</p>\n' +
-    '  <label class="toggle-row" for="digestCommentUpdatesEnabled">\n' +
-    '    <span>Digest comment updates</span>\n' +
-    '    <input type="checkbox" id="digestCommentUpdatesEnabled"' + (normalizedAutoPostConfig.digestCommentUpdatesEnabled !== false ? ' checked' : '') + ' />\n' +
-    '  </label>\n' +
-    '  <p class="toggle-help">Meaningful within-hour updates stay in the same thread as comments when the hazard and regional story still match. Routine or low-signal changes are skipped.</p>\n' +
-    '  <label class="toggle-row" for="digestMaxCommentsPerThread">\n' +
-    '    <span>Max digest comments per thread</span>\n' +
-    '    <input type="number" id="digestMaxCommentsPerThread" min="1" max="5" value="' + safeHtml(String(normalizedAutoPostConfig.digestMaxCommentsPerThread || 3)) + '" />\n' +
-    '  </label>\n' +
-    '  <label class="toggle-row" for="digestMinCommentGapMinutes">\n' +
-    '    <span>Minutes between digest comments</span>\n' +
-    '    <input type="number" id="digestMinCommentGapMinutes" min="10" max="60" step="5" value="' + safeHtml(String(normalizedAutoPostConfig.digestMinCommentGapMinutes || 20)) + '" />\n' +
-    '  </label>\n' +
-    '  <p class="toggle-help">Recommended pacing is up to 3 comments per thread with at least 20 minutes between them, so the thread stays useful instead of turning into comment confetti.</p>\n' +
-		'  <label class="toggle-row" for="llmCopyEnabled">\n' +
-		'    <span>AI-generated copy</span>\n' +
-		'    <input type="checkbox" id="llmCopyEnabled"' + (normalizedAutoPostConfig.llmCopyEnabled ? ' checked' : '') + ' />\n' +
-		'  </label>\n' +
-		'  <p class="toggle-help">When enabled, digest posts use Workers AI (Llama 3.3 70B) to write human-readable copy. Falls back to templates if AI is unavailable.</p>\n' +
-		'  <label class="toggle-row" for="startupCatchupEnabled">\n' +
-		'    <span>Startup / catch-up mode</span>\n' +
-		'    <input type="checkbox" id="startupCatchupEnabled"' + (normalizedAutoPostConfig.startupCatchupEnabled ? ' checked' : '') + ' />\n' +
-		'  </label>\n' +
-		'  <p class="toggle-help">When enabled, a cold start or 6-hour gap publishes a single national snapshot post and seeds the digest state, rather than replaying all historical alerts.</p>\n' +
-    '  <hr class="admin-divider" />\n' +
-    '  <h3>SPC Outlook Lane</h3>\n' +
-    '  <p>Forecast-led severe weather posts run separately from alerts and digests, with independent Day 1, Day 2, and Day 3 controls plus optional AI polish.</p>\n' +
-    '  <label class="toggle-row" for="spcDay1CoverageEnabled">\n' +
-    '    <span>SPC Day 1 coverage</span>\n' +
-    '    <input type="checkbox" id="spcDay1CoverageEnabled"' + (normalizedAutoPostConfig.spcDay1CoverageEnabled ? ' checked' : '') + ' />\n' +
-    '  </label>\n' +
-    '  <label class="toggle-row" for="spcDay1MinRiskLevel">\n' +
-    '    <span>Day 1 minimum risk</span>\n' +
-    '    <select id="spcDay1MinRiskLevel">\n' +
-    '      <option value="marginal"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
-    '      <option value="slight"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
-    '      <option value="enhanced"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
-    '      <option value="moderate"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
-    '      <option value="high"' + (normalizedAutoPostConfig.spcDay1MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
-    '    </select>\n' +
-    '  </label>\n' +
-    '  <p class="toggle-help">Same-day setup coverage. Stronger upgrades and late timing nudges can stay in the same Facebook thread as comments.</p>\n' +
-    '  <label class="toggle-row" for="spcDay2CoverageEnabled">\n' +
-    '    <span>SPC Day 2 coverage</span>\n' +
-    '    <input type="checkbox" id="spcDay2CoverageEnabled"' + (normalizedAutoPostConfig.spcDay2CoverageEnabled ? ' checked' : '') + ' />\n' +
-    '  </label>\n' +
-    '  <label class="toggle-row" for="spcDay2MinRiskLevel">\n' +
-    '    <span>Day 2 minimum risk</span>\n' +
-    '    <select id="spcDay2MinRiskLevel">\n' +
-    '      <option value="marginal"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
-    '      <option value="slight"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
-    '      <option value="enhanced"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
-    '      <option value="moderate"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
-    '      <option value="high"' + (normalizedAutoPostConfig.spcDay2MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
-    '    </select>\n' +
-    '  </label>\n' +
-    '  <p class="toggle-help">Tomorrow-focused lookahead posts. Enhanced+ is the default to avoid noisy early posts, but you can widen that if you want more heads-up coverage.</p>\n' +
-    '  <label class="toggle-row" for="spcDay3CoverageEnabled">\n' +
-    '    <span>SPC Day 3 coverage</span>\n' +
-    '    <input type="checkbox" id="spcDay3CoverageEnabled"' + (normalizedAutoPostConfig.spcDay3CoverageEnabled ? ' checked' : '') + ' />\n' +
-    '  </label>\n' +
-    '  <label class="toggle-row" for="spcDay3MinRiskLevel">\n' +
-    '    <span>Day 3 minimum risk</span>\n' +
-    '    <select id="spcDay3MinRiskLevel">\n' +
-    '      <option value="marginal"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'marginal' ? ' selected' : '') + '>Marginal+</option>\n' +
-    '      <option value="slight"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'slight' ? ' selected' : '') + '>Slight+</option>\n' +
-    '      <option value="enhanced"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'enhanced' ? ' selected' : '') + '>Enhanced+</option>\n' +
-    '      <option value="moderate"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'moderate' ? ' selected' : '') + '>Moderate+</option>\n' +
-    '      <option value="high"' + (normalizedAutoPostConfig.spcDay3MinRiskLevel === 'high' ? ' selected' : '') + '>High only</option>\n' +
-    '    </select>\n' +
-    '  </label>\n' +
-    '  <p class="toggle-help">Early heads-up coverage for more distant setups. Leaving this tighter helps avoid posting on low-confidence noise.</p>\n' +
-    '  <label class="toggle-row" for="spcHashtagsEnabled">\n' +
-    '    <span>SPC hashtags</span>\n' +
-    '    <input type="checkbox" id="spcHashtagsEnabled"' + (normalizedAutoPostConfig.spcHashtagsEnabled !== false ? ' checked' : '') + ' />\n' +
-    '  </label>\n' +
-    '  <p class="toggle-help">Adds a light engagement footer like state weather tags plus #SevereWeather on SPC lane posts only.</p>\n' +
-    '  <label class="toggle-row" for="spcTimingRefreshEnabled">\n' +
-    '    <span>Late-day timing refresh</span>\n' +
-    '    <input type="checkbox" id="spcTimingRefreshEnabled"' + (normalizedAutoPostConfig.spcTimingRefreshEnabled !== false ? ' checked' : '') + ' />\n' +
-    '  </label>\n' +
-    '  <p class="toggle-help">Allows one additional late-day timing post on stronger setups when the outlook story is unchanged but the threat window is getting closer.</p>\n' +
-    '  <label class="toggle-row" for="spcLlmEnabled">\n' +
-    '    <span>SPC AI polish (V1.5)</span>\n' +
-    '    <input type="checkbox" id="spcLlmEnabled"' + (normalizedAutoPostConfig.spcLlmEnabled ? ' checked' : '') + ' />\n' +
-    '  </label>\n' +
-    '  <p class="toggle-help">When enabled, SPC posts and upgrade comments use Workers AI for forecast-desk writing, with geography validation and template fallback if the model output is not usable.</p>\n' +
-		'  <div id="autoPostStatus" class="auto-post-status">' + safeHtml(autoPostStatusText) + '</div>\n' +
-		'</div>\n' +
-		'\n<div class="token-exchange">\n' +
-		'  <h2>Convert short-lived user token to long-lived token</h2>\n' +
-		'  <p>Enter Facebook App ID, App Secret, and a user access token to generate a long-lived token.</p>\n' +
-		'  <label>App ID: <input id="tokenAppId" type="text" value="' + safeHtml(savedAppId) + '" style="width:100%;max-width:480px" /></label>\n' +
-		'  <label>App Secret: <input id="tokenAppSecret" type="text" value="' + safeHtml(savedAppSecret) + '" style="width:100%;max-width:480px" /></label>\n' +
-		'  <label>User Access Token: <input id="tokenUserToken" type="text" style="width:100%;max-width:480px" /></label>\n' +
-		'  <button type="button" id="btnSaveAppConfig">Save app ID/secret</button>\n' +
-		'  <button type="button" id="btnTokenExchange">Convert token</button>\n' +
-		'  <div id="tokenResult" style="margin-top:10px;color:#333;"></div>\n' +
-		'</div>\n' +
 		'\n<div class="alerts-list">\n' + cards + '\n</div>\n' +
+		'</div>\n' +
+		'<div class="admin-page-panel" data-admin-panel="facebook-auto-post">\n' +
+		autoPostPanelMarkup + '\n' +
+		'</div>\n' +
+		'<div class="admin-page-panel" data-admin-panel="facebook-tokens">\n' +
+		tokenExchangePanelMarkup + '\n' +
 		'</div>\n' +
 		'<div class="admin-page-panel" data-admin-panel="facebook-post">\n' +
 		'  <div class="facebook-post-hub">\n' +

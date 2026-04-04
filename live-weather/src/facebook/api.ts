@@ -1,6 +1,7 @@
 import type {
 	Env,
 	AlertThread,
+	AlertChangeRecord,
 	FacebookPublishOptions,
 	FacebookPublishResult,
 	FbAutoPostMode,
@@ -27,6 +28,7 @@ import {
 } from './threads';
 import {
 	buildAlertPostedSnapshot,
+	assessAlertThreadUpdate,
 	buildAnchorPostText,
 	buildFacebookUpdateCommentMessage,
 	isDefaultAdminFacebookMessage,
@@ -36,6 +38,7 @@ import {
 	writeFbAutoPostConfig,
 	buildFbAutoPostStatusText,
 } from './config';
+import { recordLastFacebookActivity } from './activity';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -198,7 +201,6 @@ export async function publishFeatureToFacebook(
 	const rawCustomMessage = String(options.customMessage || '').trim();
 	const threadAction = normalizeFacebookPublishThreadAction(options.threadAction);
 	const event = String(properties.event ?? 'Weather Alert');
-	const nowIso = new Date().toISOString();
 	const currentSnapshot = buildAlertPostedSnapshot(properties);
 	const ugcCodes: string[] = Array.isArray(properties.geocode?.UGC) && properties.geocode.UGC.length > 0
 		? properties.geocode.UGC
@@ -206,10 +208,20 @@ export async function publishFeatureToFacebook(
 	const expiresAt = properties.expires
 		? Math.floor(new Date(properties.expires).getTime() / 1000)
 		: 0;
+	const threadTarget = options.threadTarget ?? null;
+	const change: AlertChangeRecord | null = options.change ?? null;
+
+	const noteFacebookActivity = async (): Promise<string> => {
+		const activityMs = Date.now();
+		await recordLastFacebookActivity(env, activityMs);
+		return new Date(activityMs).toISOString();
+	};
 
 	let existingThread: AlertThread | null = null;
-	if (threadAction !== 'new_post') {
-		existingThread = await readExistingThreadForFeature(env, feature, event);
+	if (threadAction !== 'new_post' && threadTarget) {
+		existingThread = threadTarget;
+	} else if (threadAction !== 'new_post') {
+		existingThread = await readExistingThreadForFeature(env, feature, event, change);
 	}
 
 	if (!existingThread || threadAction === 'new_post') {
@@ -217,6 +229,7 @@ export async function publishFeatureToFacebook(
 		const imageUrl = String(options.imageUrl || '').trim()
 			|| await findAlertImageUrl(env, feature, options.request);
 		const postId = await postToFacebook(env, anchorMessage, imageUrl || undefined);
+		const postedAt = await noteFacebookActivity();
 		const nextThread: AlertThread = {
 			postId,
 			nwsAlertId: String(feature?.id ?? ''),
@@ -224,13 +237,13 @@ export async function publishFeatureToFacebook(
 			county: String(properties.areaDesc ?? ''),
 			alertType: event,
 			updateCount: 0,
-			lastPostedAt: nowIso,
+			lastPostedAt: postedAt,
 			lastPostedSnapshot: currentSnapshot,
 		};
 		for (const ugcCode of ugcCodes) {
 			await writeThread(env, ugcCode, { ...nextThread });
 		}
-		await writeStormClusterThreads(env, feature, event, nextThread);
+		await writeStormClusterThreads(env, feature, event, nextThread, change);
 		return {
 			id: String(feature?.id ?? ''),
 			status: 'posted',
@@ -241,24 +254,40 @@ export async function publishFeatureToFacebook(
 	const currentCount = existingThread.updateCount ?? 0;
 	const forceComment = threadAction === 'comment';
 	const commentCustomMessage = isDefaultAdminFacebookMessage(rawCustomMessage, properties) ? '' : rawCustomMessage;
+	const updateAssessment = assessAlertThreadUpdate(properties, existingThread.lastPostedSnapshot ?? null, {
+		previousExpiresAtSeconds: existingThread.expiresAt,
+	});
+
+	if (!commentCustomMessage && updateAssessment.shouldSkip) {
+		return {
+			id: String(feature?.id ?? ''),
+			status: 'skipped',
+			postId: existingThread.postId,
+			updateCount: currentCount,
+			skippedReason: 'duplicate_minor_update',
+		};
+	}
 
 	if (forceComment || currentCount < 3) {
 		const fullComment = commentCustomMessage
 			? commentCustomMessage
 			: buildFacebookUpdateCommentMessage(properties, existingThread.lastPostedSnapshot ?? null);
 		const commentId = await commentOnFacebook(env, existingThread.postId, fullComment);
+		const commentedAt = await noteFacebookActivity();
 		const updatedThread: AlertThread = {
 			...existingThread,
 			nwsAlertId: String(feature?.id ?? ''),
 			expiresAt,
+			county: String(properties.areaDesc ?? existingThread.county ?? ''),
+			alertType: event,
 			updateCount: currentCount + 1,
-			lastPostedAt: nowIso,
+			lastPostedAt: commentedAt,
 			lastPostedSnapshot: currentSnapshot,
 		};
 		for (const ugcCode of ugcCodes) {
 			await writeThread(env, ugcCode, { ...updatedThread });
 		}
-		await writeStormClusterThreads(env, feature, event, updatedThread);
+		await writeStormClusterThreads(env, feature, event, updatedThread, change);
 		return {
 			id: String(feature?.id ?? ''),
 			status: 'commented',
@@ -282,6 +311,7 @@ export async function publishFeatureToFacebook(
 	const imageUrl = String(options.imageUrl || '').trim()
 		|| await findAlertImageUrl(env, feature, options.request);
 	const postId = await postToFacebook(env, anchorMessage, imageUrl || undefined);
+	const postedAt = await noteFacebookActivity();
 	const chainedThread: AlertThread = {
 		postId,
 		nwsAlertId: String(feature?.id ?? ''),
@@ -289,13 +319,13 @@ export async function publishFeatureToFacebook(
 		county: String(properties.areaDesc ?? ''),
 		alertType: event,
 		updateCount: 0,
-		lastPostedAt: nowIso,
+		lastPostedAt: postedAt,
 		lastPostedSnapshot: currentSnapshot,
 	};
 	for (const ugcCode of ugcCodes) {
 		await writeThread(env, ugcCode, { ...chainedThread });
 	}
-	await writeStormClusterThreads(env, feature, event, chainedThread);
+	await writeStormClusterThreads(env, feature, event, chainedThread, change);
 	return {
 		id: String(feature?.id ?? ''),
 		status: 'posted',

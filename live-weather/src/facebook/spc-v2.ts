@@ -4,6 +4,8 @@ import type {
 	FbAutoPostConfig,
 	PublishedSpcOutlookRecord,
 	RecentSpcOpeningsRecord,
+	SpcAfdEnrichment,
+	SpcAreaSource,
 	SpcDay1OutlookSummary,
 	SpcDebugEntry,
 	SpcDebugSnapshot,
@@ -18,7 +20,12 @@ import type {
 	SpcRiskLevel,
 	SpcRiskNumber,
 	SpcThreadRecord,
+	FacebookCoverageEvaluation,
+	FacebookCoverageIntent,
 } from '../types';
+import booleanIntersects from '@turf/boolean-intersects';
+import { feature as topojsonFeature } from 'topojson-client';
+import usAtlasStates from 'us-atlas/states-10m.json';
 import {
 	ADMIN_CONVECTIVE_OUTLOOKS,
 	FB_GRAPH_API,
@@ -30,10 +37,12 @@ import {
 	KV_FB_SPC_LAST_SUMMARY,
 	KV_FB_SPC_RECENT_OPENINGS,
 	NWS_USER_AGENT,
+	kvSpcDeferredAnchorKey,
 	kvSpcLastHashKey,
 	kvSpcLastPostKey,
 	kvSpcLastSummaryKey,
 	kvSpcThreadKey,
+	FB_GLOBAL_POST_GAP_MS,
 } from '../constants';
 import {
 	decodeHtmlEntities,
@@ -41,11 +50,18 @@ import {
 	escapeRegExp,
 	sha256Hex,
 	stateCodeDisplayName,
+	STATE_CODE_TO_FIPS,
 	STATE_CODE_TO_NAME,
 } from '../utils';
+import { centroidFromGeometry, haversineDistanceMiles } from '../geo-utils';
 import { fetchRemoteText } from '../weather/api';
+import { buildSpcAfdEnrichment } from '../weather/afd';
 import { readFbAutoPostConfig } from './config';
-import { buildSpcLlmPayload, generateSpcLlmCopy } from './spc-llm';
+import {
+	readRecentFacebookActivity,
+	recordLastFacebookActivity,
+} from './activity';
+import { buildSpcLlmPayload, generateSpcLlmCopy, validateSpcLlmOutput } from './spc-llm';
 
 export type ParsedSpcOutlookPage = {
 	title: string;
@@ -63,14 +79,15 @@ export type ParsedSpcOutlookPage = {
 const SPC_STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
 const SPC_COMMENT_MAX_COUNT = 2;
 const SPC_COMMENT_MIN_GAP_MS = 90 * 60 * 1000;
-const SPC_GLOBAL_POST_GAP_MS = 15 * 60 * 1000;
+const SPC_GLOBAL_POST_GAP_MS = FB_GLOBAL_POST_GAP_MS;
 const SPC_TIMING_REFRESH_MIN_GAP_MS = 4 * 60 * 60 * 1000;
 const SPC_TIMING_REFRESH_START_OFFSET_MS = 5 * 60 * 60 * 1000;
 const SPC_TIMING_REFRESH_END_BUFFER_MS = 6 * 60 * 60 * 1000;
 const SPC_MAX_STATE_COUNT = 5;
 const SPC_SCHEDULING_TIME_ZONE = 'America/Chicago';
-const SPC_DAY1_MAIN_WINDOW = { startMinutes: (6 * 60) + 30, endMinutes: 9 * 60, label: 'day1_morning' };
-const SPC_DAY2_MAIN_WINDOW = { startMinutes: (11 * 60) + 30, endMinutes: 14 * 60, label: 'day2_midday' };
+const SPC_DEFERRED_ANCHOR_DELAY_MS = 60 * 60 * 1000;
+const SPC_DAY1_MAIN_WINDOW = { startMinutes: (6 * 60) + 30, endMinutes: (9 * 60) + 30, label: 'day1_morning' };
+const SPC_DAY2_MAIN_WINDOW = { startMinutes: 11 * 60, endMinutes: 14 * 60, label: 'day2_midday' };
 const SPC_DAY3_MAIN_WINDOW = { startMinutes: (18 * 60) + 30, endMinutes: 21 * 60, label: 'day3_evening' };
 const SPC_DAY1_TIMING_REFRESH_WINDOW = { startMinutes: 15 * 60, endMinutes: 18 * 60, label: 'day1_late_day_refresh' };
 const SPC_LOCAL_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
@@ -106,14 +123,15 @@ const SAFE_STATE_ABBREVIATION_CODES = new Set(
 );
 
 const REGION_TEXT_HINTS: Array<{ pattern: RegExp; label: string }> = [
+	{ pattern: /mid-?mississippi valley/i, label: 'Mid-Mississippi Valley' },
 	{ pattern: /upper midwest/i, label: 'Upper Midwest' },
 	{ pattern: /great lakes/i, label: 'Great Lakes' },
+	{ pattern: /ohio valley/i, label: 'Ohio Valley' },
 	{ pattern: /mid-?south/i, label: 'Mid-South' },
 	{ pattern: /southern plains/i, label: 'Southern Plains' },
 	{ pattern: /central plains/i, label: 'Central Plains' },
 	{ pattern: /northern plains/i, label: 'Northern Plains' },
 	{ pattern: /gulf coast/i, label: 'Gulf Coast' },
-	{ pattern: /ohio valley/i, label: 'Ohio Valley' },
 	{ pattern: /northeast/i, label: 'Northeast' },
 	{ pattern: /southeast/i, label: 'Southeast' },
 	{ pattern: /southwest/i, label: 'Southwest' },
@@ -139,9 +157,30 @@ const TIMING_TEXT_HINTS: Array<{ pattern: RegExp; value: string }> = [
 
 const UPPER_MIDWEST_STATES = new Set(['IA', 'IL', 'MN', 'WI', 'MI']);
 const GREAT_LAKES_STATES = new Set(['IL', 'IN', 'MI', 'OH', 'PA', 'WI']);
+const OHIO_VALLEY_STATES = new Set(['IL', 'IN', 'KY', 'OH', 'PA', 'WV']);
+const MIDWEST_STORY_STATES = new Set(['IA', 'IL', 'IN', 'MI', 'MN', 'MO', 'OH', 'WI']);
+const MID_MISSISSIPPI_VALLEY_STATES = new Set(['AR', 'IA', 'IL', 'MO', 'WI']);
 const MID_SOUTH_STATES = new Set(['AL', 'AR', 'KY', 'LA', 'MO', 'MS', 'TN']);
 const SOUTHERN_PLAINS_STATES = new Set(['KS', 'OK', 'TX']);
 const CENTRAL_PLAINS_STATES = new Set(['KS', 'NE', 'SD', 'ND']);
+
+const REGION_FAMILY_BY_LABEL: Record<string, 'midwest' | 'plains' | 'southeast' | 'northeast' | 'west'> = {
+	'Mid-Mississippi Valley': 'midwest',
+	'Upper Midwest': 'midwest',
+	'Great Lakes': 'midwest',
+	'Ohio Valley': 'midwest',
+	Midwest: 'midwest',
+	'Mid-South': 'southeast',
+	'Southern Plains': 'plains',
+	'Central Plains': 'plains',
+	'Northern Plains': 'plains',
+	Plains: 'plains',
+	'Southeast': 'southeast',
+	'Gulf Coast': 'southeast',
+	'Northeast': 'northeast',
+	'Southwest': 'west',
+	West: 'west',
+};
 
 const REGION_BUCKETS: Record<string, string> = {
 	CT: 'Northeast',
@@ -197,7 +236,7 @@ const REGION_BUCKETS: Record<string, string> = {
 	WY: 'West',
 };
 
-const REGION_PRIORITY = ['Upper Midwest', 'Great Lakes', 'Mid-South', 'Southern Plains', 'Central Plains', 'Midwest', 'Southeast', 'Plains', 'Southwest', 'West', 'Northeast'];
+const REGION_PRIORITY = ['Mid-Mississippi Valley', 'Upper Midwest', 'Great Lakes', 'Ohio Valley', 'Mid-South', 'Southern Plains', 'Central Plains', 'Midwest', 'Southeast', 'Plains', 'Southwest', 'West', 'Northeast'];
 
 const FULL_NAME_STATE_PATTERNS = Object.keys(STATE_CODE_TO_NAME)
 	.filter((code) => !['GU', 'PR', 'VI'].includes(code))
@@ -212,6 +251,45 @@ const ABBREVIATION_STATE_PATTERNS = Object.keys(STATE_CODE_TO_NAME)
 		code,
 		pattern: new RegExp(`\\b${code}\\b`, 'g'),
 	}));
+
+const STATE_CODE_BY_FIPS = Object.entries(STATE_CODE_TO_FIPS).reduce<Record<string, string>>((lookup, [stateCode, fips]) => {
+	lookup[fips] = stateCode;
+	return lookup;
+}, {});
+
+type StateBoundaryFeature = {
+	stateCode: string;
+	feature: any;
+	centroidLat: number | null;
+	centroidLon: number | null;
+};
+
+const US_STATE_BOUNDARY_FEATURES: StateBoundaryFeature[] = (() => {
+	try {
+		const topojson = usAtlasStates as any;
+		const statesObject = topojson?.objects?.states;
+		if (!statesObject) return [];
+		const collection = topojsonFeature(topojson, statesObject) as any;
+		const features = Array.isArray(collection?.features) ? collection.features : [];
+		return features
+			.map((stateFeature: any) => {
+				const fips = String(stateFeature?.id ?? '').replace(/\D/g, '').padStart(2, '0').slice(-2);
+				const stateCode = STATE_CODE_BY_FIPS[fips] || '';
+				if (!stateCode || !stateFeature?.geometry) return null;
+				const centroid = centroidFromGeometry({ geometry: stateFeature.geometry });
+				return {
+					stateCode,
+					feature: stateFeature,
+					centroidLat: Number.isFinite(centroid.lat) ? Number(centroid.lat) : null,
+					centroidLon: Number.isFinite(centroid.lon) ? Number(centroid.lon) : null,
+				} satisfies StateBoundaryFeature;
+			})
+			.filter((entry): entry is StateBoundaryFeature => !!entry);
+	} catch (error) {
+		console.warn(`[fb-spc] failed to load state boundary atlas: ${String(error)}`);
+		return [];
+	}
+})();
 
 function fbAbortSignal(): AbortSignal {
 	return AbortSignal.timeout(FB_TIMEOUT_MS);
@@ -254,12 +332,18 @@ function normalizeStoryList(values: string[] | null | undefined): string[] {
 function hasTornadoStorySignal(summary: {
 	hazardFocus?: SpcHazardFocus | null;
 	hazardList?: string[] | null;
+	primaryHazards?: string[] | null;
+	secondaryHazards?: string[] | null;
 	tornadoProbability?: number | null;
 } | null | undefined): boolean {
 	if (!summary) return false;
 	if (summary.hazardFocus === 'tornado') return true;
 	if (Number(summary.tornadoProbability || 0) > 0) return true;
-	return normalizeStoryList(summary.hazardList).includes('tornadoes');
+	return normalizeStoryList([
+		...(summary.primaryHazards || []),
+		...(summary.secondaryHazards || []),
+		...(summary.hazardList || []),
+	]).includes('tornadoes');
 }
 
 function spcRiskNumber(level: SpcRiskLevel): SpcRiskNumber {
@@ -331,10 +415,14 @@ export function parseSpcOutlookPage(html: string, config: AdminConvectiveOutlook
 	const discussionText = preStart >= 0 && preEnd > preStart
 		? decodeHtmlEntities(html.slice(preStart + 5, preEnd)).replace(/\r/g, '').trim()
 		: '';
+	const discussionLines = discussionText.split(/\n+/).map((line) => normalizeSpaces(line)).filter(Boolean);
 	const issuedLineMatch = discussionText.match(/NWS Storm Prediction Center Norman OK\s+([^\n]+)/i);
 	const issuedLabel = normalizeSpaces(String(issuedLineMatch?.[1] || ''));
 	const ellipsisSections = extractEllipsisSections(discussionText);
-	const headlineText = ellipsisSections.find((section) => /^THERE IS\b/i.test(section)) ?? null;
+	const headlineLine = discussionLines.find((line) => /^\.\.\.\s*THERE IS\b/i.test(line)) ?? null;
+	const headlineText = headlineLine
+		? headlineLine.replace(/^\.\.\.\s*/i, '').replace(/\s*\.\.\.\s*$/i, '').trim()
+		: (ellipsisSections.find((section) => /^THERE IS\b/i.test(section)) ?? null);
 	const sectionHeadings = ellipsisSections.filter((section) => section !== headlineText && !/^SUMMARY$/i.test(section)).slice(0, 4);
 	const titleMatch = discussionText.match(/Day\s+\d+\s+Convective Outlook[^\n]*/i);
 	const timingText = deriveTimingText([headlineText, extractSpcDiscussionSummary(discussionText), ...sectionHeadings, discussionText].filter(Boolean).join(' '));
@@ -392,6 +480,182 @@ function collectPatternMatches(text: string, entries: Array<{ code: string; patt
 	return matches;
 }
 
+type StateTextMetric = {
+	score: number;
+	firstIndex: number;
+};
+
+type SpcRiskFeatureSelection = {
+	feature: any | null;
+	states: string[];
+};
+
+function buildSpcTextSources(page: ParsedSpcOutlookPage): Array<{ text: string; weight: number }> {
+	return [
+		{ text: page.headlineText || '', weight: 8 },
+		...page.sectionHeadings.map((section) => ({ text: section, weight: 6 })),
+		{ text: page.summary || '', weight: 4 },
+		{ text: page.discussionText || '', weight: 1 },
+	].filter((source) => !!normalizeSpaces(source.text));
+}
+
+function buildStateTextMetrics(page: ParsedSpcOutlookPage): Map<string, StateTextMetric> {
+	const metrics = new Map<string, StateTextMetric>();
+	for (const [sourceIndex, source] of buildSpcTextSources(page).entries()) {
+		const rawText = String(source.text || '');
+		const matches = [
+			...collectPatternMatches(rawText, FULL_NAME_STATE_PATTERNS, 0),
+			...collectPatternMatches(rawText.toUpperCase(), ABBREVIATION_STATE_PATTERNS, 1),
+		];
+		for (const match of matches) {
+			const metric = metrics.get(match.code) ?? { score: 0, firstIndex: Number.POSITIVE_INFINITY };
+			metric.score += source.weight;
+			metric.firstIndex = Math.min(metric.firstIndex, (sourceIndex * 10_000) + match.index);
+			metrics.set(match.code, metric);
+		}
+	}
+	return metrics;
+}
+
+function boundaryFeatureForState(stateCode: string): StateBoundaryFeature | null {
+	return US_STATE_BOUNDARY_FEATURES.find((entry) => entry.stateCode === stateCode) ?? null;
+}
+
+function averageClusterDistanceMiles(candidateState: string, orderedStates: string[]): number {
+	const candidateBoundary = boundaryFeatureForState(candidateState);
+	if (!candidateBoundary || orderedStates.length === 0) return Number.POSITIVE_INFINITY;
+	if (candidateBoundary.centroidLat == null || candidateBoundary.centroidLon == null) return Number.POSITIVE_INFINITY;
+	const distances = orderedStates
+		.map((stateCode) => boundaryFeatureForState(stateCode))
+		.filter((entry): entry is StateBoundaryFeature => !!entry && entry.centroidLat != null && entry.centroidLon != null)
+		.map((entry) => haversineDistanceMiles(
+			candidateBoundary.centroidLat as number,
+			candidateBoundary.centroidLon as number,
+			entry.centroidLat as number,
+			entry.centroidLon as number,
+		));
+	if (distances.length === 0) return Number.POSITIVE_INFINITY;
+	return distances.reduce((sum, distance) => sum + distance, 0) / distances.length;
+}
+
+function orderStatesByTextAndCluster(states: string[], page: ParsedSpcOutlookPage, maxStates = SPC_MAX_STATE_COUNT): string[] {
+	const uniqueStates = normalizeStateCodeList(states).slice(0, Math.max(maxStates, states.length));
+	if (uniqueStates.length <= 1) return uniqueStates.slice(0, maxStates);
+	const textMetrics = buildStateTextMetrics(page);
+	const rankState = (stateCode: string) => textMetrics.get(stateCode) ?? { score: 0, firstIndex: Number.POSITIVE_INFINITY };
+	const seeded = [...uniqueStates].sort((left, right) => {
+		const leftMetric = rankState(left);
+		const rightMetric = rankState(right);
+		const bothMentioned = Number.isFinite(leftMetric.firstIndex) && Number.isFinite(rightMetric.firstIndex);
+		if (bothMentioned) {
+			const indexDiff = leftMetric.firstIndex - rightMetric.firstIndex;
+			if (indexDiff !== 0) return indexDiff;
+		}
+		const scoreDiff = rightMetric.score - leftMetric.score;
+		if (scoreDiff !== 0) return scoreDiff;
+		const indexDiff = leftMetric.firstIndex - rightMetric.firstIndex;
+		if (indexDiff !== 0) return indexDiff;
+		return left.localeCompare(right);
+	});
+	const ordered = [seeded.shift() as string];
+	while (seeded.length > 0 && ordered.length < maxStates) {
+		seeded.sort((left, right) => {
+			const leftMetric = rankState(left);
+			const rightMetric = rankState(right);
+			const bothMentioned = Number.isFinite(leftMetric.firstIndex) && Number.isFinite(rightMetric.firstIndex);
+			if (bothMentioned) {
+				const indexDiff = leftMetric.firstIndex - rightMetric.firstIndex;
+				if (indexDiff !== 0) return indexDiff;
+			}
+			const scoreDiff = rightMetric.score - leftMetric.score;
+			if (Math.abs(scoreDiff) >= 2) return scoreDiff;
+			const indexDiff = leftMetric.firstIndex - rightMetric.firstIndex;
+			if (indexDiff !== 0) return indexDiff;
+			const distanceDiff = averageClusterDistanceMiles(left, ordered) - averageClusterDistanceMiles(right, ordered);
+			if (Number.isFinite(distanceDiff) && distanceDiff !== 0) return distanceDiff;
+			return left.localeCompare(right);
+		});
+		ordered.push(seeded.shift() as string);
+	}
+	return ordered.slice(0, maxStates);
+}
+
+function extractStatesFromRiskFeature(feature: any, page: ParsedSpcOutlookPage): string[] {
+	if (!feature?.geometry || US_STATE_BOUNDARY_FEATURES.length === 0) return [];
+	const intersectingStates = US_STATE_BOUNDARY_FEATURES
+		.filter((entry) => {
+			try {
+				return booleanIntersects(feature as any, entry.feature as any);
+			} catch {
+				return false;
+			}
+		})
+		.map((entry) => entry.stateCode);
+	return orderStatesByTextAndCluster(intersectingStates, page);
+}
+
+function buildGeoJsonRiskAreas(features: any[], page: ParsedSpcOutlookPage): NonNullable<SpcOutlookSummary['riskAreas']> {
+	const riskAreas: NonNullable<SpcOutlookSummary['riskAreas']> = {
+		marginal: [],
+		slight: [],
+		enhanced: [],
+		moderate: [],
+		high: [],
+	};
+	for (const level of ['marginal', 'slight', 'enhanced', 'moderate', 'high'] as const) {
+		const states = dedupeStrings(
+			features
+				.filter((feature) => getRiskLevelFromGeoJsonFeature(feature) === level)
+				.flatMap((feature) => extractStatesFromRiskFeature(feature, page)),
+		);
+		riskAreas[level] = orderStatesByTextAndCluster(states, page);
+	}
+	return riskAreas;
+}
+
+function scoreRiskFeatureStates(states: string[], page: ParsedSpcOutlookPage): number {
+	const textMetrics = buildStateTextMetrics(page);
+	return states.reduce((total, stateCode) => {
+		const metric = textMetrics.get(stateCode) ?? { score: 0, firstIndex: Number.POSITIVE_INFINITY };
+		const mentionScore = metric.score * 20;
+		const indexScore = Number.isFinite(metric.firstIndex)
+			? Math.max(0, 10_000 - metric.firstIndex) / 250
+			: 0;
+		return total + mentionScore + indexScore;
+	}, 0);
+}
+
+function selectPrimaryRiskFeature(features: any[], page: ParsedSpcOutlookPage): SpcRiskFeatureSelection {
+	const highestRiskNumber = features.reduce((maxRisk, feature) => Math.max(maxRisk, spcRiskNumber(getRiskLevelFromGeoJsonFeature(feature))), 0);
+	if (highestRiskNumber <= 0) return { feature: null, states: [] };
+	const candidates = features.filter((feature) => spcRiskNumber(getRiskLevelFromGeoJsonFeature(feature)) === highestRiskNumber);
+	const evaluated = candidates
+		.map((feature) => {
+			const states = extractStatesFromRiskFeature(feature, page);
+			return {
+				feature,
+				states,
+				score: scoreRiskFeatureStates(states, page),
+			};
+		})
+		.filter((entry) => entry.states.length > 0)
+		.sort((left, right) => {
+			const scoreDiff = right.score - left.score;
+			if (scoreDiff !== 0) return scoreDiff;
+			const stateDiff = left.states.length - right.states.length;
+			if (stateDiff !== 0) return stateDiff;
+			return 0;
+		});
+	if (evaluated[0]) {
+		return { feature: evaluated[0].feature, states: evaluated[0].states };
+	}
+	const fallbackFeature = selectHighestRiskFeature(features);
+	return {
+		feature: fallbackFeature,
+		states: fallbackFeature ? extractStatesFromRiskFeature(fallbackFeature, page) : [],
+	};
+}
+
 function extractOrderedStateCodesFromText(text: string): string[] {
 	const rawText = String(text || '');
 	const upperText = rawText.toUpperCase();
@@ -424,11 +688,38 @@ function stripRiskLead(text: string): string {
 	);
 }
 
+type SpcAreaCandidate = {
+	source: SpcAreaSource;
+	rawText: string;
+	focusText: string | null;
+	states: string[];
+	regionHint: string | null;
+	order: number;
+	score: number;
+};
+
+type SpcSelectedRiskStory = {
+	primaryStates: string[];
+	primaryFocusText: string | null;
+	primaryAreaSource: SpcAreaSource;
+	secondaryStates: string[];
+	secondaryFocusText: string | null;
+};
+
 function titleCaseDirectionalPhrase(text: string): string {
+	const titleCaseWord = (value: string): string => value
+		.split('-')
+		.map((part) => {
+			const trimmed = part.trim();
+			if (!trimmed) return trimmed;
+			return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+		})
+		.join('-');
+
 	return normalizeSpaces(
-		String(text || '').replace(/\b([a-z][a-z'-]*)\b/g, (match, word) => {
+		String(text || '').replace(/\b([a-z][a-z'-]*)\b/gi, (match, word) => {
 			if (/^(and|or|the|of|into|across|for|to|from)$/i.test(word)) return word.toLowerCase();
-			return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+			return titleCaseWord(word);
 		}),
 	);
 }
@@ -443,41 +734,264 @@ function buildReadableFocusPhrase(text: string): string | null {
 			.replace(/,\s*and\s+/gi, ', and '),
 	);
 	if (!cleaned) return null;
-	const compact = cleaned.replace(/^,\s*/, '').replace(/\s*,\s*/g, ', ').trim();
+	const compact = cleaned
+		.replace(/^,\s*/, '')
+		.replace(/^and\s+/i, '')
+		.replace(/,\s*and\s+/gi, ', ')
+		.replace(/\s*,\s*/g, ', ')
+		.replace(/,\s*$/u, '')
+		.trim();
 	if (!compact) return null;
-	const listified = compact.includes(',') ? compact.replace(/,\s*([^,]+)$/u, ', and $1') : compact;
+	const expandedStateCodes = compact.replace(/\b([A-Z]{2})\b/g, (match, stateCode) => {
+		return STATE_CODE_TO_NAME[stateCode] ? stateCodeDisplayName(stateCode) : match;
+	});
+	const listified = expandedStateCodes.includes(',') ? expandedStateCodes.replace(/,\s*([^,]+)$/u, ', and $1') : expandedStateCodes;
 	return titleCaseDirectionalPhrase(listified);
 }
 
-function deriveStateFocusText(page: ParsedSpcOutlookPage): string | null {
-	for (const section of page.sectionHeadings) {
-		const focusText = buildReadableFocusPhrase(section);
-		if (focusText && extractOrderedStateCodesFromText(focusText).length > 0) {
-			return focusText;
-		}
-	}
-	const headlineFocus = buildReadableFocusPhrase(page.headlineText || '');
-	if (headlineFocus && extractOrderedStateCodesFromText(headlineFocus).length > 0) {
-		return headlineFocus;
-	}
-	const summaryFocus = buildReadableFocusPhrase(page.summary || '');
-	if (summaryFocus && extractOrderedStateCodesFromText(summaryFocus).length > 0) {
-		return summaryFocus;
-	}
-	return null;
+function splitTextIntoSentences(text: string): string[] {
+	return dedupeStrings(
+		(Array.from(String(text || '').replace(/\r/g, ' ').match(/[^.!?]+[.!?]?/g) || [])
+			.map((sentence) => normalizeSpaces(sentence))
+			.filter(Boolean)),
+	);
 }
 
-function deriveAffectedStates(page: ParsedSpcOutlookPage): string[] {
+function countStatesInSet(states: string[], stateSet: Set<string>): number {
+	return states.reduce((count, state) => count + (stateSet.has(state) ? 1 : 0), 0);
+}
+
+function countDirectionalHints(text: string): number {
+	return countPattern(
+		String(text || '').toLowerCase(),
+		/\b(?:southern|northern|western|eastern|central|upper|lower|mid-?mississippi|midwest|great lakes|ohio valley|southern plains|central plains|northern plains|mid-?south)\b/g,
+	);
+}
+
+function regionFamilyForLabel(label: string | null | undefined): 'midwest' | 'plains' | 'southeast' | 'northeast' | 'west' | null {
+	return label ? (REGION_FAMILY_BY_LABEL[label] ?? null) : null;
+}
+
+function regionFamilyForStates(states: string[]): 'midwest' | 'plains' | 'southeast' | 'northeast' | 'west' | null {
+	const familyCounts = new Map<'midwest' | 'plains' | 'southeast' | 'northeast' | 'west', number>();
+	for (const state of states) {
+		const bucket = REGION_BUCKETS[state];
+		const family = bucket === 'Midwest'
+			? 'midwest'
+			: bucket === 'Plains'
+				? 'plains'
+				: bucket === 'Southeast'
+					? 'southeast'
+					: bucket === 'Northeast'
+						? 'northeast'
+						: bucket
+							? 'west'
+							: null;
+		if (!family) continue;
+		familyCounts.set(family, (familyCounts.get(family) || 0) + 1);
+	}
+	return Array.from(familyCounts.entries())
+		.sort((a, b) => b[1] - a[1])
+		.map(([family]) => family)[0] ?? null;
+}
+
+function buildSpcAreaCandidate(rawText: string, source: SpcAreaSource, order: number): SpcAreaCandidate | null {
+	const normalizedRaw = normalizeSpaces(rawText);
+	if (!normalizedRaw) return null;
+	const focusText = buildReadableFocusPhrase(normalizedRaw);
+	const states = extractOrderedStateCodesFromText(focusText || normalizedRaw).slice(0, SPC_MAX_STATE_COUNT);
+	const regionHint = inferPrimaryRegionFromText([focusText, normalizedRaw].filter(Boolean).join(' '));
+	if (!focusText && states.length === 0 && !regionHint) return null;
+	const score =
+		(source === 'headline' ? 120 : source === 'section' ? 100 : source === 'summary' ? 80 : source === 'discussion' ? 60 : 20)
+		+ (Math.min(states.length, SPC_MAX_STATE_COUNT) * 18)
+		+ (Math.min(countDirectionalHints(normalizedRaw), 4) * 5)
+		+ (focusText ? 10 : 0)
+		+ (regionHint ? 8 : 0)
+		- (states.length === 0 ? 40 : 0)
+		- (normalizedRaw.length > 140 ? 6 : 0);
+	return {
+		source,
+		rawText: normalizedRaw,
+		focusText,
+		states,
+		regionHint,
+		order,
+		score,
+	};
+}
+
+function buildSpcAreaCandidates(page: ParsedSpcOutlookPage): SpcAreaCandidate[] {
+	const candidates: SpcAreaCandidate[] = [];
+	let order = 0;
+	if (page.headlineText) {
+		const candidate = buildSpcAreaCandidate(page.headlineText, 'headline', order);
+		order += 1;
+		if (candidate) candidates.push(candidate);
+	}
+	for (const section of page.sectionHeadings) {
+		const candidate = buildSpcAreaCandidate(section, 'section', order);
+		order += 1;
+		if (candidate) candidates.push(candidate);
+	}
+	for (const sentence of splitTextIntoSentences(page.summary).slice(0, 3)) {
+		const candidate = buildSpcAreaCandidate(sentence, 'summary', order);
+		order += 1;
+		if (candidate) candidates.push(candidate);
+	}
+	for (const sentence of splitTextIntoSentences(page.discussionText).slice(0, 8)) {
+		const candidate = buildSpcAreaCandidate(sentence, 'discussion', order);
+		order += 1;
+		if (candidate) candidates.push(candidate);
+	}
+	return candidates.sort((a, b) => {
+		const scoreDiff = b.score - a.score;
+		if (scoreDiff !== 0) return scoreDiff;
+		const stateDiff = b.states.length - a.states.length;
+		if (stateDiff !== 0) return stateDiff;
+		return a.order - b.order;
+	});
+}
+
+function deriveLegacyStateFocusText(page: ParsedSpcOutlookPage): string | null {
+	const headlineFocus = buildReadableFocusPhrase(page.headlineText || '');
+	const summaryFocus = buildReadableFocusPhrase(page.summary || '');
+	const sectionFocuses = page.sectionHeadings
+		.map((section) => buildReadableFocusPhrase(section))
+		.filter((value): value is string => !!value);
+	const focusCandidates = [headlineFocus, ...sectionFocuses, summaryFocus].filter((value): value is string => !!value);
+	let fallbackFocus: string | null = null;
+	for (const focusText of focusCandidates) {
+		const stateCount = extractOrderedStateCodesFromText(focusText).length;
+		if (stateCount >= 2) return focusText;
+		if (!fallbackFocus && stateCount > 0) {
+			fallbackFocus = focusText;
+		}
+	}
+	return fallbackFocus;
+}
+
+function deriveLegacyAffectedStates(page: ParsedSpcOutlookPage): string[] {
 	const prioritizedSources = [
-		...page.sectionHeadings,
 		page.headlineText,
 		page.summary,
+		...page.sectionHeadings,
 	].filter(Boolean);
+	const collectedStates: string[] = [];
 	for (const source of prioritizedSources) {
-		const focusedStates = extractOrderedStateCodesFromText(source).slice(0, SPC_MAX_STATE_COUNT);
-		if (focusedStates.length > 0) return focusedStates;
+		for (const stateCode of extractOrderedStateCodesFromText(source)) {
+			if (collectedStates.includes(stateCode)) continue;
+			collectedStates.push(stateCode);
+			if (collectedStates.length >= SPC_MAX_STATE_COUNT) {
+				return collectedStates;
+			}
+		}
 	}
+	if (collectedStates.length > 0) return collectedStates;
 	return extractOrderedStateCodesFromText(page.discussionText).slice(0, SPC_MAX_STATE_COUNT);
+}
+
+function isRegionCompatibleWithStates(region: string, states: string[]): boolean {
+	if (states.length === 0) return true;
+	if (region === 'Mid-Mississippi Valley') {
+		return countStatesInSet(states, MID_MISSISSIPPI_VALLEY_STATES) >= Math.min(2, states.length)
+			&& (states.includes('MO') || (states.includes('AR') && states.includes('IL')));
+	}
+	if (region === 'Upper Midwest') {
+		return countStatesInSet(states, UPPER_MIDWEST_STATES) >= Math.min(2, states.length);
+	}
+	if (region === 'Great Lakes') {
+		return countStatesInSet(states, GREAT_LAKES_STATES) >= Math.min(2, states.length);
+	}
+	if (region === 'Ohio Valley') {
+		return countStatesInSet(states, OHIO_VALLEY_STATES) >= Math.min(2, states.length);
+	}
+	if (region === 'Southern Plains') {
+		return countStatesInSet(states, SOUTHERN_PLAINS_STATES) >= Math.min(2, states.length);
+	}
+	if (region === 'Central Plains' || region === 'Northern Plains' || region === 'Plains') {
+		return countStatesInSet(states, CENTRAL_PLAINS_STATES) >= Math.min(1, Math.min(2, states.length))
+			|| countStatesInSet(states, SOUTHERN_PLAINS_STATES) >= Math.min(1, Math.min(2, states.length));
+	}
+	if (region === 'Midwest') {
+		return countStatesInSet(states, MIDWEST_STORY_STATES) >= Math.min(2, states.length);
+	}
+	if (region === 'Mid-South') {
+		return countStatesInSet(states, MID_SOUTH_STATES) >= Math.min(2, states.length);
+	}
+	const family = regionFamilyForLabel(region);
+	const stateFamily = regionFamilyForStates(states);
+	return !!family && family === stateFamily;
+}
+
+export function selectSpcPrimaryRiskArea(page: ParsedSpcOutlookPage, lockedPrimaryStates: string[] = []): SpcSelectedRiskStory {
+	const candidates = buildSpcAreaCandidates(page);
+	const lockedStates = orderStatesByTextAndCluster(lockedPrimaryStates, page);
+	const lockedStateSet = new Set(lockedStates);
+	const exactLockedCandidate = lockedStates.length > 0
+		? candidates
+			.filter((candidate) => candidate.states.length > 0 && candidate.states.every((state) => lockedStateSet.has(state)))
+			.sort((left, right) => {
+				const coverageDiff = right.states.length - left.states.length;
+				if (coverageDiff !== 0) return coverageDiff;
+				const scoreDiff = right.score - left.score;
+				if (scoreDiff !== 0) return scoreDiff;
+				return left.order - right.order;
+			})[0] ?? null
+		: null;
+	let primaryCandidate = candidates.find((candidate) => candidate.states.length >= 2)
+		?? candidates.find((candidate) => candidate.states.length > 0 || candidate.regionHint)
+		?? null;
+
+	let primaryStates = lockedStates.length > 0
+		? lockedStates
+		: primaryCandidate?.states.slice(0, SPC_MAX_STATE_COUNT) ?? [];
+	let primaryFocusText = exactLockedCandidate?.focusText ?? primaryCandidate?.focusText ?? null;
+	let primaryAreaSource: SpcAreaSource = lockedStates.length > 0 ? 'geojson' : (primaryCandidate?.source ?? 'fallback');
+	const legacyStates = deriveLegacyAffectedStates(page);
+	const legacyFocusText = deriveLegacyStateFocusText(page);
+
+	if (primaryStates.length === 0) {
+		primaryStates = legacyStates;
+		primaryFocusText = legacyFocusText;
+		primaryAreaSource = 'fallback';
+	}
+	if (lockedStates.length === 0 && primaryStates.length < 2 && legacyStates.length > primaryStates.length) {
+		primaryStates = legacyStates;
+		primaryAreaSource = 'fallback';
+	}
+	if (
+		!primaryFocusText
+		|| extractOrderedStateCodesFromText(primaryFocusText).length < Math.min(primaryStates.length, 2)
+		|| (lockedStates.length > 0 && extractOrderedStateCodesFromText(primaryFocusText).some((state) => !lockedStateSet.has(state)))
+	) {
+		primaryFocusText = legacyFocusText || (primaryStates.length > 0 ? formatStateList(primaryStates) : null);
+	}
+	if (lockedStates.length > 0 && (!primaryFocusText || extractOrderedStateCodesFromText(primaryFocusText).some((state) => !lockedStateSet.has(state)))) {
+		primaryFocusText = formatStateList(primaryStates);
+	}
+
+	const primaryFamily = regionFamilyForStates(primaryStates);
+	const secondaryCandidate = candidates.find((candidate) => {
+		if (candidate === primaryCandidate || candidate === exactLockedCandidate) return false;
+		const uniqueStates = orderStatesByTextAndCluster(candidate.states.filter((state) => !primaryStates.includes(state)), page, 3);
+		if (uniqueStates.length === 0 || uniqueStates.length > 3) return false;
+		const candidateFamily = regionFamilyForLabel(candidate.regionHint) ?? regionFamilyForStates(uniqueStates);
+		if (primaryFamily && candidateFamily && primaryFamily !== candidateFamily) return false;
+		return true;
+	});
+	const secondaryStates = secondaryCandidate
+		? orderStatesByTextAndCluster(secondaryCandidate.states.filter((state) => !primaryStates.includes(state)), page, 3)
+		: [];
+	const secondaryFocusText = secondaryStates.length > 0 ? formatStateList(secondaryStates) : null;
+
+	return {
+		primaryStates,
+		primaryFocusText,
+		primaryAreaSource,
+		secondaryStates,
+		secondaryFocusText,
+	};
 }
 
 function inferPrimaryRegionFromText(text: string): string | null {
@@ -488,6 +1002,7 @@ function inferPrimaryRegionFromText(text: string): string | null {
 }
 
 function buildBaseRegionFromStates(states: string[]): string {
+	if (states.length === 0) return 'National';
 	const stateSet = new Set(states);
 	const regionCounts = new Map<string, number>();
 	for (const state of states) {
@@ -496,13 +1011,13 @@ function buildBaseRegionFromStates(states: string[]): string {
 		regionCounts.set(region, (regionCounts.get(region) || 0) + 1);
 	}
 
-	if (states.some((state) => SOUTHERN_PLAINS_STATES.has(state)) && (stateSet.has('TX') || stateSet.has('OK'))) {
+	if (countStatesInSet(states, SOUTHERN_PLAINS_STATES) >= Math.min(2, states.length) && (stateSet.has('TX') || stateSet.has('OK'))) {
 		return 'Southern Plains';
 	}
-	if ((states.every((state) => CENTRAL_PLAINS_STATES.has(state)) || states.some((state) => CENTRAL_PLAINS_STATES.has(state))) && !stateSet.has('TX') && !stateSet.has('OK')) {
+	if (countStatesInSet(states, CENTRAL_PLAINS_STATES) >= Math.min(2, states.length) && !stateSet.has('TX') && !stateSet.has('OK')) {
 		return 'Central Plains';
 	}
-	if (states.some((state) => MID_SOUTH_STATES.has(state))) {
+	if (countStatesInSet(states, MID_SOUTH_STATES) >= Math.min(2, states.length)) {
 		return 'Mid-South';
 	}
 
@@ -517,13 +1032,35 @@ function buildBaseRegionFromStates(states: string[]): string {
 	return orderedRegions[0] ?? 'National';
 }
 
-function derivePrimaryRegion(page: ParsedSpcOutlookPage, states: string[]): string {
-	const stateDrivenRegion = buildBaseRegionFromStates(states);
-	if (states.length > 0 && stateDrivenRegion !== 'National') {
-		return stateDrivenRegion;
+function derivePrimaryRegion(states: string[]): string {
+	if (states.length === 0) {
+		return 'National';
 	}
-	const focusText = normalizeSpaces([page.headlineText, page.summary, ...page.sectionHeadings].filter(Boolean).join(' '));
-	return inferPrimaryRegionFromText(focusText) ?? stateDrivenRegion;
+	if (countStatesInSet(states, MID_MISSISSIPPI_VALLEY_STATES) >= 3 && (states.includes('MO') || (states.includes('AR') && states.includes('IL')))) {
+		return 'Mid-Mississippi Valley';
+	}
+	if (
+		countStatesInSet(states, GREAT_LAKES_STATES) >= 3
+		&& (states.includes('MI') || states.includes('OH') || states.includes('PA'))
+		&& !states.includes('MO')
+	) {
+		return 'Great Lakes';
+	}
+	if (
+		countStatesInSet(states, OHIO_VALLEY_STATES) >= 3
+		&& (states.includes('OH') || states.includes('KY') || states.includes('WV'))
+		&& !states.includes('IA')
+		&& !states.includes('MO')
+	) {
+		return 'Ohio Valley';
+	}
+	if (countStatesInSet(states, MIDWEST_STORY_STATES) >= Math.min(2, states.length)) {
+		return 'Midwest';
+	}
+	if (countStatesInSet(states, MID_SOUTH_STATES) >= Math.min(2, states.length) && !states.some((state) => MIDWEST_STORY_STATES.has(state))) {
+		return 'Mid-South';
+	}
+	return buildBaseRegionFromStates(states);
 }
 
 function countPattern(text: string, pattern: RegExp): number {
@@ -566,86 +1103,189 @@ function deriveProbabilities(page: ParsedSpcOutlookPage): Pick<SpcOutlookSummary
 	};
 }
 
-function deriveHazardFocus(summaryText: string, discussionText: string, probabilities: { tornadoProbability?: number | null; windProbability?: number | null; hailProbability?: number | null }): SpcHazardFocus {
-	const probabilityScores: Array<{ hazard: SpcHazardFocus; score: number }> = [
-		{ hazard: 'tornado', score: Number(probabilities.tornadoProbability || 0) },
-		{ hazard: 'wind', score: Number(probabilities.windProbability || 0) },
-		{ hazard: 'hail', score: Number(probabilities.hailProbability || 0) },
-	].sort((a, b) => b.score - a.score);
-	const probabilityTop = probabilityScores[0];
-	const probabilitySecond = probabilityScores[1];
-	if (probabilityTop && probabilityTop.score > 0) {
-		if (probabilitySecond && probabilitySecond.score > 0 && (probabilityTop.score - probabilitySecond.score) <= 4) {
-			return 'mixed';
-		}
-		return probabilityTop.hazard;
-	}
 
-	const text = `${summaryText} ${discussionText}`.toLowerCase();
-	if (/all severe hazards/i.test(text)) return 'mixed';
-	const tornadoScore = countPattern(text, /\btornado(?:es)?\b/g) + countPattern(text, /\brotation\b/g);
-	const windScore = countPattern(text, /\bdamaging (?:thunderstorm )?winds?\b/g) + countPattern(text, /\bwind damage\b/g) + countPattern(text, /\bgusts?\b/g);
-	const hailScore = countPattern(text, /\blarge hail\b/g) + countPattern(text, /\bhail\b/g);
-	const scores: Array<{ hazard: SpcHazardFocus; score: number }> = [
-		{ hazard: 'tornado', score: tornadoScore },
-		{ hazard: 'wind', score: windScore },
-		{ hazard: 'hail', score: hailScore },
-	].sort((a, b) => b.score - a.score);
-	const top = scores[0];
-	const second = scores[1];
-	if (!top || top.score <= 0) return 'mixed';
-	if (second && second.score > 0 && (top.score - second.score) <= 1) return 'mixed';
-	return top.hazard;
+function hasAnyPattern(text: string, patterns: RegExp[]): boolean {
+	return patterns.some((pattern) => pattern.test(text));
 }
 
-function buildHazardList(summaryText: string, discussionText: string, probabilities: { tornadoProbability?: number | null; windProbability?: number | null; hailProbability?: number | null }): string[] {
-	const text = `${summaryText} ${discussionText}`.toLowerCase();
-	const hazards: Array<{ label: string; score: number }> = [
-		{
-			label: 'tornadoes',
-			score: Number(probabilities.tornadoProbability || 0)
-				+ countPattern(text, /\btornado(?:es)?\b/g)
-				+ countPattern(text, /\brotation\b/g),
-		},
-		{
-			label: /widespread damaging wind|significant wind|severe wind swath|strong wind field/.test(text) ? 'widespread damaging winds' : 'damaging winds',
-			score: Number(probabilities.windProbability || 0)
-				+ countPattern(text, /\bdamaging (?:thunderstorm )?winds?\b/g)
-				+ countPattern(text, /\bwind damage\b/g)
-				+ countPattern(text, /\bsevere gusts?\b/g),
-		},
-		{
-			label: 'large hail',
-			score: Number(probabilities.hailProbability || 0)
-				+ countPattern(text, /\blarge hail\b/g)
-				+ countPattern(text, /\bhail\b/g),
-		},
-	].filter((entry) => entry.score > 0);
+function normalizeHazardLabel(key: 'tornado' | 'wind' | 'hail', text: string): string {
+	if (key === 'tornado') return 'tornadoes';
+	if (key === 'hail') return 'large hail';
+	return /widespread damaging wind|significant wind|severe wind swath|strong wind field/.test(text)
+		? 'widespread damaging winds'
+		: 'damaging winds';
+}
 
-	if (hazards.length === 0) {
-		return ['severe weather impacts'];
+function deriveHazardPriority(
+	summaryText: string,
+	discussionText: string,
+	probabilities: { tornadoProbability?: number | null; windProbability?: number | null; hailProbability?: number | null },
+	stormMode: string | null,
+	stormEvolutionText: string | null,
+): {
+	hazardFocus: SpcHazardFocus;
+	primaryHazards: string[];
+	secondaryHazards: string[];
+	hazardList: string[];
+} {
+	const summary = summaryText.toLowerCase();
+	const discussion = discussionText.toLowerCase();
+	const combined = `${summary} ${discussion}`;
+	const evidence = (['tornado', 'wind', 'hail'] as const).map((key) => {
+		const mentionPatterns = key === 'tornado'
+			? [/\btornado(?:es)?\b/g, /\brotation\b/g]
+			: key === 'wind'
+				? [/\bdamaging (?:thunderstorm )?winds?\b/g, /\bwind damage\b/g, /\bsevere gusts?\b/g, /\bwidespread damaging winds?\b/g]
+				: [/\blarge hail\b/g, /\bhail\b/g];
+		const mainPatterns = key === 'tornado'
+			? [
+				/\b(?:main|primary|greater|highest)\s+(?:concern|threat|risk)\b[^.]*\btornado(?:es)?\b/i,
+				/\btornado(?:es)?\b[^.]*\b(?:main|primary|greater|highest)\s+(?:concern|threat|risk)\b/i,
+				/\bseveral tornadoes\b/i,
+				/\bstrong tornado(?:es)?\b/i,
+			]
+			: key === 'wind'
+				? [
+					/\b(?:main|primary|greater|highest)\s+(?:concern|threat|risk)\b[^.]*\bdamaging winds?\b/i,
+					/\bdamaging winds?\b[^.]*\b(?:main|primary|greater|highest)\s+(?:concern|threat|risk)\b/i,
+					/\bwidespread damaging winds?\b/i,
+					/\bwind swath\b/i,
+					/\borganized squall line\b/i,
+				]
+				: [
+					/\b(?:main|primary|greater|highest)\s+(?:concern|threat|risk)\b[^.]*\bhail\b/i,
+					/\bhail\b[^.]*\b(?:main|primary|greater|highest)\s+(?:concern|threat|risk)\b/i,
+					/\bvery large hail\b/i,
+				];
+		const conditionalPatterns = key === 'tornado'
+			? [
+				/\ba few tornadoes? (?:possible|remain possible|may occur)\b/i,
+				/\bconditional tornado(?: risk| threat| potential)?\b/i,
+				/\btornado(?: risk| threat| potential)?[^.]*\bif\b/i,
+				/\bcannot rule out (?:a few )?tornado(?:es)?\b/i,
+				/\bembedded tornado(?: risk| threat| potential)?\b/i,
+			]
+			: key === 'wind'
+				? [/\bdamaging winds? (?:possible|may occur)\b/i]
+				: [/\blarge hail (?:possible|may occur)\b/i];
+		const probabilityScore = Math.round(Number((key === 'tornado'
+			? probabilities.tornadoProbability
+			: key === 'wind'
+				? probabilities.windProbability
+				: probabilities.hailProbability) || 0) / 5);
+		let score = probabilityScore;
+		for (const pattern of mentionPatterns) {
+			score += countPattern(summary, pattern) * 4;
+			score += countPattern(discussion, pattern) * 2;
+		}
+		if (hasAnyPattern(summary, mainPatterns)) score += 8;
+		if (hasAnyPattern(discussion, mainPatterns)) score += 5;
+		const conditional = hasAnyPattern(combined, conditionalPatterns);
+		if (conditional) score -= 4;
+		if (key === 'wind' && /\b(?:line|linear|squall|bowing|qlcs)\b/i.test(stormEvolutionText || '')) {
+			score += 4;
+		}
+		if (score > 0 && (key === 'tornado' || key === 'hail') && /\b(?:supercells?|discrete storms?)\b/i.test(stormMode || '')) {
+			score += 2;
+		}
+		return {
+			key,
+			label: normalizeHazardLabel(key, combined),
+			score,
+			conditional,
+		};
+	}).sort((a, b) => b.score - a.score);
+
+	const positiveSignals = evidence.filter((entry) => entry.score > 0);
+	if (positiveSignals.length === 0) {
+		return {
+			hazardFocus: 'mixed',
+			primaryHazards: [],
+			secondaryHazards: [],
+			hazardList: ['severe weather impacts'],
+		};
 	}
 
-	return hazards
-		.sort((a, b) => b.score - a.score)
+	const primaryLead = positiveSignals.find((entry) => !entry.conditional) ?? positiveSignals[0];
+	const primaryHazards = [primaryLead.label];
+	for (const entry of positiveSignals) {
+		if (entry === primaryLead) continue;
+		if (primaryHazards.length >= 2 || entry.conditional) continue;
+		if ((primaryLead.score - entry.score) <= 3) {
+			primaryHazards.push(entry.label);
+		}
+	}
+	const secondaryHazards = positiveSignals
+		.filter((entry) => !primaryHazards.includes(entry.label))
 		.map((entry) => entry.label)
 		.filter((label, index, list) => list.indexOf(label) === index)
-		.slice(0, 3);
+		.slice(0, 2);
+	const hazardFocus = primaryHazards.length > 1
+		? 'mixed'
+		: primaryLead.key === 'tornado'
+			? 'tornado'
+			: primaryLead.key === 'wind'
+				? 'wind'
+				: 'hail';
+	return {
+		hazardFocus,
+		primaryHazards,
+		secondaryHazards,
+		hazardList: dedupeStrings([...primaryHazards, ...secondaryHazards]).slice(0, 3),
+	};
 }
 
 function deriveStormMode(page: ParsedSpcOutlookPage): string | null {
 	const text = `${page.headlineText || ''} ${page.summary || ''} ${page.discussionText || ''}`.toLowerCase();
 	if (/fast-moving supercells?|rapidly moving supercells?|quickly moving supercells?/.test(text)) return 'fast-moving supercells';
-	if (/large squall line|organized squall line/.test(text)) return 'a large squall line';
-	if (/squall line|qlcs|quasi-linear/.test(text)) return 'a squall line';
 	if (/discrete supercells?/.test(text)) return 'discrete supercells';
 	if (/supercells?/.test(text)) return 'supercells';
-	if (/line of storms|linear storm mode|bowing segments?/.test(text)) return 'a line of storms';
+	if (/discrete storms?/.test(text)) return 'discrete storms';
+	if (/large squall line|organized squall line/.test(text)) return 'a large squall line';
+	if (/squall line|qlcs|quasi-linear/.test(text)) return 'a squall line';
+	if (/bowing line|bowing segments?/.test(text)) return 'a bowing line';
+	if (/line of storms|linear storm mode|extensive line|become more linear|linear segments?/.test(text)) return 'a line of storms';
 	if (/storm clusters?|organized clusters?/.test(text)) return 'storm clusters';
 	return null;
 }
 
-function deriveNotableText(page: ParsedSpcOutlookPage, stormMode: string | null): string | null {
+function deriveLaterStormMode(page: ParsedSpcOutlookPage): string | null {
+	const text = `${page.headlineText || ''} ${page.summary || ''} ${page.discussionText || ''}`.toLowerCase();
+	if (/quick upscale growth/.test(text)) return 'quick upscale growth';
+	if (/large squall line|organized squall line/.test(text)) return 'a large squall line';
+	if (/squall line|qlcs|quasi-linear/.test(text)) return 'a squall line';
+	if (/bowing line|bowing segments?/.test(text)) return 'a bowing line';
+	if (/(?:grow|organize|evolve|merge) into (?:an? )?line|storms? become (?:more )?linear/.test(text)) return 'a line of storms';
+	if (/line of storms|linear storm mode|extensive line|become more linear|linear segments?/.test(text)) return 'a line of storms';
+	if (/storm clusters?|organized clusters?/.test(text)) return 'storm clusters';
+	return null;
+}
+
+function deriveStormEvolutionText(page: ParsedSpcOutlookPage, stormMode: string | null, laterStormMode: string | null): string | null {
+	const text = `${page.summary || ''} ${page.discussionText || ''}`.toLowerCase();
+	const hasProgressionSignal = /\b(?:before|then|later|eventually|quick upscale growth|grow into|organize into|evolve into|merge into|become more linear)\b/.test(text);
+	if (stormMode && laterStormMode && stormMode !== laterStormMode && hasProgressionSignal) {
+		if (laterStormMode === 'quick upscale growth') {
+			return `${sentenceCase(stormMode)} may develop early before quick upscale growth takes over later.`;
+		}
+		if (/become more linear/.test(text)) {
+			return `${sentenceCase(stormMode)} may develop early before storms become more linear later on.`;
+		}
+		return `${sentenceCase(stormMode)} may develop early before storms organize into ${laterStormMode} later on.`;
+	}
+	if (laterStormMode && hasProgressionSignal) {
+		if (laterStormMode === 'quick upscale growth') {
+			return 'Quick upscale growth may follow once storms mature.';
+		}
+		if (/become more linear/.test(text)) {
+			return 'Storms are expected to become more linear later on.';
+		}
+		return `Storms may organize into ${laterStormMode} later on.`;
+	}
+	return null;
+}
+
+function deriveNotableText(page: ParsedSpcOutlookPage, stormMode: string | null, stormEvolutionText: string | null): string | null {
 	const text = `${page.summary || ''} ${page.discussionText || ''}`.toLowerCase();
 	if (/short warning lead time|limit(?:ed)? warning time|warning lead time/.test(text)) {
 		return 'storms may move quickly enough to limit warning time';
@@ -653,10 +1293,10 @@ function deriveNotableText(page: ParsedSpcOutlookPage, stormMode: string | null)
 	if ((stormMode?.includes('fast-moving') || /move quickly|moving quickly|race northeast|rapidly move|moving very fast/.test(text))) {
 		return 'storms may move quickly enough to limit warning time';
 	}
-	if (/embedded tornado(?: risk| threat| potential)?/.test(text) && /discrete.*early|before .*line/.test(text)) {
+	if (!stormEvolutionText && /embedded tornado(?: risk| threat| potential)?/.test(text) && /discrete.*early|before .*line/.test(text)) {
 		return 'a few discrete storms may form early before the line organizes';
 	}
-	if (/discrete.*early|before .*line/.test(text)) {
+	if (!stormEvolutionText && /discrete.*early|before .*line/.test(text)) {
 		return 'a few discrete storms may form before the main line organizes';
 	}
 	if (/organizing late afternoon into (?:the )?evening|late afternoon into evening|late day into evening/.test(text)) {
@@ -674,15 +1314,24 @@ function buildSummaryHashSeed(summary: Omit<SpcOutlookSummary, 'summaryHash'>): 
 		forecastDay: isoDay(summary.validFrom) || isoDay(summary.issuedAt),
 		risk: summary.highestRiskNumber,
 		states: [...summary.affectedStates].sort(),
+		secondaryStates: [...(summary.secondaryStates || [])].sort(),
 		stateFocusText: summary.stateFocusText ?? null,
+		secondaryFocusText: summary.secondaryFocusText ?? null,
+		primaryAreaSource: summary.primaryAreaSource ?? null,
 		region: summary.primaryRegion,
 		hazard: summary.hazardFocus,
 		hazardList: summary.hazardList ?? [],
+		primaryHazards: summary.primaryHazards ?? [],
+		secondaryHazards: summary.secondaryHazards ?? [],
 		stormMode: summary.stormMode ?? null,
+		stormEvolution: summary.stormEvolution ?? null,
+		laterStormMode: summary.laterStormMode ?? null,
+		stormEvolutionText: summary.stormEvolutionText ?? null,
 		notableText: summary.notableText ?? null,
 		tornadoProbability: summary.tornadoProbability ?? null,
 		windProbability: summary.windProbability ?? null,
 		hailProbability: summary.hailProbability ?? null,
+		riskAreas: summary.riskAreas ?? null,
 	});
 }
 
@@ -696,18 +1345,23 @@ export function normalizeSpcMinRiskLevel(value: unknown): SpcRiskLevel {
 
 export async function buildSpcOutlookSummary(day: SpcOutlookDay, page: ParsedSpcOutlookPage, geojson: any): Promise<SpcOutlookSummary> {
 	const features = Array.isArray(geojson?.features) ? geojson.features : [];
-	const highestRiskFeature = selectHighestRiskFeature(features);
+	const primaryRiskSelection = selectPrimaryRiskFeature(features, page);
+	const highestRiskFeature = primaryRiskSelection.feature ?? selectHighestRiskFeature(features);
 	const timingProps = highestRiskFeature?.properties ?? features[0]?.properties ?? {};
 	const highestRiskLevel = getRiskLevelFromGeoJsonFeature(highestRiskFeature);
 	const highestRiskNumber = spcRiskNumber(highestRiskLevel);
-	const stateFocusText = deriveStateFocusText(page);
-	const affectedStates = deriveAffectedStates(page);
-	const primaryRegion = derivePrimaryRegion(page, affectedStates);
+	const storyAreas = selectSpcPrimaryRiskArea(page, primaryRiskSelection.states);
+	const stateFocusText = storyAreas.primaryFocusText;
+	const affectedStates = storyAreas.primaryStates;
+	const primaryRegion = derivePrimaryRegion(affectedStates);
+	const riskAreas = buildGeoJsonRiskAreas(features, page);
 	const probabilities = deriveProbabilities(page);
-	const hazardFocus = deriveHazardFocus(page.summary, page.discussionText, probabilities);
-	const hazardList = buildHazardList(page.summary, page.discussionText, probabilities);
 	const stormMode = deriveStormMode(page);
-	const notableText = deriveNotableText(page, stormMode);
+	const laterStormMode = deriveLaterStormMode(page);
+	const stormEvolutionText = deriveStormEvolutionText(page, stormMode, laterStormMode);
+	const stormEvolution = !!stormEvolutionText;
+	const hazardPriority = deriveHazardPriority(page.summary, page.discussionText, probabilities, stormMode, stormEvolutionText);
+	const notableText = deriveNotableText(page, stormMode, stormEvolutionText);
 
 	const summaryWithoutHash: Omit<SpcOutlookSummary, 'summaryHash'> = {
 		issuedAt: String(timingProps?.ISSUE_ISO || '').trim(),
@@ -718,15 +1372,24 @@ export async function buildSpcOutlookSummary(day: SpcOutlookDay, page: ParsedSpc
 		highestRiskNumber,
 		affectedStates,
 		stateFocusText,
+		secondaryStates: storyAreas.secondaryStates,
+		secondaryFocusText: storyAreas.secondaryFocusText,
+		primaryAreaSource: storyAreas.primaryAreaSource,
 		primaryRegion,
-		hazardFocus,
-		hazardList,
+		hazardFocus: hazardPriority.hazardFocus,
+		hazardList: hazardPriority.hazardList,
+		primaryHazards: hazardPriority.primaryHazards,
+		secondaryHazards: hazardPriority.secondaryHazards,
 		stormMode,
+		stormEvolution,
+		laterStormMode,
+		stormEvolutionText,
 		notableText,
 		tornadoProbability: probabilities.tornadoProbability,
 		windProbability: probabilities.windProbability,
 		hailProbability: probabilities.hailProbability,
 		probabilitySource: probabilities.probabilitySource,
+		riskAreas,
 		timingText: page.timingText,
 		summaryText: page.summary || null,
 		discussionText: page.discussionText || null,
@@ -787,7 +1450,16 @@ function hasMajorStoryShift(previous: PublishedSpcOutlookRecord | null, current:
 	if (hasTornadoStorySignal(current) && !hasTornadoStorySignal(previous)) {
 		return true;
 	}
+	if (normalizeStoryList(current.primaryHazards).join('|') !== normalizeStoryList(previous.primaryHazards).join('|')) {
+		return true;
+	}
 	if (normalizeStoryText(current.stormMode) && normalizeStoryText(current.stormMode) !== normalizeStoryText(previous.stormMode)) {
+		return true;
+	}
+	if (
+		normalizeStoryText(current.stormEvolutionText)
+		&& normalizeStoryText(current.stormEvolutionText) !== normalizeStoryText(previous.stormEvolutionText)
+	) {
 		return true;
 	}
 	if (normalizeStoryText(current.notableText) && normalizeStoryText(current.notableText) !== normalizeStoryText(previous.notableText)) {
@@ -797,6 +1469,12 @@ function hasMajorStoryShift(previous: PublishedSpcOutlookRecord | null, current:
 		normalizeStoryText(current.stateFocusText)
 		&& normalizeStoryText(current.stateFocusText) !== normalizeStoryText(previous.stateFocusText)
 		&& hasMaterialStateShift(previous.affectedStates, current.affectedStates)
+	) {
+		return true;
+	}
+	if (
+		normalizeStoryText(current.secondaryFocusText)
+		&& normalizeStoryText(current.secondaryFocusText) !== normalizeStoryText(previous.secondaryFocusText)
 	) {
 		return true;
 	}
@@ -942,6 +1620,19 @@ export function buildSpcPostDecision(summary: SpcOutlookSummary, lastPost: Publi
 	return { shouldPost: false, reason: 'no_material_change', postType: '' };
 }
 
+function shouldBypassSpcGapGuards(
+	summary: SpcOutlookSummary,
+	decision: SpcPostDecision,
+	scheduleGate: ReturnType<typeof evaluateSpcPostingSchedule>,
+	deferredAnchorReady = false,
+): boolean {
+	if (deferredAnchorReady) return true;
+	if (!decision.shouldPost) return false;
+	if (decision.reason !== 'new_slight_or_higher') return false;
+	if (decision.postType !== defaultPostTypeForDay(summary.outlookDay)) return false;
+	return scheduleGate.allowed && scheduleGate.reason === 'within_window';
+}
+
 function normalizeOpening(text: string): string {
 	return normalizeSpaces(text).toLowerCase();
 }
@@ -963,6 +1654,14 @@ function formatStateList(states: string[]): string {
 	return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
 }
 
+function normalizeStateCodeList(states: string[]): string[] {
+	return dedupeStrings(
+		(states || [])
+			.map((state) => String(state || '').trim().toUpperCase())
+			.filter(Boolean),
+	);
+}
+
 function getSpcFocusAreaText(summary: SpcOutlookSummary): string {
 	return normalizeSpaces(summary.stateFocusText || '') || formatStateList(summary.affectedStates);
 }
@@ -975,8 +1674,14 @@ function joinHazardList(hazards: string[]): string {
 	return `${clean.slice(0, -1).join(', ')}, and ${clean[clean.length - 1]}`;
 }
 
+function renderSecondaryHazardLabel(hazard: string): string {
+	if (hazard === 'tornadoes') return 'a few tornadoes';
+	if (hazard === 'widespread damaging winds') return 'damaging winds';
+	return hazard;
+}
+
 export function buildSpcHazardLine(summary: SpcOutlookSummary): string {
-	const hazards = dedupeStrings(summary.hazardList ?? []).filter((hazard) => hazard !== 'severe weather impacts');
+	const hazards = dedupeStrings(summary.primaryHazards ?? summary.hazardList ?? []).filter((hazard) => hazard !== 'severe weather impacts');
 	if (hazards.length >= 2) {
 		return joinHazardList(hazards.slice(0, 2));
 	}
@@ -995,10 +1700,179 @@ export function buildSpcHazardLine(summary: SpcOutlookSummary): string {
 	return 'all severe hazards';
 }
 
+function buildSpcThreatNarrative(summary: SpcOutlookSummary, decision: SpcPostDecision): string {
+	const primaryHazards = dedupeStrings(
+		(summary.primaryHazards && summary.primaryHazards.length > 0)
+			? summary.primaryHazards
+			: (summary.hazardList ?? []).slice(0, 2),
+	).filter((hazard) => hazard !== 'severe weather impacts');
+	const secondaryHazards = dedupeStrings(summary.secondaryHazards ?? []).filter((hazard) => hazard !== 'severe weather impacts');
+	const primaryText = joinHazardList(primaryHazards.length > 0 ? primaryHazards : [buildSpcHazardLine(summary)]);
+	const isLookAhead = decision.postType === 'day2_lookahead' || decision.postType === 'day3_heads_up';
+	const usesPluralThreatVerb = primaryHazards.length > 1 || /\band\b|winds\b|tornadoes\b|hazards\b/i.test(primaryText);
+	let sentence = `${sentenceCase(primaryText)} ${usesPluralThreatVerb ? (isLookAhead ? 'would be the main threats' : 'look like the main threats') : (isLookAhead ? 'would be the main threat' : 'looks like the main threat')}`;
+	if (secondaryHazards.length > 0) {
+		sentence += `, with ${joinHazardList(secondaryHazards.map(renderSecondaryHazardLabel))} possible`;
+	}
+	return `${sentence}.`;
+}
+
+function buildSpcSecondaryStorySentence(summary: SpcOutlookSummary): string | null {
+	const secondaryText = normalizeSpaces(summary.secondaryFocusText || '');
+	if (!secondaryText) return null;
+	if (!/\b(?:line|linear|squall|bowing|upscale)\b/i.test(summary.stormEvolutionText || '')) return null;
+	return `Any broader line should stay secondary to the main core but could extend toward ${secondaryText} later.`;
+}
+
+function buildSpcWatchAreaText(summary: SpcOutlookSummary, stateCodes: string[]): string {
+	const overlapStates = normalizeStateCodeList(stateCodes);
+	if (overlapStates.length === 0) {
+		return `parts of the ${summary.primaryRegion}`;
+	}
+	return `parts of ${formatStateList(overlapStates)}`;
+}
+
+function buildSpcWatchCoveragePhrase(expiresAt: string | null | undefined, nowMs: number): string {
+	const expiresMs = parseIsoMs(expiresAt);
+	if (expiresMs == null) return 'over the next several hours';
+	const remainingMs = expiresMs - nowMs;
+	if (remainingMs <= 0) return 'in the short term';
+	if (remainingMs <= 2 * 60 * 60 * 1000) return 'over the next couple of hours';
+	if (remainingMs <= 8 * 60 * 60 * 1000) return 'over the next several hours';
+	if (remainingMs <= 18 * 60 * 60 * 1000) return 'into tonight';
+	return 'through the day';
+}
+
+function sentenceCase(text: string): string {
+	const normalized = normalizeSpaces(text);
+	if (!normalized) return '';
+	return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+export function spcSummaryOverlapStates(
+	summary: Pick<SpcOutlookSummary, 'affectedStates'>,
+	stateCodes: string[],
+): string[] {
+	const affectedStateSet = new Set(normalizeStateCodeList(summary.affectedStates || []));
+	return normalizeStateCodeList(stateCodes).filter((stateCode) => affectedStateSet.has(stateCode));
+}
+
+export function buildSpcDay1WatchCommentText(
+	summary: SpcOutlookSummary,
+	stateCodes: string[],
+	options: {
+		watchLabel?: string;
+		changeType?: string;
+		expiresAt?: string | null;
+		nowMs?: number;
+	} = {},
+): string {
+	const watchLabel = normalizeSpaces(options.watchLabel || 'Tornado Watch');
+	const changeType = String(options.changeType || '').trim().toLowerCase();
+	const areaText = buildSpcWatchAreaText(summary, stateCodes);
+	const opening = changeType === 'extended'
+		? `${watchLabel} has been extended for ${areaText}`
+		: changeType === 'updated'
+			? `${watchLabel} continues for ${areaText}`
+			: `A ${watchLabel} is now in effect for ${areaText}`;
+	const hazardLine = summary.primaryHazards?.length === 1 && (summary.secondaryHazards?.length || 0) > 0
+		? joinHazardList([summary.primaryHazards[0], summary.secondaryHazards?.[0] || ''])
+		: buildSpcHazardLine(summary);
+	const threatFocus = hazardLine === 'all severe hazards'
+		? `All severe hazards will be possible ${buildSpcWatchCoveragePhrase(options.expiresAt, options.nowMs ?? Date.now())}.`
+		: `${sentenceCase(hazardLine)} will be the main ${/\band\b|winds\b|hazards\b|tornadoes\b/i.test(hazardLine) ? 'concerns' : 'concern'} ${buildSpcWatchCoveragePhrase(options.expiresAt, options.nowMs ?? Date.now())}.`;
+	return `UPDATE: ${opening} as the severe setup begins to organize. ${threatFocus}`;
+}
+
 function buildHashtags(summary: SpcOutlookSummary, enabled: boolean, outputMode: SpcOutputMode): string {
 	if (!enabled || outputMode === 'comment') return '';
 	return summary.affectedStates.slice(0, 3).map((state) => `#${state.toUpperCase()}wx`).join(' ');
 }
+
+function stripSpcHashtagFooter(text: string): string {
+	const paragraphs = String(text || '').split(/\n{2,}/).map((paragraph) => paragraph.trim()).filter(Boolean);
+	if (paragraphs.length === 0) return '';
+	const lastParagraph = paragraphs[paragraphs.length - 1];
+	if (lastParagraph && lastParagraph.split(/\s+/).every((token) => /^#\w+$/i.test(token))) {
+		paragraphs.pop();
+	}
+	return paragraphs.join('\n\n').trim();
+}
+
+function extractSpcHashtagStates(text: string): string[] {
+	return dedupeStrings(
+		Array.from(String(text || '').matchAll(/#([A-Z]{2})wx\b/gi))
+			.map((match) => String(match[1] || '').trim().toUpperCase())
+			.filter(Boolean),
+	);
+}
+
+function validateSpcPublishMessage(
+	message: string,
+	payload: SpcLlmPayload,
+): ReturnType<typeof validateSpcLlmOutput> {
+	const trimmed = String(message || '').trim();
+	const hashtagStates = extractSpcHashtagStates(trimmed);
+	const allowedHashtagStates = new Set(normalizeStateCodeList(payload.primary_states ?? []));
+	if (hashtagStates.some((stateCode) => !allowedHashtagStates.has(stateCode))) {
+		return { valid: false, text: trimmed, failureReason: 'non_core_hashtag_state' };
+	}
+	if (payload.output_mode === 'comment' && hashtagStates.length > 0) {
+		return { valid: false, text: trimmed, failureReason: 'contains_hashtag' };
+	}
+	const bodyValidation = validateSpcLlmOutput(stripSpcHashtagFooter(trimmed), payload);
+	if (!bodyValidation.valid) {
+		return { ...bodyValidation, text: trimmed };
+	}
+	return { valid: true, text: trimmed };
+}
+
+function mapSpcValidationFailureToDebugCode(failureReason: string | null | undefined): string {
+	switch (failureReason) {
+		case 'mentions_out_of_scope_state':
+		case 'non_core_hashtag_state':
+			return 'spc_validation_failed_non_core_state';
+		case 'mentions_conflicting_region':
+		case 'missing_primary_area_anchor':
+		case 'secondary_area_over_primary':
+		case 'missing_core_state_cluster':
+			return 'spc_validation_failed_region_mismatch';
+		case 'missing_storm_evolution':
+			return 'spc_validation_failed_missing_evolution';
+		case 'tornado_lead_mismatch':
+			return 'spc_validation_failed_tornado_lead';
+		case 'contains_banned_phrase_affecting_several_states':
+		case 'contains_banned_phrase_parts_of_country':
+		case 'contains_banned_phrase_alerts_in_effect':
+		case 'contains_generic_opening_severe_setup_today_across':
+		case 'contains_generic_opening_heres_what_were_watching':
+		case 'contains_formulaic_phrase_is_focused_on':
+		case 'contains_formulaic_phrase_is_in_place':
+		case 'contains_formulaic_phrase_is_centered':
+		case 'contains_formulaic_change_phrase_is_intensifying':
+		case 'contains_formulaic_change_phrase_is_expanding':
+		case 'contains_hype_language':
+			return 'spc_validation_failed_banned_phrase';
+		case 'contains_hashtag':
+			return 'spc_validation_failed_hashtag';
+		default:
+			return 'spc_validation_failed_invalid_output';
+	}
+}
+
+type SpcFinalTextBuildResult = {
+	message: string;
+	validationFailures: string[];
+};
+
+type SpcDeferredAnchorRecord = {
+	day: Exclude<SpcOutlookDay, 1>;
+	queuedAt: string;
+	releaseAfter: string;
+	forecastDay: string;
+	storyKey: string | null;
+	suppressedByLane: FacebookCoverageIntent['lane'] | null;
+};
 
 function selectOpening(candidates: string[], recentOpenings: string[]): string {
 	const normalizedRecent = new Set(recentOpenings.map(normalizeOpening));
@@ -1029,6 +1903,91 @@ function probabilityLead(summary: SpcOutlookSummary): string | null {
 	return `${entries[0].label} confidence increased to around ${entries[0].value}%`;
 }
 
+function buildAfdStormModeFallback(afdEnrichment?: SpcAfdEnrichment | null): string | null {
+	return normalizeSpaces(afdEnrichment?.stormModeHints?.[0] || '') || null;
+}
+
+function buildAfdTimingFallback(afdEnrichment?: SpcAfdEnrichment | null): string | null {
+	return normalizeSpaces(afdEnrichment?.timingHints?.[0] || '') || null;
+}
+
+function buildAfdNotableFallback(afdEnrichment?: SpcAfdEnrichment | null): string | null {
+	return normalizeSpaces(afdEnrichment?.notableBehaviorHints?.[0] || '') || null;
+}
+
+function buildAfdStormModeNudge(summary: SpcOutlookSummary, afdEnrichment?: SpcAfdEnrichment | null): string | null {
+	const hint = normalizeStoryText(afdEnrichment?.stormModeHints?.[0] || '');
+	const current = normalizeStoryText([summary.stormMode, summary.stormEvolutionText].filter(Boolean).join(' '));
+	if (!hint) return null;
+	if (current && (current.includes(hint) || hint.includes(current))) return null;
+	if (hint === 'quick upscale growth') return 'Quick upscale growth may follow once storms mature.';
+	if (hint === 'discrete supercells') return 'A few storms may stay discrete early before clustering later.';
+	if (hint === 'fast-moving supercells') return 'Any early supercells may move quickly.';
+	if (hint === 'squall line' || hint === 'bowing line segments') return 'Storms may consolidate into a line as they move east.';
+	if (hint === 'storm clusters') return 'Storms may organize into clusters as the evening goes on.';
+	return `Storm mode may lean toward ${hint}.`;
+}
+
+function buildAfdTimingNudge(summary: SpcOutlookSummary, afdEnrichment?: SpcAfdEnrichment | null): string | null {
+	const hint = normalizeSpaces(afdEnrichment?.timingHints?.[0] || '');
+	if (!hint) return null;
+	const normalizedHint = normalizeStoryText(hint);
+	const normalizedTiming = normalizeStoryText(summary.timingText || '');
+	if (normalizedTiming && (normalizedTiming.includes(normalizedHint) || normalizedHint.includes(normalizedTiming))) {
+		return null;
+	}
+	if (normalizedHint === 'after morning clouds clear') {
+		return 'Storm chances may improve once morning clouds thin out.';
+	}
+	return `The better window may sharpen ${hint}.`;
+}
+
+function buildAfdHazardNudge(summary: SpcOutlookSummary, afdEnrichment?: SpcAfdEnrichment | null): string | null {
+	const summaryHazardText = [buildSpcHazardLine(summary), ...(summary.secondaryHazards || [])].join(' ').toLowerCase();
+	const emphasis = dedupeStrings(
+		(afdEnrichment?.hazardEmphasis || []).filter((value) => !summaryHazardText.includes(String(value || '').toLowerCase())),
+	);
+	if (emphasis.length === 0) return null;
+	const label = joinNaturalList(
+		emphasis.map((value) => {
+			if (value === 'tornado') return 'tornado potential';
+			if (value === 'damaging wind') return 'damaging wind potential';
+			if (value === 'large hail') return 'large hail potential';
+			return value;
+		}),
+	);
+	return `${sentenceCase(label)} may stand out a bit more if storms mature.`;
+}
+
+function buildAfdConfidenceSentence(afdEnrichment?: SpcAfdEnrichment | null): string | null {
+	const confidence = normalizeSpaces(afdEnrichment?.confidenceHints?.[0] || '');
+	const uncertainty = normalizeSpaces(afdEnrichment?.uncertaintyHints?.[0] || '');
+	if (confidence && uncertainty) {
+		return `${sentenceCase(confidence)}, though ${uncertainty.replace(/^[A-Z]/, (char) => char.toLowerCase())}.`;
+	}
+	if (uncertainty) return `${sentenceCase(uncertainty)}.`;
+	if (confidence) return `${sentenceCase(confidence)}.`;
+	return null;
+}
+
+function buildAfdSupportSentences(summary: SpcOutlookSummary, afdEnrichment?: SpcAfdEnrichment | null): string[] {
+	const primaryNudge = buildAfdTimingNudge(summary, afdEnrichment)
+		?? buildAfdStormModeNudge(summary, afdEnrichment)
+		?? buildAfdHazardNudge(summary, afdEnrichment)
+		?? (() => {
+			const notableHint = normalizeSpaces(afdEnrichment?.notableBehaviorHints?.[0] || '');
+			if (!notableHint) return null;
+			const summaryNotable = normalizeStoryText(summary.notableText || '');
+			const normalizedHint = normalizeStoryText(notableHint);
+			if (summaryNotable && (summaryNotable.includes(normalizedHint) || normalizedHint.includes(summaryNotable))) {
+				return null;
+			}
+			return `${sentenceCase(notableHint)}.`;
+		})();
+	const confidenceSentence = buildAfdConfidenceSentence(afdEnrichment);
+	return [primaryNudge, confidenceSentence].filter((value): value is string => !!value).slice(0, 2);
+}
+
 export function buildSpcCommentChangeHint(previousSummary: SpcOutlookSummary | null | undefined, currentSummary: SpcOutlookSummary): string | null {
 	if (!previousSummary) return null;
 	const previousStates = dedupeStrings(previousSummary.affectedStates.map((state) => state.toUpperCase()));
@@ -1039,24 +1998,41 @@ export function buildSpcCommentChangeHint(previousSummary: SpcOutlookSummary | n
 	const currentHazards = new Set(normalizeStoryList(currentSummary.hazardList));
 	const addedStates = currentStates.filter((state) => !previousSet.has(state)).map((state) => stateCodeDisplayName(state));
 	const removedStates = previousStates.filter((state) => !currentSet.has(state)).map((state) => stateCodeDisplayName(state));
+	const currentPrimaryHazards = dedupeStrings(currentSummary.primaryHazards ?? []).slice(0, 2);
+	const previousPrimaryHazards = dedupeStrings(previousSummary.primaryHazards ?? []).slice(0, 2);
 	const hints: string[] = [];
 
 	if (currentSummary.highestRiskNumber > previousSummary.highestRiskNumber) {
 		hints.push(`risk upgraded to Level ${currentSummary.highestRiskNumber} ${riskLabelDisplay(currentSummary.highestRiskLevel)} Risk`);
 	}
-	if (currentHazards.has('tornadoes') && !previousHazards.has('tornadoes')) {
-		hints.push('SPC is highlighting tornado risk more clearly');
-	}
-	if (addedStates.length > 0) {
-		hints.push(`new states added: ${joinNaturalList(addedStates.slice(0, 4))}`);
-	}
 	if (normalizeStoryText(currentSummary.stateFocusText) && normalizeStoryText(currentSummary.stateFocusText) !== normalizeStoryText(previousSummary.stateFocusText)) {
-		hints.push(`core area now centered on ${currentSummary.stateFocusText}`);
+		hints.push(`core risk area now centered on ${currentSummary.stateFocusText}`);
 	}
 	if (currentSummary.primaryRegion !== previousSummary.primaryRegion) {
 		hints.push(`focus shifting toward the ${currentSummary.primaryRegion}`);
 	}
-	if (normalizeStoryText(currentSummary.stormMode) && normalizeStoryText(currentSummary.stormMode) !== normalizeStoryText(previousSummary.stormMode)) {
+	if (addedStates.length > 0) {
+		hints.push(`new core states added: ${joinNaturalList(addedStates.slice(0, 4))}`);
+	}
+	if (
+		currentPrimaryHazards.length > 0
+		&& currentPrimaryHazards.join('|').toLowerCase() !== previousPrimaryHazards.join('|').toLowerCase()
+	) {
+		hints.push(`main threats now lean more toward ${joinHazardList(currentPrimaryHazards)}`);
+	}
+	if (currentHazards.has('tornadoes') && !previousHazards.has('tornadoes')) {
+		hints.push('tornado risk is being highlighted more clearly');
+	}
+	if (
+		normalizeStoryText(currentSummary.stormEvolutionText)
+		&& normalizeStoryText(currentSummary.stormEvolutionText) !== normalizeStoryText(previousSummary.stormEvolutionText)
+	) {
+		if (/\b(?:line|linear|squall|bowing)\b/i.test(currentSummary.stormEvolutionText || '')) {
+			hints.push('storms now look more likely to organize into a line later');
+		} else {
+			hints.push(`storm evolution now favors ${currentSummary.stormMode || 'a more organized setup'}`);
+		}
+	} else if (normalizeStoryText(currentSummary.stormMode) && normalizeStoryText(currentSummary.stormMode) !== normalizeStoryText(previousSummary.stormMode)) {
 		hints.push(`storm mode now favoring ${currentSummary.stormMode}`);
 	}
 	if (currentSummary.hazardFocus !== previousSummary.hazardFocus) {
@@ -1070,7 +2046,13 @@ export function buildSpcCommentChangeHint(previousSummary: SpcOutlookSummary | n
 		hints.push(`SPC now notes ${currentSummary.notableText}`);
 	}
 	if ((currentSummary.timingText || '') !== (previousSummary.timingText || '') && currentSummary.timingText) {
-		hints.push(`timing now centered on ${currentSummary.timingText}`);
+		hints.push(`timing is coming into better focus for ${currentSummary.timingText}`);
+	}
+	if (
+		normalizeStoryText(currentSummary.secondaryFocusText)
+		&& normalizeStoryText(currentSummary.secondaryFocusText) !== normalizeStoryText(previousSummary.secondaryFocusText)
+	) {
+		hints.push(`a secondary corridor may extend toward ${currentSummary.secondaryFocusText}`);
 	}
 	if (removedStates.length > 0 && addedStates.length === 0 && currentSummary.primaryRegion === previousSummary.primaryRegion) {
 		hints.push(`focus narrowing within ${currentSummary.primaryRegion}`);
@@ -1082,133 +2064,168 @@ export function buildSpcCommentChangeHint(previousSummary: SpcOutlookSummary | n
 function buildOpeningCandidates(summary: SpcOutlookSummary, decision: SpcPostDecision, outputMode: SpcOutputMode, changeHint?: string | null): string[] {
 	const stateList = getSpcFocusAreaText(summary);
 	if (outputMode === 'comment') {
+		if (changeHint) {
+			return [`UPDATE: ${changeHint.charAt(0).toUpperCase()}${changeHint.slice(1)}.`];
+		}
 		if (decision.reason === 'risk_upgrade') {
 			return [`UPDATE: Severe weather concern has increased across the ${summary.primaryRegion}.`];
 		}
 		if (decision.reason === 'timing_refresh') {
-			return [`UPDATE: Severe weather timing is becoming more important across parts of ${stateList}.`];
+			return [`UPDATE: The timing window is coming into better focus across parts of ${stateList}.`];
 		}
 		if (decision.reason === 'region_shift') {
-			return [`UPDATE: The severe weather focus is shifting across the ${summary.primaryRegion}.`];
+			return [`UPDATE: The core severe weather focus is shifting across the ${summary.primaryRegion}.`];
 		}
 		if (decision.reason === 'hazard_change' || decision.reason === 'probability_shift') {
-			return [`UPDATE: The severe weather setup is evolving across the ${summary.primaryRegion}.`];
-		}
-		if (changeHint) {
-			return [`UPDATE: ${changeHint.charAt(0).toUpperCase()}${changeHint.slice(1)}.`];
+			return [`UPDATE: The threat mix is evolving across the ${summary.primaryRegion}.`];
 		}
 		return [`UPDATE: The severe weather story is changing across the ${summary.primaryRegion}.`];
 	}
 
 	if (decision.postType === 'day2_lookahead') {
 		return [
+			`Tomorrow has our attention across the ${summary.primaryRegion}.`,
 			`Watching tomorrow closely across the ${summary.primaryRegion}.`,
-			`Tomorrow's severe setup is worth watching across the ${summary.primaryRegion}.`,
-			`Here's what we're watching for tomorrow across the ${summary.primaryRegion}.`,
+			`A more organized severe setup may unfold tomorrow across the ${summary.primaryRegion}.`,
 		];
 	}
 	if (decision.postType === 'day3_heads_up') {
 		return [
-			`A longer-range severe setup is worth watching across the ${summary.primaryRegion}.`,
-			`The day 3 severe weather pattern is becoming worth watching across the ${summary.primaryRegion}.`,
+			`The day 3 severe weather signal is worth watching across the ${summary.primaryRegion}.`,
+			`A broader severe setup may take shape later this period across the ${summary.primaryRegion}.`,
 		];
 	}
 	if (decision.postType === 'upgrade') {
 		if (decision.reason === 'risk_upgrade') {
 			return [
-				`Severe weather concern has increased across the ${summary.primaryRegion}.`,
-				`The severe setup is looking more serious across the ${summary.primaryRegion}.`,
+				`Confidence is increasing in a more serious setup across the ${summary.primaryRegion}.`,
+				`The severe weather story is becoming more focused across the ${summary.primaryRegion}.`,
 			];
 		}
 		return [
-			`The severe weather story is changing across the ${summary.primaryRegion}.`,
-			`The severe weather focus is shifting across the ${summary.primaryRegion}.`,
+			`The severe weather story is evolving across the ${summary.primaryRegion}.`,
+			`The core setup is shifting across the ${summary.primaryRegion}.`,
 		];
 	}
 	if (decision.postType === 'timing_refresh') {
 		return [
-			`Severe weather timing is becoming more important across parts of ${stateList}.`,
+			`The timing window is becoming more important across parts of ${stateList}.`,
 			`The timing window for severe storms is getting closer across parts of ${stateList}.`,
 		];
 	}
 	return [
 		`This afternoon to watch across the ${summary.primaryRegion}.`,
 		`Watching today closely across the ${summary.primaryRegion}.`,
-		`Severe setup today across the ${summary.primaryRegion}.`,
-		`Here's what we're watching across the ${summary.primaryRegion} today.`,
+		`A volatile setup is taking shape this afternoon across the ${summary.primaryRegion}.`,
+		`The core severe weather story today is setting up across the ${summary.primaryRegion}.`,
 	];
 }
 
-function buildStormSentence(summary: SpcOutlookSummary, decision: SpcPostDecision): string {
-	const hazardLine = buildSpcHazardLine(summary);
-	const stormMode = normalizeSpaces(summary.stormMode || '');
-	const timingText = normalizeSpaces(summary.timingText || '');
-	const notableText = normalizeSpaces(summary.notableText || '');
 
-	if (decision.postType === 'day2_lookahead') {
-		const modeText = stormMode || 'organized severe storms';
-		const timingClause = timingText ? ` during the ${timingText} window` : ' later in the day';
-		const notableClause = notableText ? ` ${notableText.charAt(0).toUpperCase()}${notableText.slice(1)}.` : '';
-		return `A developing system may produce ${modeText}, with ${hazardLine} as the main threats${timingClause}.${notableClause}`.trim();
-	}
-
-	if (decision.postType === 'day3_heads_up') {
-		const timingClause = timingText ? ` ${timingText}` : ' later in the period';
-		return `The setup could support ${hazardLine}${stormMode ? ` with ${stormMode}` : ''}${timingClause}.`.replace(/\s+/g, ' ').trim();
-	}
-
-	const modeText = stormMode || 'severe storms';
-	const timingClause = timingText ? ` Storms will develop ${timingText}.` : '';
-	const notableClause = notableText ? ` ${notableText.charAt(0).toUpperCase()}${notableText.slice(1)}.` : '';
-	return `Expect ${modeText} capable of producing ${hazardLine}.${timingClause}${notableClause}`.replace(/\s+/g, ' ').trim();
+function withTrailingPeriod(text: string): string {
+	const normalized = normalizeSpaces(text);
+	if (!normalized) return '';
+	return /[.!?]$/.test(normalized) ? normalized : `${normalized}.`;
 }
 
-function buildBaseSecondParagraph(summary: SpcOutlookSummary, decision: SpcPostDecision): string {
+
+function buildStormSentence(summary: SpcOutlookSummary, decision: SpcPostDecision, afdEnrichment?: SpcAfdEnrichment | null): string {
+	const stormMode = normalizeSpaces(summary.stormMode || buildAfdStormModeFallback(afdEnrichment) || '');
+	const evolutionText = normalizeSpaces(summary.stormEvolutionText || '');
+	const timingText = normalizeSpaces(summary.timingText || buildAfdTimingFallback(afdEnrichment) || '');
+	const notableText = normalizeSpaces(summary.notableText || buildAfdNotableFallback(afdEnrichment) || '');
+	const sentences: string[] = [];
+
+	if (evolutionText) {
+		sentences.push(withTrailingPeriod(evolutionText));
+	} else if (stormMode) {
+		if (decision.postType === 'day2_lookahead' || decision.postType === 'day3_heads_up') {
+			sentences.push(`Storm mode may favor ${stormMode}.`);
+		} else {
+			sentences.push(`${sentenceCase(stormMode)} may be the main storm mode.`);
+		}
+	}
+
+	sentences.push(buildSpcThreatNarrative(summary, decision));
+
+	if (timingText && !normalizeStoryText(evolutionText).includes(normalizeStoryText(timingText))) {
+		if (decision.postType === 'timing_refresh') {
+			sentences.push(`The main window now looks ${timingText}.`);
+		} else if (decision.postType === 'day2_lookahead' || decision.postType === 'day3_heads_up') {
+			sentences.push(`The better window looks ${timingText}.`);
+		} else {
+			sentences.push(`The main window looks ${timingText}.`);
+		}
+	}
+
+	if (notableText && !normalizeStoryText(evolutionText).includes(normalizeStoryText(notableText))) {
+		sentences.push(withTrailingPeriod(notableText));
+	}
+
+	const secondaryStorySentence = buildSpcSecondaryStorySentence(summary);
+	if (secondaryStorySentence) {
+		sentences.push(secondaryStorySentence);
+	}
+
+	return sentences.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function buildBaseSecondParagraph(summary: SpcOutlookSummary, decision: SpcPostDecision, afdEnrichment?: SpcAfdEnrichment | null): string {
 	const stateList = getSpcFocusAreaText(summary);
 	const riskText = `Level ${summary.highestRiskNumber} ${riskLabelDisplay(summary.highestRiskLevel)} Risk`;
-	const stormSentence = buildStormSentence(summary, decision);
+	const stormSentence = buildStormSentence(summary, decision, afdEnrichment);
+	const afdSupport = buildAfdSupportSentences(summary, afdEnrichment).join(' ');
 
 	if (decision.postType === 'day2_lookahead') {
-		return `SPC has issued a ${riskText} centered on ${stateList}. ${stormSentence}`.trim();
+		return `SPC has issued a ${riskText} centered on ${stateList}. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 	}
 	if (decision.postType === 'day3_heads_up') {
-		return `SPC has issued a ${riskText} centered on ${stateList}. ${stormSentence}`.trim();
+		return `SPC has issued a ${riskText} centered on ${stateList}. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 	}
 	if (decision.postType === 'upgrade') {
 		if (decision.reason === 'risk_upgrade') {
-			return `SPC has upgraded parts of ${stateList} to a ${riskText}. ${stormSentence}`.trim();
+			return `SPC has upgraded parts of ${stateList} to a ${riskText}. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 		}
 		if (decision.reason === 'probability_shift') {
-			return `SPC continues a ${riskText} centered on ${stateList}, but the forecast confidence has shifted. ${stormSentence}`.trim();
+			return `SPC still has a ${riskText} centered on ${stateList}, but the forecast confidence has shifted. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 		}
-		return `SPC continues a ${riskText} centered on ${stateList}, but the setup has changed. ${stormSentence}`.trim();
+		return `SPC still has a ${riskText} centered on ${stateList}, but the setup has changed. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 	}
 	if (decision.postType === 'timing_refresh') {
-		return `The main concern remains a ${riskText} centered on ${stateList}, with the strongest window expected ${summary.timingText || 'later today'}. ${stormSentence}`;
+		return `The main concern remains a ${riskText} centered on ${stateList}. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 	}
-	return `SPC has issued a ${riskText} for severe storms centered on ${stateList}. ${stormSentence}`.trim();
+	return `SPC has issued a ${riskText} for severe storms centered on ${stateList}. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 }
 
-function buildCommentSecondParagraph(summary: SpcOutlookSummary, decision: SpcPostDecision, changeHint?: string | null): string {
+function buildCommentSecondParagraph(summary: SpcOutlookSummary, decision: SpcPostDecision, changeHint?: string | null, afdEnrichment?: SpcAfdEnrichment | null): string {
 	const stateList = getSpcFocusAreaText(summary);
 	const riskText = `Level ${summary.highestRiskNumber} ${riskLabelDisplay(summary.highestRiskLevel)} Risk`;
-	const stormSentence = buildStormSentence(summary, decision);
+	const stormSentence = buildStormSentence(summary, decision, afdEnrichment);
+	const afdSupport = buildAfdSupportSentences(summary, afdEnrichment).join(' ');
 	if (decision.reason === 'timing_refresh') {
-		return `The setup remains a ${riskText} centered on ${stateList}, with the main window now expected ${summary.timingText || 'later today'}. ${stormSentence}`;
+		return `SPC still has a ${riskText} centered on ${stateList}. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 	}
 	if (changeHint) {
-		return `SPC continues a ${riskText} centered on ${stateList}. ${changeHint.charAt(0).toUpperCase()}${changeHint.slice(1)}. ${stormSentence}`.trim();
+		return `SPC still has a ${riskText} centered on ${stateList}. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 	}
-	return `SPC continues a ${riskText} centered on ${stateList}. ${stormSentence}`;
+	return `SPC still has a ${riskText} centered on ${stateList}. ${stormSentence}${afdSupport ? ` ${afdSupport}` : ''}`.trim();
 }
 
-export function buildSpcPostText(summary: SpcOutlookSummary, decision: SpcPostDecision, recentOpenings: string[] = [], hashtagsEnabled = false, outputMode: SpcOutputMode = 'post', changeHint?: string | null): string {
+export function buildSpcPostText(
+	summary: SpcOutlookSummary,
+	decision: SpcPostDecision,
+	recentOpenings: string[] = [],
+	hashtagsEnabled = false,
+	outputMode: SpcOutputMode = 'post',
+	changeHint?: string | null,
+	afdEnrichment?: SpcAfdEnrichment | null,
+): string {
 	const opening = outputMode === 'comment'
 		? (buildOpeningCandidates(summary, decision, outputMode, changeHint)[0] ?? 'UPDATE: The severe weather setup is changing.')
 		: selectOpening(buildOpeningCandidates(summary, decision, outputMode, changeHint), recentOpenings);
 	const secondParagraph = outputMode === 'comment'
-		? buildCommentSecondParagraph(summary, decision, changeHint)
-		: buildBaseSecondParagraph(summary, decision);
+		? buildCommentSecondParagraph(summary, decision, changeHint, afdEnrichment)
+		: buildBaseSecondParagraph(summary, decision, afdEnrichment);
 	const hashtags = buildHashtags(summary, hashtagsEnabled, outputMode);
 	return [opening, secondParagraph, hashtags].filter(Boolean).join('\n\n');
 }
@@ -1289,6 +2306,62 @@ async function readSpcThread(env: Env, day: SpcOutlookDay): Promise<SpcThreadRec
 
 async function writeSpcThread(env: Env, day: SpcOutlookDay, thread: SpcThreadRecord): Promise<void> {
 	await env.WEATHER_KV.put(kvSpcThreadKey(day), JSON.stringify(thread), { expirationTtl: SPC_STATE_TTL_SECONDS });
+}
+
+async function readSpcDeferredAnchor(
+	env: Env,
+	day: Exclude<SpcOutlookDay, 1>,
+): Promise<SpcDeferredAnchorRecord | null> {
+	try {
+		const raw = await env.WEATHER_KV.get(kvSpcDeferredAnchorKey(day));
+		if (!raw) return null;
+		return JSON.parse(raw) as SpcDeferredAnchorRecord;
+	} catch {
+		return null;
+	}
+}
+
+async function writeSpcDeferredAnchor(
+	env: Env,
+	day: Exclude<SpcOutlookDay, 1>,
+	record: SpcDeferredAnchorRecord,
+): Promise<void> {
+	await env.WEATHER_KV.put(kvSpcDeferredAnchorKey(day), JSON.stringify(record), { expirationTtl: SPC_STATE_TTL_SECONDS });
+}
+
+async function clearSpcDeferredAnchor(env: Env, day: Exclude<SpcOutlookDay, 1>): Promise<void> {
+	await env.WEATHER_KV.delete(kvSpcDeferredAnchorKey(day));
+}
+
+function isDeferredAnchorReady(record: SpcDeferredAnchorRecord, nowMs: number): boolean {
+	const releaseAfterMs = parseIsoMs(record.releaseAfter);
+	if (releaseAfterMs != null) return nowMs >= releaseAfterMs;
+	const queuedAtMs = parseIsoMs(record.queuedAt);
+	return queuedAtMs != null && nowMs >= (queuedAtMs + SPC_DEFERRED_ANCHOR_DELAY_MS);
+}
+
+export async function readSpcThreadRecord(env: Env, day: SpcOutlookDay): Promise<SpcThreadRecord | null> {
+	return await readSpcThread(env, day);
+}
+
+export async function recordSpcThreadCommentActivity(
+	env: Env,
+	day: SpcOutlookDay,
+	options: {
+		nowMs?: number;
+		postId?: string | null;
+	} = {},
+): Promise<SpcThreadRecord | null> {
+	const thread = await readSpcThread(env, day);
+	if (!thread) return null;
+	if (options.postId && thread.postId !== options.postId) return null;
+	const updatedThread: SpcThreadRecord = {
+		...thread,
+		commentCount: Math.max(0, Number(thread.commentCount || 0)) + 1,
+		lastCommentAt: new Date(options.nowMs ?? Date.now()).toISOString(),
+	};
+	await writeSpcThread(env, day, updatedThread);
+	return updatedThread;
 }
 
 export async function readRecentSpcOpenings(env: Env): Promise<string[]> {
@@ -1380,11 +2453,19 @@ function buildPublishedSpcRecord(summary: SpcOutlookSummary, decision: SpcPostDe
 		highestRiskLevel: summary.highestRiskLevel,
 		highestRiskNumber: summary.highestRiskNumber,
 		affectedStates: summary.affectedStates,
+		secondaryStates: summary.secondaryStates,
 		stateFocusText: summary.stateFocusText ?? null,
+		secondaryFocusText: summary.secondaryFocusText ?? null,
+		primaryAreaSource: summary.primaryAreaSource ?? null,
 		primaryRegion: summary.primaryRegion,
 		hazardFocus: summary.hazardFocus,
 		hazardList: summary.hazardList ?? [],
+		primaryHazards: summary.primaryHazards ?? [],
+		secondaryHazards: summary.secondaryHazards ?? [],
 		stormMode: summary.stormMode ?? null,
+		stormEvolution: summary.stormEvolution ?? null,
+		laterStormMode: summary.laterStormMode ?? null,
+		stormEvolutionText: summary.stormEvolutionText ?? null,
 		notableText: summary.notableText ?? null,
 		tornadoProbability: summary.tornadoProbability ?? null,
 		windProbability: summary.windProbability ?? null,
@@ -1406,36 +2487,435 @@ function shouldUseThreadComment(summary: SpcOutlookSummary, decision: SpcPostDec
 	return true;
 }
 
-async function buildSpcFinalText(env: Env, summary: SpcOutlookSummary, decision: SpcPostDecision, options: { outputMode: SpcOutputMode; hashtagsEnabled: boolean; llmEnabled: boolean; recentOpenings: string[]; changeHint?: string | null; }): Promise<string> {
-	const { outputMode, hashtagsEnabled, llmEnabled, recentOpenings, changeHint } = options;
+async function buildSpcFinalText(env: Env, summary: SpcOutlookSummary, decision: SpcPostDecision, options: { outputMode: SpcOutputMode; hashtagsEnabled: boolean; llmEnabled: boolean; recentOpenings: string[]; changeHint?: string | null; afdEnrichment?: SpcAfdEnrichment | null; }): Promise<SpcFinalTextBuildResult> {
+	const { outputMode, hashtagsEnabled, llmEnabled, recentOpenings, changeHint, afdEnrichment } = options;
+	const validationFailures: string[] = [];
+	const recordValidationFailure = (
+		failureReason: string | null | undefined,
+		source: 'llm_output' | 'template_output',
+		attempt?: number,
+	): string => {
+		const debugCode = mapSpcValidationFailureToDebugCode(failureReason);
+		validationFailures.push(debugCode);
+		console.warn(
+			`[fb-spc] ${source} rejected reason=${debugCode}${attempt ? ` attempt=${attempt}` : ''}`
+			+ `${failureReason ? ` raw=${failureReason}` : ''}`,
+		);
+		return debugCode;
+	};
+	const payload = buildSpcLlmPayload({
+		outputMode,
+		outlookDay: summary.outlookDay,
+		postType: (decision.postType || defaultPostTypeForDay(summary.outlookDay)) as Exclude<SpcLlmPayload['post_type'], ''>,
+		riskLevel: summary.highestRiskLevel,
+		riskNumber: summary.highestRiskNumber,
+		primaryRegion: summary.primaryRegion,
+		states: summary.affectedStates,
+		secondaryStates: summary.secondaryStates ?? [],
+		stateFocusText: summary.stateFocusText ?? null,
+		secondaryAreaText: summary.secondaryFocusText ?? null,
+		hazardFocus: summary.hazardFocus,
+		hazardList: summary.hazardList ?? [],
+		primaryHazards: summary.primaryHazards ?? [],
+		secondaryHazards: summary.secondaryHazards ?? [],
+		hazardLine: buildSpcHazardLine(summary),
+		stormMode: summary.stormMode ?? null,
+		stormEvolution: summary.stormEvolution ?? false,
+		stormEvolutionText: summary.stormEvolutionText ?? null,
+		timingWindow: summary.timingText ?? null,
+		notableText: summary.notableText ?? null,
+		afdTimingHints: afdEnrichment?.timingHints ?? [],
+		afdStormModeHints: afdEnrichment?.stormModeHints ?? [],
+		afdHazardEmphasis: afdEnrichment?.hazardEmphasis ?? [],
+		afdUncertaintyHints: afdEnrichment?.uncertaintyHints ?? [],
+		afdConfidenceHints: afdEnrichment?.confidenceHints ?? [],
+		afdNotableBehaviorHints: afdEnrichment?.notableBehaviorHints ?? [],
+		trend: buildTrend(decision, summary),
+		changeHint,
+		recentOpenings,
+		hashtagsEnabled,
+	});
 	if (llmEnabled) {
-		const payload = buildSpcLlmPayload({
-			outputMode,
-			outlookDay: summary.outlookDay,
-			postType: (decision.postType || defaultPostTypeForDay(summary.outlookDay)) as Exclude<SpcLlmPayload['post_type'], ''>,
-			riskLevel: summary.highestRiskLevel,
-			riskNumber: summary.highestRiskNumber,
-			primaryRegion: summary.primaryRegion,
-			states: summary.affectedStates,
-			stateFocusText: summary.stateFocusText ?? null,
-			hazardFocus: summary.hazardFocus,
-			hazardList: summary.hazardList ?? [],
-			hazardLine: buildSpcHazardLine(summary),
-			stormMode: summary.stormMode ?? null,
-			timingWindow: summary.timingText ?? null,
-			notableText: summary.notableText ?? null,
-			trend: buildTrend(decision, summary),
-			changeHint,
-			recentOpenings,
-			hashtagsEnabled,
-		});
-		const llmCopy = await generateSpcLlmCopy(env, payload);
-		if (llmCopy) {
-			const hashtags = buildHashtags(summary, hashtagsEnabled, outputMode);
-			return [llmCopy, hashtags].filter(Boolean).join('\n\n');
+		for (let attempt = 1; attempt <= 2; attempt += 1) {
+			const llmResult = await generateSpcLlmCopy(env, payload);
+			if (llmResult.text) {
+				const hashtags = buildHashtags(summary, hashtagsEnabled, outputMode);
+				const llmMessage = [llmResult.text, hashtags].filter(Boolean).join('\n\n');
+				const llmValidation = validateSpcPublishMessage(llmMessage, payload);
+				if (llmValidation.valid) {
+					return {
+						message: llmMessage,
+						validationFailures: dedupeStrings(validationFailures),
+					};
+				}
+				recordValidationFailure(llmValidation.failureReason, 'llm_output', attempt);
+				continue;
+			}
+			if (llmResult.failureReason && llmResult.failureReason !== 'workers_ai_unavailable') {
+				recordValidationFailure(llmResult.failureReason, 'llm_output', attempt);
+			}
+			if (llmResult.failureReason === 'workers_ai_unavailable') {
+				break;
+			}
 		}
 	}
-	return buildSpcPostText(summary, decision, recentOpenings, hashtagsEnabled, outputMode, changeHint);
+	const templateMessage = buildSpcPostText(summary, decision, recentOpenings, hashtagsEnabled, outputMode, changeHint, afdEnrichment);
+	const templateValidation = validateSpcPublishMessage(templateMessage, payload);
+	if (!templateValidation.valid) {
+		const debugCode = recordValidationFailure(templateValidation.failureReason, 'template_output');
+		console.error(
+			`[fb-spc] template output invalid reason=${debugCode} `
+			+ `states=${payload.states.join('|')} mode=${outputMode} type=${payload.post_type} text=${JSON.stringify(stripSpcHashtagFooter(templateMessage))}`,
+		);
+		throw new Error(debugCode);
+	}
+	return {
+		message: templateMessage,
+		validationFailures: dedupeStrings(validationFailures),
+	};
+}
+
+type SpcCoveragePlan = {
+	entry: SpcDebugEntry;
+	intent: FacebookCoverageIntent | null;
+	blockedReason: string | null;
+	summary: SpcOutlookSummary | null;
+	decision: SpcPostDecision;
+	lastPost: PublishedSpcOutlookRecord | null;
+	outputMode: SpcOutputMode | null;
+	existingThread: SpcThreadRecord | null;
+	changeHint: string | null;
+	afdEnrichment: SpcAfdEnrichment | null;
+};
+
+function spcDeferredAnchorDayFromLane(
+	lane: FacebookCoverageIntent['lane'],
+): Exclude<SpcOutlookDay, 1> | null {
+	if (lane === 'spc_day2') return 2;
+	if (lane === 'spc_day3') return 3;
+	return null;
+}
+
+function spcLaneForDay(day: SpcOutlookDay): FacebookCoverageIntent['lane'] {
+	if (day === 1) return 'spc_day1';
+	if (day === 2) return 'spc_day2';
+	return 'spc_day3';
+}
+
+function spcCoverageIntentPriority(
+	summary: SpcOutlookSummary,
+	decision: SpcPostDecision,
+	outputMode: SpcOutputMode,
+	deferredAnchorReady = false,
+): number {
+	let priority = summary.outlookDay === 1 ? 760 : summary.outlookDay === 2 ? 620 : 580;
+	if (deferredAnchorReady && summary.outlookDay === 2) priority = Math.max(priority, 850);
+	if (deferredAnchorReady && summary.outlookDay === 3) priority = Math.max(priority, 840);
+	if (decision.reason === 'risk_upgrade' || decision.reason === 'probability_shift' || decision.reason === 'hazard_change' || decision.reason === 'region_shift') {
+		priority += 90;
+	} else if (decision.reason === 'new_slight_or_higher') {
+		priority += 50;
+	} else if (decision.reason === 'timing_refresh') {
+		priority += 20;
+	}
+	if (decision.postType === 'upgrade') priority += 15;
+	if (outputMode === 'comment') priority -= 30;
+	return priority;
+}
+
+function buildSpcCoverageIntent(
+	summary: SpcOutlookSummary,
+	decision: SpcPostDecision,
+	outputMode: SpcOutputMode,
+	targetPostId?: string | null,
+	options: {
+		reason?: string;
+		deferredAnchorReady?: boolean;
+	} = {},
+): FacebookCoverageIntent {
+	return {
+		lane: spcLaneForDay(summary.outlookDay),
+		action: outputMode === 'comment' ? 'comment' : 'post',
+		priority: spcCoverageIntentPriority(summary, decision, outputMode, options.deferredAnchorReady === true),
+		reason: options.reason ?? decision.reason,
+		summary: `SPC Day ${summary.outlookDay} ${decision.postType || 'outlook'} for ${summary.primaryRegion}`,
+		storyKey: summary.summaryHash,
+		targetPostId: targetPostId ?? null,
+	};
+}
+
+export async function queueDeferredSpcAnchorIfNeeded(
+	env: Env,
+	evaluation: FacebookCoverageEvaluation,
+	selectedIntent: FacebookCoverageIntent | null,
+	nowMs = Date.now(),
+): Promise<void> {
+	if (!selectedIntent || !evaluation.intent) return;
+	if (evaluation.lane === selectedIntent.lane) return;
+	const day = spcDeferredAnchorDayFromLane(evaluation.intent.lane);
+	if (!day) return;
+	if (evaluation.intent.action !== 'post') return;
+	if (evaluation.intent.reason !== 'new_slight_or_higher') return;
+	const latestSummary = await readLastSpcSummary(env, day);
+	if (!latestSummary) return;
+	const nextForecastDay = forecastDayKey(latestSummary);
+	if (!nextForecastDay) return;
+	const existing = await readSpcDeferredAnchor(env, day);
+	if (existing?.forecastDay === nextForecastDay) return;
+	const queuedAt = new Date(nowMs).toISOString();
+	await writeSpcDeferredAnchor(env, day, {
+		day,
+		queuedAt,
+		releaseAfter: new Date(nowMs + SPC_DEFERRED_ANCHOR_DELAY_MS).toISOString(),
+		forecastDay: nextForecastDay,
+		storyKey: evaluation.intent.storyKey ?? null,
+		suppressedByLane: selectedIntent.lane,
+	});
+}
+
+async function buildSpcCoveragePlanForDay(env: Env, day: SpcOutlookDay, nowMs = Date.now()): Promise<SpcCoveragePlan> {
+	const generatedAt = new Date(nowMs).toISOString();
+	const config = await readFbAutoPostConfig(env);
+	const lastPost = await readLastSpcPost(env, day);
+	const deferredAnchor = day === 1 ? null : await readSpcDeferredAnchor(env, day);
+	const disabledDecision: SpcPostDecision = { shouldPost: false, reason: 'below_threshold', postType: '' };
+	const emptyEntry = (error: string | null): SpcDebugEntry => ({
+		outlookDay: day,
+		generatedAt,
+		decision: disabledDecision,
+		summary: null,
+		lastPost,
+		plannedOutputMode: null,
+		messagePreview: null,
+		error,
+	});
+
+	if (!isCoverageEnabledForDay(config, day)) {
+		return {
+			entry: emptyEntry('coverage_disabled'),
+			intent: null,
+			blockedReason: 'coverage_disabled',
+			summary: null,
+			decision: disabledDecision,
+			lastPost,
+			outputMode: null,
+			existingThread: null,
+			changeHint: null,
+			afdEnrichment: null,
+		};
+	}
+	if (!env.FB_PAGE_ID || !env.FB_PAGE_ACCESS_TOKEN) {
+		return {
+			entry: emptyEntry('facebook_credentials_missing'),
+			intent: null,
+			blockedReason: 'facebook_credentials_missing',
+			summary: null,
+			decision: disabledDecision,
+			lastPost,
+			outputMode: null,
+			existingThread: null,
+			changeHint: null,
+			afdEnrichment: null,
+		};
+	}
+
+	try {
+		const summary = await fetchLatestSpcOutlookSummary(day);
+		await writeLastSpcSummary(env, day, summary);
+		const decision = buildSpcPostDecision(summary, lastPost, config, nowMs);
+		const mainAnchorEligible = day !== 1
+			&& decision.shouldPost
+			&& decision.reason === 'new_slight_or_higher'
+			&& decision.postType === defaultPostTypeForDay(day);
+		let activeDeferredAnchor = deferredAnchor;
+		if (day !== 1 && deferredAnchor) {
+			if (!mainAnchorEligible || deferredAnchor.forecastDay !== forecastDayKey(summary)) {
+				await clearSpcDeferredAnchor(env, day);
+				activeDeferredAnchor = null;
+			}
+		}
+		if (!decision.shouldPost) {
+			return {
+				entry: {
+					outlookDay: day,
+					generatedAt,
+					decision,
+					summary,
+					lastPost,
+					plannedOutputMode: null,
+					messagePreview: null,
+					error: null,
+				},
+				intent: null,
+				blockedReason: decision.reason,
+				summary,
+				decision,
+				lastPost,
+				outputMode: null,
+				existingThread: null,
+				changeHint: null,
+				afdEnrichment: null,
+			};
+		}
+
+		const scheduleGate = evaluateSpcPostingSchedule(summary, decision, lastPost, nowMs);
+		const deferredAnchorReady = !!activeDeferredAnchor && isDeferredAnchorReady(activeDeferredAnchor, nowMs);
+		if (!scheduleGate.allowed && !deferredAnchorReady) {
+			const blockedReason = activeDeferredAnchor ? 'deferred_anchor_waiting' : 'outside_post_window';
+			return {
+				entry: {
+					outlookDay: day,
+					generatedAt,
+					decision,
+					summary,
+					lastPost,
+					plannedOutputMode: null,
+					messagePreview: null,
+					error: blockedReason,
+				},
+				intent: null,
+				blockedReason,
+				summary,
+				decision,
+				lastPost,
+				outputMode: null,
+				existingThread: null,
+				changeHint: null,
+				afdEnrichment: null,
+			};
+		}
+
+		const deferredAnchorRelease = deferredAnchorReady && !scheduleGate.allowed;
+		const bypassGapGuards = shouldBypassSpcGapGuards(summary, decision, scheduleGate, deferredAnchorRelease);
+		const recentPostConflict = await readMostRecentSpcPostWithinGap(env, nowMs);
+		if (recentPostConflict && !bypassGapGuards) {
+			return {
+				entry: {
+					outlookDay: day,
+					generatedAt,
+					decision,
+					summary,
+					lastPost,
+					plannedOutputMode: null,
+					messagePreview: null,
+					error: 'recent_spc_post_gap',
+				},
+				intent: null,
+				blockedReason: 'recent_spc_post_gap',
+				summary,
+				decision,
+				lastPost,
+				outputMode: null,
+				existingThread: null,
+				changeHint: null,
+				afdEnrichment: null,
+			};
+		}
+
+		const recentGlobalActivity = await readRecentFacebookActivity(env, nowMs, SPC_GLOBAL_POST_GAP_MS);
+		if (recentGlobalActivity.withinGap && !bypassGapGuards) {
+			return {
+				entry: {
+					outlookDay: day,
+					generatedAt,
+					decision,
+					summary,
+					lastPost,
+					plannedOutputMode: null,
+					messagePreview: null,
+					error: 'recent_global_post_gap',
+				},
+				intent: null,
+				blockedReason: 'recent_global_post_gap',
+				summary,
+				decision,
+				lastPost,
+				outputMode: null,
+				existingThread: null,
+				changeHint: null,
+				afdEnrichment: null,
+			};
+		}
+
+		const existingThread = await readSpcThread(env, day);
+		const outputMode: SpcOutputMode = shouldUseThreadComment(summary, decision, existingThread, nowMs) ? 'comment' : 'post';
+		const changeHint = outputMode === 'comment' ? buildSpcCommentChangeHint(existingThread?.summary, summary) : null;
+		const afdEnrichment = await buildSpcAfdEnrichment(summary).catch(() => null);
+		const intent = buildSpcCoverageIntent(summary, decision, outputMode, existingThread?.postId ?? null, {
+			reason: deferredAnchorRelease ? 'deferred_anchor_release' : undefined,
+			deferredAnchorReady: deferredAnchorRelease,
+		});
+
+		return {
+			entry: {
+				outlookDay: day,
+				generatedAt,
+				decision,
+				summary,
+				afdEnrichment,
+				lastPost,
+				plannedOutputMode: outputMode,
+				messagePreview: null,
+				error: null,
+			},
+			intent,
+			blockedReason: null,
+			summary,
+			decision,
+			lastPost,
+			outputMode,
+			existingThread,
+			changeHint,
+			afdEnrichment,
+		};
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			entry: {
+				outlookDay: day,
+				generatedAt,
+				decision: disabledDecision,
+				summary: null,
+				lastPost,
+				plannedOutputMode: null,
+				messagePreview: null,
+				error: message,
+			},
+			intent: null,
+			blockedReason: message,
+			summary: null,
+			decision: disabledDecision,
+			lastPost,
+			outputMode: null,
+			existingThread: null,
+			changeHint: null,
+			afdEnrichment: null,
+		};
+	}
+}
+
+export async function evaluateSpcCoverageIntentForDay(
+	env: Env,
+	day: SpcOutlookDay,
+	nowMs = Date.now(),
+): Promise<FacebookCoverageEvaluation> {
+	const plan = await buildSpcCoveragePlanForDay(env, day, nowMs);
+	return {
+		lane: spcLaneForDay(day),
+		intent: plan.intent,
+		blockedReason: plan.blockedReason,
+	};
+}
+
+export async function evaluateSpcCoverageIntents(
+	env: Env,
+	nowMs = Date.now(),
+): Promise<FacebookCoverageEvaluation[]> {
+	const evaluations: FacebookCoverageEvaluation[] = [];
+	for (const day of [1, 2, 3] as const) {
+		evaluations.push(await evaluateSpcCoverageIntentForDay(env, day, nowMs));
+	}
+	return evaluations;
 }
 
 export async function readSpcDebugSnapshot(env: Env): Promise<SpcDebugSnapshot | null> {
@@ -1453,163 +2933,114 @@ async function writeSpcDebugSnapshot(env: Env, snapshot: SpcDebugSnapshot): Prom
 }
 
 export async function runSpcCoverageForDay(env: Env, day: SpcOutlookDay, nowMs = Date.now()): Promise<SpcDebugEntry> {
-	const generatedAt = new Date(nowMs).toISOString();
-	const config = await readFbAutoPostConfig(env);
-	const lastPost = await readLastSpcPost(env, day);
-	const disabledDecision: SpcPostDecision = { shouldPost: false, reason: 'below_threshold', postType: '' };
-
-	if (!isCoverageEnabledForDay(config, day)) {
+	const plan = await buildSpcCoveragePlanForDay(env, day, nowMs);
+	if (!plan.intent || !plan.summary || !plan.outputMode) {
+		if (plan.entry.error) {
+			console.log(`[fb-spc] day${day} skipping ${plan.entry.error}`);
+		}
 		return {
-			outlookDay: day,
-			generatedAt,
-			decision: disabledDecision,
-			summary: null,
-			lastPost,
-			plannedOutputMode: null,
-			messagePreview: null,
-			error: 'coverage_disabled',
-		};
-	}
-	if (!env.FB_PAGE_ID || !env.FB_PAGE_ACCESS_TOKEN) {
-		return {
-			outlookDay: day,
-			generatedAt,
-			decision: disabledDecision,
-			summary: null,
-			lastPost,
-			plannedOutputMode: null,
-			messagePreview: null,
-			error: 'facebook_credentials_missing',
+			...plan.entry,
+			validationFailures: plan.entry.validationFailures ?? [],
+			debugMessages: dedupeStrings([
+				...(plan.entry.debugMessages ?? []),
+				plan.blockedReason ?? '',
+				plan.entry.error ?? '',
+			]),
 		};
 	}
 
+	let validationFailures: string[] = [];
 	try {
-		const summary = await fetchLatestSpcOutlookSummary(day);
-		await writeLastSpcSummary(env, day, summary);
-		const decision = buildSpcPostDecision(summary, lastPost, config, nowMs);
-		if (!decision.shouldPost) {
-			const entry: SpcDebugEntry = {
-				outlookDay: day,
-				generatedAt,
-				decision,
-				summary,
-				lastPost,
-				plannedOutputMode: null,
-				messagePreview: null,
-				error: null,
-			};
-			console.log(`[fb-spc] day${day} skipping reason=${decision.reason} risk=${summary.highestRiskLevel} region=${summary.primaryRegion}`);
-			return entry;
-		}
-
-		const scheduleGate = evaluateSpcPostingSchedule(summary, decision, lastPost, nowMs);
-		if (!scheduleGate.allowed) {
-			console.log(`[fb-spc] day${day} skipping schedule=${scheduleGate.reason} window=${scheduleGate.windowLabel} risk=${summary.highestRiskLevel}`);
-			return {
-				outlookDay: day,
-				generatedAt,
-				decision,
-				summary,
-				lastPost,
-				plannedOutputMode: null,
-				messagePreview: null,
-				error: 'outside_post_window',
-			};
-		}
-
-		const recentPostConflict = await readMostRecentSpcPostWithinGap(env, nowMs);
-		if (recentPostConflict) {
-			console.log(`[fb-spc] day${day} skipping recent_gap previousDay=${recentPostConflict.outlookDay} postedAt=${recentPostConflict.postedAt}`);
-			return {
-				outlookDay: day,
-				generatedAt,
-				decision,
-				summary,
-				lastPost,
-				plannedOutputMode: null,
-				messagePreview: null,
-				error: 'recent_spc_post_gap',
-			};
-		}
-
+		const config = await readFbAutoPostConfig(env);
 		const recentOpenings = await readRecentSpcOpenings(env);
-		const existingThread = await readSpcThread(env, day);
-		const outputMode: SpcOutputMode = shouldUseThreadComment(summary, decision, existingThread, nowMs) ? 'comment' : 'post';
-		const changeHint = outputMode === 'comment' ? buildSpcCommentChangeHint(existingThread?.summary, summary) : null;
-		const message = await buildSpcFinalText(env, summary, decision, {
-			outputMode,
+		const finalText = await buildSpcFinalText(env, plan.summary, plan.decision, {
+			outputMode: plan.outputMode,
 			hashtagsEnabled: config.spcHashtagsEnabled !== false,
 			llmEnabled: config.spcLlmEnabled === true,
 			recentOpenings,
-			changeHint,
+			changeHint: plan.changeHint,
+			afdEnrichment: plan.afdEnrichment,
 		});
+		const message = finalText.message;
+		validationFailures = finalText.validationFailures;
 
-		if (outputMode === 'comment' && existingThread?.postId) {
-			const commentId = await commentOnFacebook(env, existingThread.postId, message);
+		if (plan.outputMode === 'comment' && plan.existingThread?.postId) {
+			const commentId = await commentOnFacebook(env, plan.existingThread.postId, message);
+			await recordLastFacebookActivity(env, nowMs);
 			await recordRecentSpcOpening(env, message);
-			const record = buildPublishedSpcRecord(summary, decision, existingThread.postId, nowMs, 'comment', commentId);
+			const record = buildPublishedSpcRecord(plan.summary, plan.decision, plan.existingThread.postId, nowMs, 'comment', commentId);
 			await writeLastSpcPost(env, day, record);
-			await writeLastSpcHash(env, day, summary.summaryHash);
+			await writeLastSpcHash(env, day, plan.summary.summaryHash);
+			if (day !== 1) {
+				await clearSpcDeferredAnchor(env, day);
+			}
 			const updatedThread: SpcThreadRecord = {
-				...existingThread,
-				issuedAt: summary.issuedAt,
-				hash: summary.summaryHash,
-				commentCount: existingThread.commentCount + 1,
+				...plan.existingThread,
+				issuedAt: plan.summary.issuedAt,
+				hash: plan.summary.summaryHash,
+				commentCount: plan.existingThread.commentCount + 1,
 				lastCommentAt: new Date(nowMs).toISOString(),
-				lastDecisionReason: decision.reason as Exclude<SpcPostReason, 'no_material_change' | 'below_threshold'>,
-				summary,
+				lastDecisionReason: plan.decision.reason as Exclude<SpcPostReason, 'no_material_change' | 'below_threshold'>,
+				summary: plan.summary,
 			};
 			await writeSpcThread(env, day, updatedThread);
-			console.log(`[fb-spc] day${day} posted comment=${commentId} post=${existingThread.postId}`);
+			console.log(
+				`[fb-spc] day${day} posted comment=${commentId} post=${plan.existingThread.postId} `
+				+ `reason=${plan.intent.reason}`,
+			);
 			return {
-				outlookDay: day,
-				generatedAt,
-				decision,
-				summary,
+				...plan.entry,
 				lastPost: record,
 				plannedOutputMode: 'comment',
 				messagePreview: message.slice(0, 320),
+				validationFailures,
+				debugMessages: dedupeStrings([plan.intent.reason, ...validationFailures]),
 				error: null,
 			};
 		}
 
-		const postId = await postToFacebook(env, message, summary.imageUrl || undefined);
+		const postId = await postToFacebook(env, message, plan.summary.imageUrl || undefined);
+		await recordLastFacebookActivity(env, nowMs);
 		await recordRecentSpcOpening(env, message);
-		const record = buildPublishedSpcRecord(summary, decision, postId, nowMs, 'post');
+		const record = buildPublishedSpcRecord(plan.summary, plan.decision, postId, nowMs, 'post');
 		await writeLastSpcPost(env, day, record);
-		await writeLastSpcHash(env, day, summary.summaryHash);
+		await writeLastSpcHash(env, day, plan.summary.summaryHash);
+		if (day !== 1) {
+			await clearSpcDeferredAnchor(env, day);
+		}
 		await writeSpcThread(env, day, {
 			postId,
 			outlookDay: day,
-			issuedAt: summary.issuedAt,
+			issuedAt: plan.summary.issuedAt,
 			publishedAt: new Date(nowMs).toISOString(),
-			hash: summary.summaryHash,
+			hash: plan.summary.summaryHash,
 			commentCount: 0,
 			lastCommentAt: null,
-			lastDecisionReason: decision.reason as Exclude<SpcPostReason, 'no_material_change' | 'below_threshold'>,
-			summary,
+			lastDecisionReason: plan.decision.reason as Exclude<SpcPostReason, 'no_material_change' | 'below_threshold'>,
+			summary: plan.summary,
 		});
-		console.log(`[fb-spc] day${day} posted ${record.postType} post=${postId} risk=${summary.highestRiskLevel} region=${summary.primaryRegion}`);
+		console.log(
+			`[fb-spc] day${day} posted ${record.postType} post=${postId} risk=${plan.summary.highestRiskLevel} `
+			+ `region=${plan.summary.primaryRegion} reason=${plan.intent.reason}`,
+		);
 		return {
-			outlookDay: day,
-			generatedAt,
-			decision,
-			summary,
+			...plan.entry,
 			lastPost: record,
 			plannedOutputMode: 'post',
 			messagePreview: message.slice(0, 320),
+			validationFailures,
+			debugMessages: dedupeStrings([plan.intent.reason, ...validationFailures]),
 			error: null,
 		};
 	} catch (err) {
+		const errorMessage = err instanceof Error ? err.message : String(err);
+		console.error(`[fb-spc] day${day} failed: ${errorMessage}`);
 		return {
-			outlookDay: day,
-			generatedAt,
-			decision: disabledDecision,
-			summary: null,
-			lastPost,
-			plannedOutputMode: null,
+			...plan.entry,
 			messagePreview: null,
-			error: err instanceof Error ? err.message : String(err),
+			validationFailures,
+			debugMessages: dedupeStrings([plan.intent.reason, ...validationFailures, errorMessage]),
+			error: errorMessage,
 		};
 	}
 }

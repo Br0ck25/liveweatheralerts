@@ -20,12 +20,9 @@ import {
 import {
 	matchingMetroNamesForAlert,
 	highestPriorityMetroRank,
-	isSevereThunderstormWarningEvent,
 } from './config';
 import {
-	hasSevereThunderstormDestructiveCriteria,
-	hasSevereThunderstormNearThresholdMetrics,
-	parseAlertNumericValue,
+	evaluateSmartHighImpactStandaloneSignal,
 	selectSevereWeatherFallbackCandidates,
 } from './auto-post';
 import { parseTimeMs } from '../alert-lifecycle';
@@ -124,57 +121,14 @@ function evaluateAdminFacebookPostDecision(
 	feature: any,
 	change: AlertChangeRecord,
 ): FacebookAutoPostDecision {
-	const event = String(feature?.properties?.event || change.event || '').trim();
-	const properties = feature?.properties ?? {};
-	const countyCount = Math.max(
-		extractFullCountyFipsCodes(feature, change).length,
-		dedupeStrings((change.countyCodes || []).map((countyCode) => String(countyCode || '').trim())).length,
-	);
-	const matchedMetroNames = matchingMetroNamesForAlert(feature, change);
-	const impactCategories = deriveAlertImpactCategories(
-		event,
-		String(properties.headline || ''),
-		String(properties.description || ''),
-	);
-	const noDecision = (reason: string): FacebookAutoPostDecision => ({
-		eligible: false,
-		threadAction: '',
-		reason,
-		mode: 'smart_high_impact',
-		matchedMetroNames,
-		countyCount,
-	});
-
-	if (!isWarningEvent(event)) return noDecision('not_warning');
-	if (!isAutoPostCandidateActive(feature)) return noDecision('inactive_or_expired');
-	if (!isAutoPostCandidateTimely(feature, change)) return noDecision('stale_alert');
-
-	if (isTornadoWarningEvent(event)) {
-		return { eligible: true, threadAction: '', reason: 'all_tornado_warnings', mode: 'smart_high_impact', matchedMetroNames, countyCount };
-	}
-	const tierOneReason = detectTierOneAutoPostReason(feature);
-	if (tierOneReason) {
-		return { eligible: true, threadAction: '', reason: tierOneReason, mode: 'smart_high_impact', matchedMetroNames, countyCount };
-	}
-	if (impactCategories.includes('fire')) {
-		if (!hasFireFamilyEscalationCriteria(feature)) return noDecision('fire_family_not_escalated');
-		return { eligible: true, threadAction: '', reason: 'fire_family_escalation', mode: 'smart_high_impact', matchedMetroNames, countyCount };
-	}
-	const passesBaseImpactGate = matchedMetroNames.length > 0 || countyCount >= 10;
-	if (!passesBaseImpactGate) return noDecision('impact_gate_not_met');
-	if (isSevereThunderstormWarningEvent(event)) {
-		const meetsPrimary = hasSevereThunderstormDestructiveCriteria(feature);
-		const meetsSoft = hasSevereThunderstormStrongWording(feature)
-			|| (matchedMetroNames.length > 0 && hasSevereThunderstormNearThresholdMetrics(feature));
-		if (!meetsPrimary && !meetsSoft) return noDecision('severe_thunderstorm_below_threshold');
-	}
+	const signal = evaluateSmartHighImpactStandaloneSignal(feature, change);
 	return {
-		eligible: true,
+		eligible: signal.eligible,
 		threadAction: '',
-		reason: matchedMetroNames.length > 0 ? 'major_metro_warning' : 'ten_county_warning',
+		reason: signal.reason,
 		mode: 'smart_high_impact',
-		matchedMetroNames,
-		countyCount,
+		matchedMetroNames: signal.matchedMetroNames,
+		countyCount: signal.countyCount,
 	};
 }
 
@@ -188,14 +142,31 @@ function describeAdminFacebookPostReason(
 	if (reason === 'tornado_emergency') return 'Tier 1 tornado emergency. Auto-post immediately.';
 	if (reason === 'pds_tornado_warning') return 'Particularly dangerous tornado wording pushes this into the top auto-post tier.';
 	if (reason === 'flash_flood_emergency') return 'Flash Flood Emergencies always auto-post.';
+	if (reason === 'extreme_wind_warning') return 'Extreme Wind Warnings always break out as standalone posts.';
+	if (reason === 'storm_surge_warning') return 'Storm Surge Warnings always break out as standalone posts.';
+	if (reason === 'hurricane_warning') return 'Hurricane Warnings always break out as standalone posts.';
 	if (reason === 'hurricane_landfall') return 'Hurricane landfall wording puts this in the highest auto-post tier.';
 	if (reason === 'fire_family_escalation') return 'Fire-family alerts only auto-post when wildfire or public-safety escalation is present.';
-	if (reason === 'major_metro_warning') {
+	if (reason === 'tier2_severe_thunderstorm_warning') {
 		return matchedMetroNames.length > 0
-			? `Major metro impact: ${matchedMetroNames.join(', ')}.`
-			: 'Major metro impact qualifies this warning to auto-post.';
+			? `Severe Thunderstorm Warning clears the metro threshold for ${matchedMetroNames.join(', ')}.`
+			: `Severe Thunderstorm Warning clears the regional threshold across ${countyCount} counties.`;
 	}
-	if (reason === 'ten_county_warning') return `${countyCount} counties meet the large-region impact gate.`;
+	if (reason === 'tier2_flood_warning') {
+		return matchedMetroNames.length > 0
+			? `Flood Warning carries significant impact wording and overlaps ${matchedMetroNames.join(', ')}.`
+			: `Flood Warning carries significant impact wording across ${countyCount} counties.`;
+	}
+	if (reason === 'tier2_winter_warning') {
+		return matchedMetroNames.length > 0
+			? `Winter warning meets the snow/ice threshold and overlaps ${matchedMetroNames.join(', ')}.`
+			: `Winter warning meets the snow/ice threshold across ${countyCount} counties.`;
+	}
+	if (reason === 'tier2_high_wind_warning') {
+		return matchedMetroNames.length > 0
+			? `High Wind Warning meets the metro wind threshold for ${matchedMetroNames.join(', ')}.`
+			: `High Wind Warning meets the regional wind threshold across ${countyCount} counties.`;
+	}
 	if (reason === 'severe_weather_fallback') {
 		return matchedMetroNames.length > 0
 			? `Top severe-weather fallback pick for ${matchedMetroNames.join(', ')}.`
@@ -207,11 +178,19 @@ function describeAdminFacebookPostReason(
 			: 'This severe setup is real, but higher-priority metro or larger-coverage severe posts would go first.';
 	}
 	if (reason === 'severe_thunderstorm_below_threshold') return 'Severe Thunderstorm Warnings need destructive wording, 70+ mph wind, 2"+ hail, or a near-threshold metro signal.';
+	if (reason === 'severe_thunderstorm_needs_population_or_coverage') return 'Severe Thunderstorm Warnings need a major metro overlap or at least 10 counties before they can break out.';
+	if (reason === 'high_wind_warning_below_threshold') return 'High Wind Warnings need 60+ mph gusts or strong outage/travel wording before they break out.';
+	if (reason === 'high_wind_warning_needs_population_or_coverage') return 'High Wind Warnings need a major metro overlap or at least 10 counties before they can break out.';
+	if (reason === 'winter_warning_below_threshold') return 'Winter warnings need 8"+ snow, 0.25"+ ice, or strong blizzard/travel wording before they break out.';
+	if (reason === 'winter_warning_needs_population_or_coverage') return 'Winter warnings need a major metro overlap or at least 10 counties before they can break out.';
+	if (reason === 'flood_warning_below_threshold') return 'Flood Warnings need significant flooding wording before they break out.';
+	if (reason === 'flood_warning_needs_population_or_coverage') return 'Flood Warnings need a major metro overlap or at least 10 counties before they can break out.';
 	if (reason === 'fire_family_not_escalated') return 'Red Flag and fire-family alerts do not auto-post from county count or metro reach alone.';
+	if (reason === 'tier3_minor_hazard') return 'Minor warning products stay off the standalone alert lane unless a human already seeded the story.';
 	if (reason === 'impact_gate_not_met') return 'Needs a major metro or at least 10 counties before it becomes auto-post eligible.';
 	if (reason === 'stale_alert') return 'Older than the 30-minute freshness window, so it would be skipped.';
 	if (reason === 'inactive_or_expired') return 'Already expired or no longer active.';
-	if (reason === 'not_warning') return 'Watches and non-warning alerts do not auto-post unless the severe-weather fallback batch rule promotes them.';
+	if (reason === 'not_warning') return 'Watches, advisories, and statements stay off the standalone alert lane.';
 	return 'Manual review recommended before posting.';
 }
 
@@ -416,10 +395,18 @@ export function buildAdminFacebookPostRankings(alerts: any[]): AdminFacebookPost
 			score = 700 + matchedMetroBonus + coverageBonus + recencyWeight;
 			if (record.decision.reason === 'all_tornado_warnings') score = 1000 + matchedMetroBonus + recencyWeight;
 			else if (record.decision.reason === 'tornado_emergency' || record.decision.reason === 'pds_tornado_warning') score = 980 + matchedMetroBonus + recencyWeight;
-			else if (record.decision.reason === 'flash_flood_emergency' || record.decision.reason === 'hurricane_landfall') score = 940 + matchedMetroBonus + recencyWeight;
+			else if (
+				record.decision.reason === 'flash_flood_emergency'
+				|| record.decision.reason === 'extreme_wind_warning'
+				|| record.decision.reason === 'storm_surge_warning'
+				|| record.decision.reason === 'hurricane_warning'
+				|| record.decision.reason === 'hurricane_landfall'
+			) score = 940 + matchedMetroBonus + recencyWeight;
 			else if (record.decision.reason === 'fire_family_escalation') score = 900 + matchedMetroBonus + recencyWeight;
-			else if (record.decision.reason === 'major_metro_warning') score = 820 + matchedMetroBonus + coverageBonus + recencyWeight;
-			else if (record.decision.reason === 'ten_county_warning') score = 760 + coverageBonus + recencyWeight;
+			else if (record.decision.reason === 'tier2_severe_thunderstorm_warning') score = 840 + matchedMetroBonus + coverageBonus + recencyWeight;
+			else if (record.decision.reason === 'tier2_flood_warning') score = 810 + matchedMetroBonus + coverageBonus + recencyWeight;
+			else if (record.decision.reason === 'tier2_winter_warning') score = 790 + matchedMetroBonus + coverageBonus + recencyWeight;
+			else if (record.decision.reason === 'tier2_high_wind_warning') score = 775 + matchedMetroBonus + coverageBonus + recencyWeight;
 		}
 
 		if (needsFallbackPromotion) {
@@ -439,6 +426,13 @@ export function buildAdminFacebookPostRankings(alerts: any[]): AdminFacebookPost
 			reasonCode = fallbackSelection.blockedByHigherTier ? 'severe_weather_fallback_not_selected' : 'not_warning';
 		} else if (!record.decision.eligible && (
 			record.decision.reason === 'severe_thunderstorm_below_threshold'
+			|| record.decision.reason === 'severe_thunderstorm_needs_population_or_coverage'
+			|| record.decision.reason === 'flood_warning_below_threshold'
+			|| record.decision.reason === 'flood_warning_needs_population_or_coverage'
+			|| record.decision.reason === 'winter_warning_below_threshold'
+			|| record.decision.reason === 'winter_warning_needs_population_or_coverage'
+			|| record.decision.reason === 'high_wind_warning_below_threshold'
+			|| record.decision.reason === 'high_wind_warning_needs_population_or_coverage'
 			|| record.decision.reason === 'fire_family_not_escalated'
 		)) {
 			bucket = 'manual_review';
@@ -447,6 +441,7 @@ export function buildAdminFacebookPostRankings(alerts: any[]): AdminFacebookPost
 		} else if (!record.decision.eligible && (
 			record.decision.reason === 'impact_gate_not_met'
 			|| record.decision.reason === 'not_warning'
+			|| record.decision.reason === 'tier3_minor_hazard'
 		)) {
 			score = watchAdvisoryScore;
 			if (score >= 210) {

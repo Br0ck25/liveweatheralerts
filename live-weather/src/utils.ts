@@ -136,6 +136,11 @@ function isLocationsImpactedParagraph(lines: string[]): boolean {
 		|| /^Cities impacted include:/i.test(first);
 }
 
+function isStructuredSectionParagraph(lines: string[]): boolean {
+	if (lines.length <= 1) return false;
+	return lines.every((line) => /^[A-Z0-9][A-Z0-9 ()\/-]{1,40}:\s+\S/.test(String(line || '').trim()));
+}
+
 function reflowWrappedAlertLines(lines: string[]): string[] {
 	if (lines.length <= 1) return lines.filter(Boolean);
 	const paragraphs: string[] = [];
@@ -198,6 +203,9 @@ export function reflowAlertParagraphs(text: string): string {
 			.filter(Boolean);
 		if (lines.length <= 1) return lines[0] || '';
 		if (isLocationsImpactedParagraph(lines)) {
+			return lines.join('\n');
+		}
+		if (isStructuredSectionParagraph(lines)) {
 			return lines.join('\n');
 		}
 		if (lines.some((line, index) => index > 0 && /^\s*-\s+/.test(line))) {
